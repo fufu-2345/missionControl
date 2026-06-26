@@ -34,4 +34,7 @@ Thumbs.db
 .idea/
 .vscode/
 
+# Mission Control extension build artifacts (source is tracked; out/ is generated)
+/extension/out/
+
 todo.md

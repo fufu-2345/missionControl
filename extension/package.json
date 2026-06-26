@@ -1,0 +1,99 @@
+{
+  "name": "mission-control",
+  "displayName": "Mission Control",
+  "description": "Automated Software Engineering Factory — VSCode extension",
+  "version": "0.0.1",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0",
+    "node": ">=18"
+  },
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "missioncontrol",
+          "title": "Mission Control",
+          "icon": "media/zap.svg"
+        }
+      ]
+    },
+    "views": {
+      "missioncontrol": [
+        {
+          "id": "missioncontrol.panel",
+          "name": "Mission Control",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "missioncontrol.install",
+        "title": "Mission Control: Install"
+      },
+      {
+        "command": "missioncontrol.setup",
+        "title": "Mission Control: Setup"
+      },
+      {
+        "command": "missioncontrol.start",
+        "title": "Mission Control: Start"
+      },
+      {
+        "command": "missioncontrol.status",
+        "title": "Mission Control: Status"
+      },
+      {
+        "command": "missioncontrol.approve",
+        "title": "Mission Control: Approve"
+      },
+      {
+        "command": "missioncontrol.pause",
+        "title": "Mission Control: Pause"
+      },
+      {
+        "command": "missioncontrol.budget",
+        "title": "Mission Control: Budget"
+      },
+      {
+        "command": "missioncontrol.config",
+        "title": "Mission Control: Config"
+      },
+      {
+        "command": "missioncontrol.reset",
+        "title": "Mission Control: Reset"
+      },
+      {
+        "command": "missioncontrol.skills",
+        "title": "Mission Control: View Skills"
+      },
+      {
+        "command": "missioncontrol.dashboard",
+        "title": "Mission Control: Open Dashboard"
+      },
+      {
+        "command": "missioncontrol.claude",
+        "title": "Mission Control: Open Claude"
+      }
+    ]
+  },
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "ws": "^8.21.0"
+  }
+}
