@@ -235,13 +235,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   <div class="hero">
     <div class="logo">⚡</div>
     <h2>Mission Control</h2>
-    <p>Frontend-only build<br>เปิด Claude Code ในโปรเจกต์ soulbrew<br>(ใช้ <code>~/Desktop/soulbrew/.claude</code>)</p>
+    <p>Frontend-only build<br>เปิด Claude Code chat ในจอหลัก</p>
     <button class="btn primary" data-cmd="missioncontrol.claude">💬 Open Claude</button>
     <button class="btn primary" data-cmd="missioncontrol.setup">Setup</button>
   </div>
 <script>
   const vscode = acquireVsCodeApi();
-  document.querySelectorAll('.btn').forEach((b) =>
+  document.querySelectorAll('.btn[data-cmd]').forEach((b) =>
     b.addEventListener('click', () =>
       vscode.postMessage({ type: 'run', command: b.dataset.cmd })));
   vscode.postMessage({ type: 'ready' });
@@ -254,15 +254,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
    *  live on the dashboard now; sidebar is just navigation + state badge. */
   private panelHtml(): string {
     return `<!DOCTYPE html><html><head>${this.head()}</head><body>
-  <div class="status">
-    <span class="dot" id="dot"></span>
-    <span id="statusText">checking backend…</span>
-  </div>
-  <div class="project-label">
-    <div>Project</div>
-    <div class="name" id="projectName">(none selected)</div>
-  </div>
-
   <button class="btn primary" id="openDashboard">Open Dashboard</button>
   <button class="btn primary" data-cmd="missioncontrol.claude">💬 Open Claude</button>
 
@@ -282,46 +273,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   document.getElementById('openDashboard').addEventListener('click', () => {
     vscode.postMessage({ type: 'open_dashboard' });
   });
-
-  // Track project list so we can resolve pid → name when the active
-  // selection changes externally (dashboard dropdown / programmatic).
-  let projects = [];
-  let currentPid = null;
-
-  function refreshNameLabel() {
-    const label = document.getElementById('projectName');
-    if (!label) return;
-    if (!currentPid) {
-      label.textContent = '(active project)';
-      return;
-    }
-    const hit = projects.find((p) => p.id === currentPid);
-    label.textContent = hit ? hit.name : currentPid;
-  }
-
-  window.addEventListener('message', (e) => {
-    const m = e.data;
-    if (!m || typeof m.type !== 'string') return;
-    if (m.type === 'status') {
-      const dot = document.getElementById('dot');
-      const txt = document.getElementById('statusText');
-      if (dot) dot.className = 'dot ' + (m.online ? 'on' : 'off');
-      if (txt) txt.textContent = m.online ? 'Backend: Running' : 'Backend: Stopped';
-    } else if (m.type === 'projects') {
-      projects = Array.isArray(m.projects) ? m.projects : [];
-      currentPid = m.current || null;
-      if (m.error) {
-        document.getElementById('projectName').textContent = '(backend offline)';
-        return;
-      }
-      refreshNameLabel();
-    } else if (m.type === 'currentProject') {
-      currentPid = m.current || null;
-      refreshNameLabel();
-    }
-  });
-
-  vscode.postMessage({ type: 'ready' });
 </script>
 </body></html>`;
   }
