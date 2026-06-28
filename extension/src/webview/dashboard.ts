@@ -1,12 +1,15 @@
 import * as vscode from "vscode";
 
-import { ApiError, SERVER_URL, api, notifyBackendDisabled } from "../api";
+import { ApiError, BACKEND_DISABLED, SERVER_URL, api, notifyBackendDisabled } from "../api";
+import { isPortUp } from "../commands/mawServe";
 import {
   PROJECT_STATE_KEY,
   getCurrentProjectId,
   onProjectChange,
   setCurrentProjectId,
 } from "../projectState";
+import { MONTHLY_CAP_KEY, computeUsage, localMonthKey, sumByPrefix } from "../usage";
+import { listSkills } from "./skills";
 
 type Project = {
   id: string;
@@ -73,7 +76,7 @@ export function openDashboardPanel(
   // (cheap GETs) so they self-heal within STATUS_POLL_MS (bug-audit #4/#5).
   const refreshLiveCards = async () => {
     await Promise.all([
-      pushBudget(panel),
+      pushBudget(panel, context),
       pushSkillCount(panel),
       pushMemoryShare(panel),
     ]);
@@ -150,7 +153,7 @@ export function openDashboardPanel(
         setCurrentProjectId(pid || null);
         await context.globalState.update(PROJECT_STATE_KEY, pid || null);
         // Budget + memory_share are per-project → re-fetch for the new pid.
-        await Promise.all([pushBudget(panel), pushMemoryShare(panel)]);
+        await Promise.all([pushBudget(panel, context), pushMemoryShare(panel)]);
         return;
       }
       case "toggle_memory_share": {
@@ -204,8 +207,12 @@ export function pushDashboardEvent(event: string, data: unknown): void {
 }
 
 async function pushStatus(panel: vscode.WebviewPanel): Promise<boolean> {
-  // frontend-only build — no backend to ping. Always report offline; no fetch.
-  const online = false;
+  // frontend-only build — no Mission Control backend. "online" now reflects the
+  // local oracle/maw stack: green when maw (:3456) or oracle (:47778) answers.
+  // The pollTick self-heal also keys off this, so the live cards refresh once
+  // either server comes up.
+  const [maw, oracle] = await Promise.all([isPortUp(3456), isPortUp(47778)]);
+  const online = maw || oracle;
   panel.webview.postMessage({ type: "status", online });
   return online;
 }
@@ -213,6 +220,18 @@ async function pushStatus(panel: vscode.WebviewPanel): Promise<boolean> {
 /** Returns true when the project list loaded successfully (used by the
  *  offline→online self-heal poll so a boot-time fetch failure recovers). */
 async function pushProjects(panel: vscode.WebviewPanel): Promise<boolean> {
+  // Frontend-only build: there is no /projects endpoint. Render the offline
+  // placeholder ONCE and report "loaded" so the 10s poll settles into
+  // refreshLiveCards() instead of re-posting an empty list every tick.
+  if (BACKEND_DISABLED) {
+    panel.webview.postMessage({
+      type: "projects",
+      projects: [],
+      current: getCurrentProjectId(),
+      error: "frontend-only build",
+    });
+    return true;
+  }
   try {
     const resp = await api<{ active_id: string | null; projects: Project[] }>(
       "/projects",
@@ -245,16 +264,23 @@ async function pushProjects(panel: vscode.WebviewPanel): Promise<boolean> {
   }
 }
 
-async function pushBudget(panel: vscode.WebviewPanel): Promise<void> {
+async function pushBudget(
+  panel: vscode.WebviewPanel,
+  context: vscode.ExtensionContext,
+): Promise<void> {
   try {
-    const b = await api<{
-      spent_usd: number;
-      cap_usd: number | null;
-      over_cap: boolean;
-    }>("/budget");
-    panel.webview.postMessage({ type: "budget", ...b });
+    // Real Claude Code spend this calendar month, computed from local
+    // transcripts (no backend). Cap is a user-set monthly target in globalState.
+    const u = await computeUsage();
+    const month = sumByPrefix(u, localMonthKey());
+    const cap = context.globalState.get<number>(MONTHLY_CAP_KEY) ?? null;
+    panel.webview.postMessage({
+      type: "budget",
+      spent_usd: month,
+      cap_usd: cap,
+      over_cap: cap != null && month > cap,
+    });
   } catch {
-    // bug-audit #8: include over_cap so the payload matches BudgetResponse.
     panel.webview.postMessage({
       type: "budget",
       spent_usd: 0,
@@ -297,12 +323,10 @@ async function pushMemoryShare(panel: vscode.WebviewPanel): Promise<void> {
 
 async function pushSkillCount(panel: vscode.WebviewPanel): Promise<void> {
   try {
-    const r = await api<{ skills: { enabled?: boolean }[] }>("/skills");
-    const total = r.skills?.length ?? 0;
-    const enabled = (r.skills ?? []).filter(
-      (s) => s.enabled === undefined || s.enabled === true,
-    ).length;
-    panel.webview.postMessage({ type: "skill_count", total, enabled });
+    // Local: count ~/.claude/skills/*/SKILL.md off disk (same source the Skills
+    // panel uses). They're all "active" on disk, so enabled == total.
+    const n = listSkills().length;
+    panel.webview.postMessage({ type: "skill_count", total: n, enabled: n });
   } catch {
     panel.webview.postMessage({ type: "skill_count", total: 0, enabled: 0 });
   }
@@ -546,13 +570,13 @@ function renderHtml(): string {
 
     <div class="group-label">Workflow</div>
     <div class="grid cols-3">
-      <button class="tile primary" type="button" onclick="run('missioncontrol.start')">
-        <div class="title">▶ Start</div>
-        <div class="sub">เริ่ม planning chat → lock brief → Sprint A (research + ideation)</div>
+      <button class="tile primary" type="button" onclick="run('missioncontrol.claude')">
+        <div class="title">💬 Open Claude</div>
+        <div class="sub">เปิด Claude Code CLI ในเทอร์มินัล (soulbrew)</div>
       </button>
       <button class="tile" type="button" onclick="run('missioncontrol.status')">
         <div class="title">View Status</div>
-        <div class="sub" id="statusSub">one-line state of the active sprint</div>
+        <div class="sub" id="statusSub">maw · oracle · git — เช็คสถานะ local</div>
       </button>
       <button class="tile" type="button" onclick="run('missioncontrol.budget')">
         <div class="title">Budget</div>
@@ -560,15 +584,15 @@ function renderHtml(): string {
       </button>
     </div>
 
-    <div class="group-label">Sprint Control</div>
+    <div class="group-label">Sprint Control · disabled (needs backend)</div>
     <div class="grid cols-2">
       <button class="tile" type="button" onclick="run('missioncontrol.approve')">
         <div class="title">Approve ideas</div>
-        <div class="sub" id="approveSub">เปิดแผง swipe — เลือก ideas → trigger Sprint B</div>
+        <div class="sub" id="approveSub">ปิดใช้งานใน frontend-only build</div>
       </button>
       <button class="tile" type="button" onclick="run('missioncontrol.pause')">
         <div class="title">Pause / Resume</div>
-        <div class="sub">หยุดหรือเรียกคืน sprint ปัจจุบัน</div>
+        <div class="sub">ปิดใช้งานใน frontend-only build</div>
       </button>
     </div>
 
@@ -576,19 +600,19 @@ function renderHtml(): string {
     <div class="grid cols-4">
       <button class="tile" type="button" onclick="run('missioncontrol.skills')">
         <div class="title">Skills</div>
-        <div class="sub" id="skillsSub">view + toggle</div>
+        <div class="sub" id="skillsSub">view</div>
       </button>
       <button class="tile" type="button" onclick="run('missioncontrol.config')">
         <div class="title">Config</div>
-        <div class="sub">runtime knobs</div>
+        <div class="sub">แก้ ~/.mission-control/config.json</div>
       </button>
       <button class="tile" type="button" onclick="run('missioncontrol.setup')">
         <div class="title">Setup</div>
-        <div class="sub">re-enter GitHub PAT</div>
+        <div class="sub">ปิดใช้งาน (frontend-only)</div>
       </button>
       <button class="tile" type="button" onclick="run('missioncontrol.reset')">
         <div class="title">Reset</div>
-        <div class="sub">wipe Redis + workspace</div>
+        <div class="sub">ปิดใช้งาน (frontend-only)</div>
       </button>
     </div>
 

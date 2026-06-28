@@ -1,0 +1,8 @@
+name: carbon
+description: Carbon team — core/cli/tests crew anchored at bob-oracle. Runnable from the soulbrew root; project is pinned so it always targets bob-oracle regardless of cwd.
+session: carbon
+project: fufu-2345/bob-oracle
+members:
+  - role: core
+  - role: cli
+  - role: tests

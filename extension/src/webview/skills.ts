@@ -1,43 +1,31 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
 import * as vscode from "vscode";
 
-import { api, notifyBackendDisabled } from "../api";
+// Frontend-only build: skills are read straight off disk from
+// ~/.claude/skills/<name>/SKILL.md — no backend involved. Each skill is a
+// directory containing a SKILL.md whose YAML frontmatter carries `name` and
+// `description`. The panel shows them as a grid (4 per row) grouped by
+// category; hovering a card pops up its description, clicking opens the file.
+const SKILLS_DIR = path.join(os.homedir(), ".claude", "skills");
 
 export type SkillSummary = {
   name: string;
   description: string;
+  category: string | null;
   path: string;
-  agents: string[];
-  category: string | null;
-  enabled: boolean;
-};
-
-export type SkillDetail = SkillSummary & { body: string };
-
-export type PendingSkill = {
-  pending_id: string;
-  name: string;
-  description: string;
-  agents: string[];
-  category: string | null;
-  source: string | null;
-  body?: string | null;
 };
 
 // Singleton — only one Skills panel makes sense at a time. Cleared on
 // onDidDispose so the next openSkillsPanel call creates a fresh one.
-// On dev hot-reload the module unloads and this resets to undefined.
 let _panel: vscode.WebviewPanel | undefined;
 
-/**
- * Open (or reveal) the Skills viewer panel.
- *
- * `projectId` is captured at open time and sent as `X-Project-Id` on every
- * /skills GET so a mid-panel project switch doesn't misroute fetches.
- * Skills are global on the backend, but we preserve the header for parity
- * with other webviews.
- */
+/** Open (or reveal) the Skills viewer panel. `projectId` is accepted for
+ *  call-site parity with the other webviews but unused — skills are local. */
 export function openSkillsPanel(
-  projectId: string | null = null,
+  _projectId: string | null = null,
 ): vscode.WebviewPanel {
   if (_panel) {
     _panel.reveal();
@@ -54,95 +42,31 @@ export function openSkillsPanel(
     _panel = undefined;
   });
 
-  const pidHeaders: Record<string, string> = projectId
-    ? { "X-Project-Id": projectId }
-    : {};
+  // Cached so open_skill can resolve a name → on-disk path without rescanning.
+  let skills = listSkills();
 
   panel.webview.html = renderShell();
-  void loadList(panel, pidHeaders);
-  void loadPending(panel, pidHeaders);
+  panel.webview.postMessage({ type: "render_list", skills });
 
-  panel.webview.onDidReceiveMessage(async (msg) => {
+  panel.webview.onDidReceiveMessage((msg) => {
     if (msg?.type === "close") {
       panel.dispose();
       return;
     }
     if (msg?.type === "reload") {
-      await loadList(panel, pidHeaders);
-      await loadPending(panel, pidHeaders);
+      skills = listSkills();
+      panel.webview.postMessage({ type: "render_list", skills });
       return;
     }
-    if (msg?.type === "approve_pending" && typeof msg.pendingId === "string") {
-      try {
-        const r = await api<{ ok: boolean; name?: string; reason?: string }>(
-          `/skills/pending/${encodeURIComponent(msg.pendingId)}/approve`,
-          { method: "POST", headers: pidHeaders },
-        );
-        if (r.ok) {
-          vscode.window.showInformationMessage(
-            `Mission Control: approved skill '${r.name ?? msg.pendingId}'`,
-          );
-        } else {
-          vscode.window.showWarningMessage(
-            `Mission Control: skill not written — ${r.reason ?? "may already exist"}`,
-          );
-        }
-        // Refresh both — approved proposal leaves pending + enters active list.
-        await loadPending(panel, pidHeaders);
-        await loadList(panel, pidHeaders);
-      } catch {
-        // Frontend-only build — backend disabled. Stay silent (no error popup);
-        // surface the one debounced friendly notice for this user-initiated action.
-        notifyBackendDisabled();
-      }
-      return;
-    }
-    if (msg?.type === "reject_pending" && typeof msg.pendingId === "string") {
-      try {
-        await api(`/skills/pending/${encodeURIComponent(msg.pendingId)}/reject`, {
-          method: "POST",
-          headers: pidHeaders,
-        });
-        await loadPending(panel, pidHeaders);
-      } catch {
-        // Frontend-only build — backend disabled. Silent no-op (no error popup).
-      }
-      return;
-    }
-    if (msg?.type === "select_skill" && typeof msg.name === "string") {
-      try {
-        const detail = await api<SkillDetail>(
-          `/skills/${encodeURIComponent(msg.name)}`,
-          { headers: pidHeaders },
-        );
-        panel.webview.postMessage({ type: "render_body", detail });
-      } catch {
-        // Frontend-only build — backend disabled. Silent no-op (no error popup,
-        // no in-panel error banner); the viewer simply stays as-is / empty.
-      }
-      return;
-    }
-    if (
-      msg?.type === "toggle_skill" &&
-      typeof msg.name === "string" &&
-      typeof msg.enabled === "boolean"
-    ) {
-      try {
-        await api<{ name: string; enabled: boolean }>(
-          `/skills/${encodeURIComponent(msg.name)}/enabled`,
-          {
-            method: "POST",
-            body: JSON.stringify({ enabled: msg.enabled }),
-            headers: pidHeaders,
-          },
-        );
-        // Re-fetch list so disabled-state across all rows stays consistent;
-        // also re-pushes the selected body if still visible (server-of-truth).
-        await loadList(panel, pidHeaders);
-      } catch {
-        // Frontend-only build — backend disabled. Silent no-op (no error popup,
-        // no in-panel error banner). The toggle simply has no effect.
-      }
+    if (msg?.type === "open_skill" && typeof msg.name === "string") {
+      const skill = skills.find((s) => s.name === msg.name);
+      if (!skill) return;
+      // Open the full SKILL.md beside the panel (preview tab is reused, so
+      // repeated clicks don't stack editors).
+      void vscode.window.showTextDocument(vscode.Uri.file(skill.path), {
+        viewColumn: vscode.ViewColumn.Beside,
+        preview: true,
+      });
       return;
     }
   });
@@ -150,53 +74,90 @@ export function openSkillsPanel(
   return panel;
 }
 
-async function loadList(
-  panel: vscode.WebviewPanel,
-  pidHeaders: Record<string, string>,
-): Promise<void> {
+// ── Disk reading ───────────────────────────────────────────────────────────
+
+/** Scan each ~/.claude/skills/<dir>/SKILL.md and return one summary per dir.
+ *  Exported so the dashboard's Skills tile can show a real on-disk count. */
+export function listSkills(): SkillSummary[] {
+  let entries: fs.Dirent[];
   try {
-    const resp = await api<{ skills: SkillSummary[] }>("/skills", {
-      headers: pidHeaders,
-    });
-    panel.webview.postMessage({
-      type: "render_list",
-      skills: resp.skills ?? [],
-    });
+    entries = fs.readdirSync(SKILLS_DIR, { withFileTypes: true });
   } catch {
-    // Frontend-only build — backend disabled. Render an empty list silently
-    // (no error popup, no in-panel error banner).
-    panel.webview.postMessage({ type: "render_list", skills: [] });
+    return [];
   }
+  const out: SkillSummary[] = [];
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const skillPath = path.join(SKILLS_DIR, e.name, "SKILL.md");
+    let raw: string;
+    try {
+      raw = fs.readFileSync(skillPath, "utf8");
+    } catch {
+      continue; // dir without a SKILL.md — not a skill
+    }
+    const meta = parseFrontmatter(splitFrontmatter(raw).fm);
+    const rawDesc = meta.description ?? "";
+    const { category, text } = splitCategory(rawDesc);
+    out.push({
+      name: meta.name || e.name,
+      description: text || rawDesc,
+      category,
+      path: skillPath,
+    });
+  }
+  out.sort((a, b) => a.name.localeCompare(b.name));
+  return out;
 }
 
-/** Fetch staged skill proposals (24h TTL). Renders a banner above the
- *  active-skills list so a proposal whose WS toast was missed/dismissed can
- *  still be approved or rejected before it expires (bug-audit unfinished #3).
- *  Silent on failure — pending review is a convenience, not critical path. */
-async function loadPending(
-  panel: vscode.WebviewPanel,
-  pidHeaders: Record<string, string>,
-): Promise<void> {
-  try {
-    const resp = await api<{ pending: PendingSkill[] }>("/skills/pending", {
-      headers: pidHeaders,
-    });
-    panel.webview.postMessage({
-      type: "render_pending",
-      pending: resp.pending ?? [],
-    });
-  } catch {
-    panel.webview.postMessage({ type: "render_pending", pending: [] });
-  }
+/** Split a markdown file into its leading `---`-fenced frontmatter and body. */
+function splitFrontmatter(raw: string): { fm: string; body: string } {
+  const m = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  return m ? { fm: m[1], body: m[2] } : { fm: "", body: raw };
 }
 
-function escape(s: unknown): string {
-  return String(s ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+/** Minimal single-line YAML reader for the two keys we need. */
+function parseFrontmatter(fm: string): { name?: string; description?: string } {
+  const out: { name?: string; description?: string } = {};
+  for (const key of ["name", "description"] as const) {
+    const m = fm.match(new RegExp(`^${key}:[ \\t]*(.*)$`, "m"));
+    if (m) out[key] = unquoteYaml(m[1].trim());
+  }
+  return out;
 }
+
+function unquoteYaml(v: string): string {
+  if (v.length >= 2 && v.startsWith("'") && v.endsWith("'")) {
+    return v.slice(1, -1).replace(/''/g, "'");
+  }
+  if (v.length >= 2 && v.startsWith('"') && v.endsWith('"')) {
+    return v.slice(1, -1).replace(/\\"/g, '"');
+  }
+  return v;
+}
+
+/** Pull the leading "[standard]" tag off a description and strip the
+ *  "vX.Y.Z G-SKLL | " version preamble these skills embed, leaving the
+ *  human-readable description. Non-tagged descriptions pass through. */
+function splitCategory(desc: string): { category: string | null; text: string } {
+  let category: string | null = null;
+  let text = desc;
+  const tag = text.match(/^\s*\[([^\]]+)\]\s*/);
+  if (tag) {
+    category = tag[1];
+    text = text.slice(tag[0].length);
+  }
+  const bar = text.match(/G-SKLL\s*\|\s*([\s\S]*)$/);
+  if (bar) text = bar[1];
+  text = text.trim();
+  // Some descriptions wrap their prose in literal quotes after the "|" — drop a
+  // balanced surrounding pair so the preview reads cleanly.
+  if (text.length >= 2 && text.startsWith('"') && text.endsWith('"')) {
+    text = text.slice(1, -1).trim();
+  }
+  return { category, text };
+}
+
+// ── Webview shell ────────────────────────────────────────────────────────────
 
 function renderShell(): string {
   return `<!DOCTYPE html>
@@ -219,9 +180,9 @@ function renderShell(): string {
     justify-content: space-between;
     padding: 10px 16px;
     border-bottom: 1px solid var(--vscode-panel-border);
-    background: var(--vscode-editor-background);
   }
   .topbar h1 { font-size: 14px; margin: 0; font-weight: 600; }
+  .topbar .count { font-size: 11px; opacity: 0.6; margin-left: 8px; font-weight: 400; }
   .topbar .actions { display: flex; gap: 6px; }
   .topbar button {
     background: transparent;
@@ -233,310 +194,171 @@ function renderShell(): string {
     cursor: pointer;
   }
   .topbar button:hover { background: var(--vscode-list-hoverBackground); }
-  .split { display: flex; flex: 1; overflow: hidden; }
-  .list {
-    width: 280px;
-    overflow-y: auto;
-    border-right: 1px solid var(--vscode-panel-border);
-    padding: 8px;
-    box-sizing: border-box;
+
+  .content { flex: 1; overflow-y: auto; padding: 6px 18px 28px; box-sizing: border-box; }
+
+  /* A category block: colored header + a 4-column grid of cards. The accent
+     color is supplied per-section via the inline --c custom property. */
+  .section { margin-top: 18px; }
+  .section-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .section-head .bar { width: 4px; height: 18px; border-radius: 2px; background: var(--c, #8b949e); }
+  .section-head .label {
+    font-size: 12px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.09em; color: var(--c, #8b949e);
   }
-  .item {
-    padding: 10px;
+  .section-head .n { font-size: 11px; opacity: 0.55; }
+  .section-head .line { flex: 1; height: 1px; background: var(--vscode-panel-border); opacity: 0.6; }
+
+  .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+  .card {
+    min-height: 40px;
+    display: flex;
+    align-items: center;
+    padding: 8px 10px;
     border-radius: 6px;
     cursor: pointer;
-    margin-bottom: 6px;
     background: var(--vscode-editor-inactiveSelectionBackground);
-    border: 1px solid transparent;
-  }
-  .item:hover { background: var(--vscode-list-hoverBackground); }
-  .item.active { border-color: var(--vscode-focusBorder); }
-  .item .row { display: flex; align-items: flex-start; gap: 8px; }
-  .item .row > .meta { flex: 1; min-width: 0; }
-  .item .name { font-weight: 600; font-size: 13px; }
-  .item.disabled .name,
-  .item.disabled .desc { text-decoration: line-through; opacity: 0.55; }
-  .item .desc {
-    font-size: 11px;
-    opacity: 0.75;
-    line-height: 1.4;
-    margin-top: 4px;
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-  /* Toggle switch — pure CSS, no extra deps. ~32px wide. */
-  .toggle {
-    position: relative;
-    display: inline-block;
-    width: 32px;
-    height: 18px;
-    flex-shrink: 0;
-    cursor: pointer;
-  }
-  .toggle input { opacity: 0; width: 0; height: 0; }
-  .toggle .slider {
-    position: absolute;
-    inset: 0;
-    background: var(--vscode-input-background);
     border: 1px solid var(--vscode-panel-border);
-    border-radius: 9px;
-    transition: background 0.15s;
+    border-left: 3px solid var(--c, #8b949e);
+    box-sizing: border-box;
+    transition: background 0.1s;
   }
-  .toggle .slider::before {
-    content: "";
-    position: absolute;
-    top: 1px; left: 1px;
-    width: 14px; height: 14px;
-    background: var(--vscode-foreground);
-    border-radius: 50%;
-    opacity: 0.5;
-    transition: transform 0.15s, opacity 0.15s;
+  .card:hover { background: var(--vscode-list-hoverBackground); }
+  .card .cname {
+    font-size: 12px; font-weight: 600; line-height: 1.3;
+    word-break: break-word;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   }
-  .toggle input:checked + .slider {
-    background: var(--vscode-button-background);
-    border-color: var(--vscode-button-background);
+
+  .empty { opacity: 0.6; font-size: 13px; padding: 24px 0; }
+
+  /* Floating description pane — pops up next to the hovered card. */
+  #hovercard {
+    position: fixed;
+    display: none;
+    z-index: 50;
+    width: 340px;
+    max-height: 60vh;
+    overflow: hidden;
+    background: var(--vscode-editorHoverWidget-background, var(--vscode-editor-background));
+    border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-panel-border));
+    border-radius: 6px;
+    padding: 12px 14px;
+    box-shadow: 0 6px 22px rgba(0,0,0,0.45);
+    pointer-events: none;
   }
-  .toggle input:checked + .slider::before {
-    transform: translateX(14px);
-    background: var(--vscode-button-foreground);
-    opacity: 1;
-  }
-  .body-toggle { display: flex; align-items: center; gap: 8px; font-size: 11px; opacity: 0.85; }
-  .chips { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; }
+  #hovercard .hc-name { font-weight: 700; font-size: 13px; margin-bottom: 7px; display: flex; align-items: center; gap: 7px; }
+  #hovercard .hc-desc { font-size: 12px; line-height: 1.55; opacity: 0.92; }
   .chip {
     display: inline-block;
     font-size: 10px;
-    padding: 1px 6px;
+    padding: 1px 7px;
     border-radius: 8px;
-    background: var(--vscode-badge-background);
-    color: var(--vscode-badge-foreground);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
   }
-  .chip.cat { background: var(--vscode-statusBarItem-prominentBackground, var(--vscode-badge-background)); }
-  .viewer { flex: 1; overflow-y: auto; padding: 16px 20px; box-sizing: border-box; }
-  .viewer h2 { font-size: 16px; margin: 0 0 6px; }
-  .viewer .meta {
-    font-size: 11px;
-    opacity: 0.75;
-    margin-bottom: 14px;
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .viewer .path {
-    opacity: 0.6;
-    font-family: var(--vscode-editor-font-family);
-    font-size: 11px;
-    margin-left: auto;
-  }
-  pre.body {
-    background: var(--vscode-textCodeBlock-background, rgba(0,0,0,.2));
-    padding: 12px;
-    border-radius: 4px;
-    font-family: var(--vscode-editor-font-family);
-    font-size: 12px;
-    line-height: 1.5;
-    white-space: pre-wrap;
-    word-break: break-word;
-    margin: 0;
-  }
-  .empty { opacity: 0.6; font-size: 13px; padding: 12px 0; }
-  .error {
-    color: var(--vscode-errorForeground, #f85149);
-    font-size: 12px;
-    padding: 8px;
-    border: 1px solid var(--vscode-errorForeground, #f85149);
-    border-radius: 4px;
-    margin: 8px;
-  }
-  /* Pending proposals banner — sits above the split when non-empty. */
-  #pending { display: none; border-bottom: 1px solid var(--vscode-panel-border); }
-  #pending.show { display: block; }
-  #pending .phead {
-    font-size: 11px; font-weight: 600; text-transform: uppercase;
-    letter-spacing: 0.06em; opacity: 0.7; padding: 10px 16px 4px;
-  }
-  .pcard {
-    margin: 6px 16px;
-    padding: 10px 12px;
-    border-radius: 6px;
-    background: var(--vscode-inputValidation-warningBackground, var(--vscode-editor-inactiveSelectionBackground));
-    border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-panel-border));
-  }
-  .pcard .pname { font-weight: 600; font-size: 13px; }
-  .pcard .pdesc { font-size: 11px; opacity: 0.8; line-height: 1.4; margin: 4px 0 8px; }
-  .pcard .pmeta { font-size: 10px; opacity: 0.6; margin-bottom: 8px; }
-  .pcard .pactions { display: flex; gap: 6px; }
-  .pcard button {
-    border: none; border-radius: 3px; padding: 4px 12px; font-size: 11px; cursor: pointer;
-  }
-  .pcard .approve { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
-  .pcard .approve:hover { background: var(--vscode-button-hoverBackground); }
-  .pcard .reject {
-    background: transparent; color: var(--vscode-foreground);
-    border: 1px solid var(--vscode-panel-border);
-  }
-  .pcard .reject:hover { background: var(--vscode-list-hoverBackground); }
 </style>
 </head>
 <body>
   <div class="topbar">
-    <h1>Mission Control — Skills</h1>
+    <h1>Skills <span class="count" id="count"></span></h1>
     <div class="actions">
       <button onclick="reload()">Reload</button>
       <button onclick="close_()">Close</button>
     </div>
   </div>
-  <div id="pending"></div>
-  <div class="split">
-    <div class="list" id="list">
-      <div class="empty">Loading…</div>
-    </div>
-    <div class="viewer" id="viewer">
-      <div class="empty">Pick a skill on the left to view its body.</div>
-    </div>
-  </div>
+  <div class="content" id="content"><div class="empty">Loading…</div></div>
+  <div id="hovercard"></div>
 <script>
   const vscode = acquireVsCodeApi();
-  let currentName = null;
-  let lastSkills = [];
+  let skills = [];
+
+  // Category ordering + colors. Unknown categories fall through to "other".
+  const ORDER = ['core', 'standard', 'lab', 'zombie'];
+  const COLORS = {
+    core: '#4ea1ff', standard: '#3fb950', lab: '#bc8cff',
+    zombie: '#f0883e', other: '#8b949e',
+  };
+  function color(cat) { return COLORS[cat] || '#8b949e'; }
 
   function escapeHtml(s) {
     return String(s ?? "")
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
+  function find(name) { return skills.find(s => s.name === name); }
 
-  function renderList(skills) {
-    lastSkills = skills;
-    const root = document.getElementById('list');
-    if (!skills.length) {
-      root.innerHTML = '<div class="empty">No skills found. Add files to ~/.mission-control/skills/.</div>';
+  function renderList(list) {
+    skills = list;
+    document.getElementById('count').textContent = list.length ? '(' + list.length + ')' : '';
+    const root = document.getElementById('content');
+    if (!list.length) {
+      root.innerHTML = '<div class="empty">No skills found in ~/.claude/skills/.</div>';
       return;
     }
-    root.innerHTML = skills.map(s => {
-      const agents = (s.agents && s.agents.length)
-        ? s.agents.map(a => '<span class="chip">' + escapeHtml(a) + '</span>').join('')
-        : '<span class="chip">all agents</span>';
-      const cat = s.category
-        ? '<span class="chip cat">' + escapeHtml(s.category) + '</span>'
-        : '';
-      const active = (s.name === currentName) ? ' active' : '';
-      const disabled = (s.enabled === false) ? ' disabled' : '';
-      const checked = (s.enabled === false) ? '' : ' checked';
-      const name = escapeHtml(s.name);
-      return '<div class="item' + active + disabled + '" data-name="' + name + '">'
-        + '<div class="row">'
-        +   '<div class="meta" onclick="select(\'' + name + '\')">'
-        +     '<div class="name">' + name + '</div>'
-        +     '<div class="desc">' + escapeHtml(s.description) + '</div>'
-        +     '<div class="chips">' + agents + cat + '</div>'
-        +   '</div>'
-        +   '<label class="toggle" title="' + (s.enabled === false ? 'Enable' : 'Disable') + ' skill" onclick="event.stopPropagation()">'
-        +     '<input type="checkbox"' + checked + ' onchange="toggle(\'' + name + '\', this.checked)">'
-        +     '<span class="slider"></span>'
-        +   '</label>'
-        + '</div>'
-        + '</div>';
+    // Bucket by category.
+    const map = {};
+    for (const s of list) { const k = s.category || 'other'; (map[k] = map[k] || []).push(s); }
+    const known = ORDER.filter(k => map[k]);
+    const extras = Object.keys(map).filter(k => !ORDER.includes(k) && k !== 'other').sort();
+    const cats = [...known, ...extras, ...(map['other'] ? ['other'] : [])];
+
+    root.innerHTML = cats.map(cat => {
+      const items = map[cat];
+      const cards = items.map(s =>
+        '<div class="card" data-name="' + escapeHtml(s.name) + '">'
+        + '<div class="cname">' + escapeHtml(s.name) + '</div></div>'
+      ).join('');
+      return '<section class="section" style="--c:' + color(cat) + '">'
+        + '<div class="section-head"><span class="bar"></span>'
+        +   '<span class="label">' + escapeHtml(cat) + '</span>'
+        +   '<span class="n">' + items.length + '</span><span class="line"></span></div>'
+        + '<div class="grid">' + cards + '</div></section>';
     }).join('');
+
+    root.querySelectorAll('.card').forEach(el => {
+      const name = el.getAttribute('data-name');
+      el.addEventListener('mouseenter', () => showCard(name, el));
+      el.addEventListener('mouseleave', hideCard);
+      el.addEventListener('click', () => vscode.postMessage({ type: 'open_skill', name }));
+    });
   }
 
-  function renderBody(detail) {
-    currentName = detail.name;
-    // Refresh list to move .active highlight + reflect any enabled change.
-    renderList(lastSkills);
-    const agents = (detail.agents && detail.agents.length)
-      ? detail.agents.map(a => '<span class="chip">' + escapeHtml(a) + '</span>').join('')
-      : '<span class="chip">all agents</span>';
-    const cat = detail.category
-      ? '<span class="chip cat">' + escapeHtml(detail.category) + '</span>'
-      : '';
-    const checked = (detail.enabled === false) ? '' : ' checked';
-    const stateLabel = (detail.enabled === false) ? 'Disabled' : 'Enabled';
-    const name = escapeHtml(detail.name);
-    document.getElementById('viewer').innerHTML =
-      '<h2>' + name + '</h2>'
-      + '<div class="meta">' + agents + cat
-        + '<span class="path">' + escapeHtml(detail.path) + '</span></div>'
-      + '<div class="body-toggle">'
-      +   '<label class="toggle">'
-      +     '<input type="checkbox"' + checked + ' onchange="toggle(\'' + name + '\', this.checked)">'
-      +     '<span class="slider"></span>'
-      +   '</label>'
-      +   '<span>' + stateLabel + ' — agents ' + (detail.enabled === false ? 'will NOT' : 'will') + ' load this skill</span>'
-      + '</div>'
-      + '<pre class="body">' + escapeHtml(detail.body) + '</pre>';
-    document.getElementById('viewer').scrollTop = 0;
+  const card = document.getElementById('hovercard');
+  function showCard(name, anchor) {
+    const s = find(name);
+    if (!s) return;
+    const col = color(s.category || 'other');
+    const chip = '<span class="chip" style="background:' + col + '22;color:' + col + '">'
+      + escapeHtml(s.category || 'other') + '</span>';
+    card.innerHTML = '<div class="hc-name">' + escapeHtml(s.name) + chip + '</div>'
+      + '<div class="hc-desc">' + escapeHtml(s.description || '(no description)') + '</div>';
+    card.style.display = 'block';
+    // Position: prefer below-left of the card, flip/clamp to stay on screen.
+    const r = anchor.getBoundingClientRect();
+    const cw = card.offsetWidth, ch = card.offsetHeight, pad = 8;
+    let left = r.left;
+    let top = r.bottom + 6;
+    if (left + cw > window.innerWidth - pad) left = window.innerWidth - cw - pad;
+    if (left < pad) left = pad;
+    if (top + ch > window.innerHeight - pad) top = r.top - ch - 6; // flip above
+    if (top < pad) top = pad;
+    card.style.left = left + 'px';
+    card.style.top = top + 'px';
   }
+  function hideCard() { card.style.display = 'none'; }
 
-  function renderError(message) {
-    document.getElementById('list').innerHTML =
-      '<div class="error">' + escapeHtml(message) + '</div>';
-  }
+  function reload() { vscode.postMessage({ type: 'reload' }); }
+  function close_() { vscode.postMessage({ type: 'close' }); }
 
-  function renderPending(pending) {
-    const root = document.getElementById('pending');
-    if (!pending || !pending.length) {
-      root.className = '';
-      root.innerHTML = '';
-      return;
-    }
-    root.className = 'show';
-    const cards = pending.map(p => {
-      const agents = (p.agents && p.agents.length)
-        ? p.agents.map(a => '<span class="chip">' + escapeHtml(a) + '</span>').join('')
-        : '<span class="chip">all agents</span>';
-      const cat = p.category ? '<span class="chip cat">' + escapeHtml(p.category) + '</span>' : '';
-      const src = p.source ? ('proposed by ' + escapeHtml(p.source)) : 'proposed';
-      const id = escapeHtml(p.pending_id);
-      return '<div class="pcard">'
-        + '<div class="pname">' + escapeHtml(p.name) + '</div>'
-        + '<div class="pdesc">' + escapeHtml(p.description) + '</div>'
-        + '<div class="chips">' + agents + cat + '</div>'
-        + '<div class="pmeta">' + src + '</div>'
-        + '<div class="pactions">'
-        +   '<button class="approve" onclick="approvePending(\'' + id + '\')">Approve</button>'
-        +   '<button class="reject" onclick="rejectPending(\'' + id + '\')">Reject</button>'
-        + '</div>'
-        + '</div>';
-    }).join('');
-    root.innerHTML = '<div class="phead">Pending proposals (' + pending.length + ')</div>' + cards;
-  }
-
-  function select(name) {
-    vscode.postMessage({ type: 'select_skill', name });
-  }
-  function toggle(name, enabled) {
-    vscode.postMessage({ type: 'toggle_skill', name, enabled });
-  }
-  function approvePending(pendingId) {
-    vscode.postMessage({ type: 'approve_pending', pendingId });
-  }
-  function rejectPending(pendingId) {
-    vscode.postMessage({ type: 'reject_pending', pendingId });
-  }
-  function reload() {
-    currentName = null;
-    document.getElementById('list').innerHTML = '<div class="empty">Loading…</div>';
-    document.getElementById('viewer').innerHTML =
-      '<div class="empty">Pick a skill on the left to view its body.</div>';
-    vscode.postMessage({ type: 'reload' });
-  }
-  function close_() {
-    vscode.postMessage({ type: 'close' });
-  }
+  // A scroll moves the anchor out from under the pane — just hide it.
+  document.getElementById('content').addEventListener('scroll', hideCard);
 
   window.addEventListener('message', (event) => {
     const msg = event.data;
     if (!msg || typeof msg.type !== 'string') return;
     if (msg.type === 'render_list') renderList(msg.skills || []);
-    else if (msg.type === 'render_body') renderBody(msg.detail);
-    else if (msg.type === 'render_pending') renderPending(msg.pending || []);
-    else if (msg.type === 'error') renderError(msg.message || 'unknown error');
   });
 </script>
 </body>

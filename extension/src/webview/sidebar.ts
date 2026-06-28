@@ -7,6 +7,7 @@ import {
   onProjectChange,
   setCurrentProjectId,
 } from "../projectState";
+import { isMawUp } from "../commands/mawServe";
 import { openDashboardPanel } from "./dashboard";
 
 const POLL_MS = 10_000;
@@ -46,6 +47,7 @@ let dashboardAutoOpened = false;
 export class SidebarProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private timer?: NodeJS.Timeout;
+  private mawTimer?: NodeJS.Timeout; // polls :3456 to keep the maw-ui toggle live
   private renderedSetup?: boolean; // last-rendered "needs setup" flag
   private lastOnline?: boolean; // for offline→online transition detection
   private projectsLoaded = false; // true once /projects fetched at least once
@@ -66,9 +68,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         // A command may have just completed setup → re-evaluate which screen
         // to show (first-run Setup vs the full panel).
         await this.render();
+        // The maw-ui toggle just flipped state → refresh the button label.
+        await this.pushMaw();
       } else if (msg?.type === "ready") {
         await this.tick();
         await this.pushProjectList();
+        await this.pushMaw();
       } else if (msg?.type === "open_dashboard") {
         openDashboardPanel(this.context, getCurrentProjectId());
       } else if (msg?.type === "refreshProjects") {
@@ -88,11 +93,15 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     });
 
     void this.render();
-    // Frontend-only build: no backend health poll. render() already pushes
-    // the one-shot "off" status; we never set up a recurring tick/reconnect.
+    // Frontend-only build: no backend health poll. The only recurring probe is
+    // a cheap local TCP check of :3456 so the maw-ui toggle stays in sync even
+    // when maw serve is started/stopped outside the extension.
+    this.mawTimer = setInterval(() => void this.pushMaw(), 5000);
     view.onDidDispose(() => {
       if (this.timer) clearInterval(this.timer);
       this.timer = undefined;
+      if (this.mawTimer) clearInterval(this.mawTimer);
+      this.mawTimer = undefined;
       this.unsubProjectChange?.();
       this.unsubProjectChange = undefined;
     });
@@ -140,6 +149,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const online = false;
     this.view?.webview.postMessage({ type: "status", online });
     this.lastOnline = online;
+  }
+
+  /** Probe :3456 and tell the webview whether maw ui is up, so the toggle
+   *  button can label itself Start vs Stop. Panel (ready) state only. */
+  private async pushMaw(): Promise<void> {
+    if (!this.view || this.renderedSetup !== false) return;
+    const up = await isMawUp();
+    this.view.webview.postMessage({ type: "maw", up });
   }
 
   // ── Project picker plumbing ──────────────────────────────────────────────
@@ -218,6 +235,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   .nav-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.6; margin: 14px 0 4px 2px; }
   .btn { display: block; width: 100%; text-align: left; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; padding: 6px 10px; border-radius: 3px; cursor: pointer; margin-bottom: 4px; font-size: 13px; }
   .btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+  .btn.on { background: rgba(63,185,80,0.16); color: #3fb950; }
+  .btn.on:hover { background: rgba(63,185,80,0.24); }
   .btn.primary { text-align: center; background: var(--vscode-button-background); color: var(--vscode-button-foreground); font-weight: 600; padding: 9px 14px; font-size: 13px; margin: 6px 0 4px; }
   .btn.primary:hover { background: var(--vscode-button-hoverBackground); }
   /* First-run hero — fills the panel, centered like the Claude Code welcome. */
@@ -256,12 +275,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     return `<!DOCTYPE html><html><head>${this.head()}</head><body>
   <button class="btn primary" id="openDashboard">Open Dashboard</button>
   <button class="btn primary" data-cmd="missioncontrol.claude">💬 Open Claude</button>
-
-  <div class="nav-label">Nav</div>
+  <button class="btn" id="mawToggle" data-cmd="missioncontrol.mawToggle">🌐 maw ui…</button>
   <button class="btn" data-cmd="missioncontrol.skills">Skills</button>
-  <button class="btn" data-cmd="missioncontrol.approve">Approve</button>
-  <button class="btn" data-cmd="missioncontrol.config">Config</button>
-  <button class="btn" data-cmd="missioncontrol.reset">Reset</button>
 
 <script>
   const vscode = acquireVsCodeApi();
@@ -273,6 +288,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   document.getElementById('openDashboard').addEventListener('click', () => {
     vscode.postMessage({ type: 'open_dashboard' });
   });
+  // Live maw-ui on/off state → toggle button label/colour.
+  window.addEventListener('message', (e) => {
+    const m = e.data;
+    if (!m || m.type !== 'maw') return;
+    const b = document.getElementById('mawToggle');
+    if (!b) return;
+    b.textContent = m.up ? '🟢 Stop maw ui' : '🌐 Start maw ui';
+    b.classList.toggle('on', !!m.up);
+  });
+  vscode.postMessage({ type: 'ready' });
 </script>
 </body></html>`;
   }

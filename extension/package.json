@@ -79,6 +79,10 @@
       {
         "command": "missioncontrol.claude",
         "title": "Mission Control: Open Claude"
+      },
+      {
+        "command": "missioncontrol.mawToggle",
+        "title": "Mission Control: Toggle maw ui"
       }
     ]
   },
