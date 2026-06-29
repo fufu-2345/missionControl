@@ -1,0 +1,6 @@
+# Sub-projects live here but are NOT tracked by the soulbrew workspace repo
+# (prevents soulbrew bloat — same idea as the ignored /github.com/ clones).
+# Each sub-project can be its own independent git repo (run `git init` inside it).
+# Only this .gitignore is tracked, so the project/ convention persists in soulbrew.
+*
+!.gitignore

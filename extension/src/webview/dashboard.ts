@@ -513,6 +513,33 @@ function renderHtml(): string {
   .tile .title { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
   .tile .sub { font-size: 11px; opacity: 0.75; line-height: 1.4; }
   .tile.primary .sub { opacity: 0.9; }
+  /* Non-functional in the frontend-only build (the backend was removed).
+     Marked red + badged so it's obvious at a glance these controls do nothing
+     here. They stay clickable only to surface the "disabled" explanation toast. */
+  .dead {
+    border-left: 3px solid var(--vscode-errorForeground, #f85149) !important;
+    opacity: 0.6;
+  }
+  .tile.dead:hover {
+    background: var(--vscode-editor-inactiveSelectionBackground);
+    border-color: transparent;
+    border-left-color: var(--vscode-errorForeground, #f85149);
+    cursor: not-allowed;
+  }
+  .dead .title { color: var(--vscode-errorForeground, #f85149); }
+  .badge-dead {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--vscode-errorForeground, #f85149);
+    border: 1px solid var(--vscode-errorForeground, #f85149);
+    border-radius: 3px;
+    padding: 0 5px;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
   .btn-row { display: flex; gap: 6px; }
   .feed {
     background: var(--vscode-textCodeBlock-background, rgba(0,0,0,.2));
@@ -553,8 +580,8 @@ function renderHtml(): string {
   </div>
 
   <div class="container">
-    <div class="group-label first">Active Project</div>
-    <div class="card project-card">
+    <div class="group-label first">Active Project <span class="badge-dead">ใช้ไม่ได้</span></div>
+    <div class="card project-card dead">
       <select id="projectSelect"></select>
       <button class="icon-btn" type="button" onclick="newProject()">+ New project</button>
       <div class="pid" id="projectPid"></div>
@@ -586,12 +613,12 @@ function renderHtml(): string {
 
     <div class="group-label">Sprint Control · disabled (needs backend)</div>
     <div class="grid cols-2">
-      <button class="tile" type="button" onclick="run('missioncontrol.approve')">
-        <div class="title">Approve ideas</div>
+      <button class="tile dead" type="button" onclick="run('missioncontrol.approve')">
+        <div class="title">Approve ideas <span class="badge-dead">ใช้ไม่ได้</span></div>
         <div class="sub" id="approveSub">ปิดใช้งานใน frontend-only build</div>
       </button>
-      <button class="tile" type="button" onclick="run('missioncontrol.pause')">
-        <div class="title">Pause / Resume</div>
+      <button class="tile dead" type="button" onclick="run('missioncontrol.pause')">
+        <div class="title">Pause / Resume <span class="badge-dead">ใช้ไม่ได้</span></div>
         <div class="sub">ปิดใช้งานใน frontend-only build</div>
       </button>
     </div>
@@ -606,22 +633,22 @@ function renderHtml(): string {
         <div class="title">Config</div>
         <div class="sub">แก้ ~/.mission-control/config.json</div>
       </button>
-      <button class="tile" type="button" onclick="run('missioncontrol.setup')">
-        <div class="title">Setup</div>
+      <button class="tile dead" type="button" onclick="run('missioncontrol.setup')">
+        <div class="title">Setup <span class="badge-dead">ใช้ไม่ได้</span></div>
         <div class="sub">ปิดใช้งาน (frontend-only)</div>
       </button>
-      <button class="tile" type="button" onclick="run('missioncontrol.reset')">
-        <div class="title">Reset</div>
+      <button class="tile dead" type="button" onclick="run('missioncontrol.reset')">
+        <div class="title">Reset <span class="badge-dead">ใช้ไม่ได้</span></div>
         <div class="sub">ปิดใช้งาน (frontend-only)</div>
       </button>
     </div>
 
     <div class="group-label feed-header">
-      <span>Recent Activity</span>
+      <span>Recent Activity <span class="badge-dead">ไม่มี live events</span></span>
       <button class="icon-btn" type="button" onclick="clearFeed()">Clear</button>
     </div>
     <div class="feed" id="feed">
-      <div class="empty">(waiting for events…)</div>
+      <div class="empty">(ไม่มี live events — ต้องมี backend/WebSocket)</div>
     </div>
   </div>
 
@@ -677,7 +704,7 @@ function renderHtml(): string {
   function renderFeed() {
     const root = document.getElementById("feed");
     if (!feedRows.length) {
-      root.innerHTML = '<div class="empty">(waiting for events…)</div>';
+      root.innerHTML = '<div class="empty">(ไม่มี live events — ต้องมี backend/WebSocket)</div>';
       return;
     }
     root.innerHTML = feedRows.map((r) =>

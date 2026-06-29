@@ -255,7 +255,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     <div class="logo">⚡</div>
     <h2>Mission Control</h2>
     <p>Frontend-only build<br>เปิด Claude Code chat ในจอหลัก</p>
-    <button class="btn primary" data-cmd="missioncontrol.claude">💬 Open Claude</button>
+    <button class="btn primary" data-cmd="missioncontrol.claude">Open Claude</button>
     <button class="btn primary" data-cmd="missioncontrol.setup">Setup</button>
   </div>
 <script>
@@ -274,8 +274,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private panelHtml(): string {
     return `<!DOCTYPE html><html><head>${this.head()}</head><body>
   <button class="btn primary" id="openDashboard">Open Dashboard</button>
-  <button class="btn primary" data-cmd="missioncontrol.claude">💬 Open Claude</button>
-  <button class="btn" id="mawToggle" data-cmd="missioncontrol.mawToggle">🌐 maw ui…</button>
+  <button class="btn primary" data-cmd="missioncontrol.claude">Open Claude</button>
+  <button class="btn" id="mawToggle" data-cmd="missioncontrol.mawToggle">maw ui…</button>
   <button class="btn" data-cmd="missioncontrol.skills">Skills</button>
 
 <script>
@@ -294,7 +294,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     if (!m || m.type !== 'maw') return;
     const b = document.getElementById('mawToggle');
     if (!b) return;
-    b.textContent = m.up ? '🟢 Stop maw ui' : '🌐 Start maw ui';
+    b.textContent = m.up ? 'Stop maw ui' : 'Start maw ui';
     b.classList.toggle('on', !!m.up);
   });
   vscode.postMessage({ type: 'ready' });
