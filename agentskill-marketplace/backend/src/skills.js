@@ -54,6 +54,19 @@ function skillGroupIds(skillId) {
     .map((r) => r.group_id);
 }
 
+/** Groups linked to a skill as {id, name} pairs, ordered by name. */
+function skillGroups(skillId) {
+  return db
+    .prepare(
+      `SELECT g.id AS id, g.name AS name
+         FROM skill_groups sg
+         JOIN groups g ON g.id = sg.group_id
+        WHERE sg.skill_id = ?
+        ORDER BY g.name`
+    )
+    .all(skillId);
+}
+
 /**
  * Build the public summary for a skill row.
  * @param {object} row    a row from the skills table (must include id, name,
@@ -203,6 +216,9 @@ router.get('/:id', authRequired, (req, res) => {
   }
 
   const summary = skillSummary(row, req.user.id);
+  // Detail-only: the groups this skill is shared with (kept off the list
+  // endpoint to keep it light). Owners use this to render the share UI.
+  summary.groups = skillGroups(row.id);
   summary.files = buildFileTree(row.folder_path);
   res.json(summary);
 });
@@ -366,6 +382,18 @@ router.patch('/:id', authRequired, (req, res) => {
     tagIds = body.tag_ids;
   }
 
+  let groupIds = null;
+  if (hasOwn('groups')) {
+    if (!Array.isArray(body.groups) || !body.groups.every((g) => Number.isInteger(g))) {
+      return res.status(400).json({ error: 'groups must be an array of integers' });
+    }
+    for (const gid of body.groups) {
+      const group = db.prepare(`SELECT id FROM groups WHERE id = ?`).get(gid);
+      if (!group) return res.status(400).json({ error: `group ${gid} does not exist` });
+    }
+    groupIds = body.groups;
+  }
+
   // Apply scalar field updates.
   if (updates.length > 0) {
     params.push(row.id);
@@ -381,8 +409,21 @@ router.patch('/:id', authRequired, (req, res) => {
     for (const tid of tagIds) insert.run(row.id, tid);
   }
 
+  // Replace the group set if groups was provided.
+  if (groupIds !== null) {
+    db.prepare(`DELETE FROM skill_groups WHERE skill_id = ?`).run(row.id);
+    const insert = db.prepare(
+      `INSERT OR IGNORE INTO skill_groups (skill_id, group_id) VALUES (?, ?)`
+    );
+    for (const gid of groupIds) insert.run(row.id, gid);
+  }
+
   const updated = db.prepare(`${SELECT_SKILL} WHERE id = ?`).get(row.id);
-  res.json(skillSummary(updated, req.user.id));
+  const summary = skillSummary(updated, req.user.id);
+  // Reflect the (possibly updated) group set in the response, mirroring the
+  // detail endpoint so the client can re-render the share UI after a PATCH.
+  summary.groups = skillGroups(updated.id);
+  res.json(summary);
 });
 
 // ---------------------------------------------------------------------------

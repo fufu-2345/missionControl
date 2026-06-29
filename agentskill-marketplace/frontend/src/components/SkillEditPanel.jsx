@@ -1,22 +1,30 @@
 import { useEffect, useState } from 'react';
+import { apiFetch } from '../api/client.js';
 
 // Metadata editor shown to owners/admins on the skill detail page.
 // Lets them rename the skill, pick a single category, multi-select tags, and
-// toggle public/private. Saves via PATCH /skills/:id {name, category_id, tag_ids, visibility}.
+// toggle public/private. When private, also lets them pick which groups can see
+// the skill. Saves via PATCH /skills/:id {name, category_id, tag_ids, visibility, groups}.
 //
 // Props:
-//   skill        the current skill detail ({name, category(name|null), tags:[name], visibility})
+//   skill        the current skill detail ({name, category(name|null),
+//                tags:[name], visibility, groups:[{id,name}]})
 //   allTags      [{id, name}] master list
 //   allCategories[{id, name}] master list
 //   onSave       (payload) => Promise   parent runs the PATCH + refetch
 //
 // Note: the detail endpoint returns category/tags as NAME strings, while the
 // master lists are {id,name}. We map names -> ids to pre-select, and send ids back.
+// Groups arrive as {id,name} objects on the detail, so we pre-select by id directly.
 export default function SkillEditPanel({ skill, allTags, allCategories, onSave }) {
   const [name, setName] = useState(skill.name || '');
   const [categoryId, setCategoryId] = useState('');
   const [tagIds, setTagIds] = useState([]);
   const [visibility, setVisibility] = useState(skill.visibility || 'public');
+  const [groupIds, setGroupIds] = useState([]);
+
+  // Master list of groups for the private-visibility picker (GET /groups).
+  const [allGroups, setAllGroups] = useState([]);
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -32,22 +40,44 @@ export default function SkillEditPanel({ skill, allTags, allCategories, onSave }
 
     const names = new Set(skill.tags || []);
     setTagIds(allTags.filter((t) => names.has(t.name)).map((t) => t.id));
+
+    // Pre-select the skill's current groups (already {id,name} objects).
+    setGroupIds(Array.isArray(skill.groups) ? skill.groups.map((g) => g.id) : []);
   }, [skill, allTags, allCategories]);
+
+  // Load the group master list once (auth-only endpoint).
+  useEffect(() => {
+    (async () => {
+      try {
+        const data = await apiFetch('/groups');
+        setAllGroups(Array.isArray(data?.groups) ? data.groups : []);
+      } catch {
+        // Non-fatal: the group picker simply renders empty.
+      }
+    })();
+  }, []);
 
   function toggleTag(id) {
     setTagIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
+
+  function toggleGroup(id) {
+    setGroupIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   }
 
   async function handleSave() {
     setSaving(true);
     setError('');
     try {
-      await onSave({
+      const payload = {
         name: name.trim() || skill.name,
         category_id: categoryId ? Number(categoryId) : null,
         tag_ids: tagIds,
         visibility,
-      });
+        // Only send groups when private; public clears any group links.
+        groups: visibility === 'private' ? groupIds : [],
+      };
+      await onSave(payload);
       setSavedAt(Date.now());
     } catch (err) {
       setError(err.message || 'Save failed.');
@@ -120,6 +150,36 @@ export default function SkillEditPanel({ skill, allTags, allCategories, onSave }
           </label>
         </div>
       </div>
+
+      {/* Group picker — only meaningful for private skills. */}
+      {visibility === 'private' && (
+        <div className="edit-field">
+          <span>Groups that can see this private skill</span>
+          <div className="edit-tags">
+            {allGroups.length === 0 && (
+              <span className="muted">No groups available. Ask an admin to create one.</span>
+            )}
+            {allGroups.map((g) => {
+              const active = groupIds.includes(g.id);
+              return (
+                <button
+                  type="button"
+                  key={g.id}
+                  className={`chip ${active ? 'chip-active' : ''}`}
+                  onClick={() => toggleGroup(g.id)}
+                >
+                  {g.name}
+                </button>
+              );
+            })}
+          </div>
+          {allGroups.length > 0 && groupIds.length === 0 && (
+            <span className="muted">
+              No groups selected — only you and admins will see this skill.
+            </span>
+          )}
+        </div>
+      )}
 
       {error && <p className="auth-error">{error}</p>}
 
