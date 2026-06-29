@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { router as authRouter } from './auth.js';
 import { router as skillsRouter } from './skills.js';
+import { router as metaRouter } from './meta.js';
 
 export function createApp() {
   const app = express();
@@ -15,6 +16,8 @@ export function createApp() {
 
   app.use('/api/auth', authRouter);
   app.use('/api/skills', skillsRouter);
+  // Meta lists: /api/tags and /api/categories.
+  app.use('/api', metaRouter);
 
   return app;
 }

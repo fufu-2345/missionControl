@@ -94,7 +94,9 @@ GET    /skills/:id/file?path=                                   -> file content 
 GET    /skills/:id/download                                     -> zip stream
 POST   /skills/internal          multipart: zip                 -> created skill
 POST   /skills/external          {url}                          -> created skill(s)
-PATCH  /skills/:id               {name?,category_id?,tags?,visibility?,groups?,files?}  (owner/admin)
+PATCH  /skills/:id               {name?,category_id?,tag_ids?,visibility?,groups?}  (owner/admin)
+PUT    /skills/:id/file          {path,content}                 (owner/admin) edit a file
+GET    /skills/:id/file?path=    -> {path,content}              (visibility-checked)
 POST   /skills/:id/star          toggle                         -> {starred}
 
 GET    /recommendations                                         -> recommended skills

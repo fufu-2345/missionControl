@@ -11,6 +11,7 @@ import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import multer from 'multer';
 import AdmZip from 'adm-zip';
+import archiver from 'archiver';
 
 import { db } from './db.js';
 import { authRequired } from './auth.js';
@@ -18,6 +19,8 @@ import { canSee } from './visibility.js';
 import {
   buildFileTree,
   storeSkillFolder,
+  readSkillFile,
+  writeSkillFile,
 } from './storage.js';
 import { cloneRepo, cleanup } from './github.js';
 import {
@@ -55,10 +58,13 @@ function skillGroupIds(skillId) {
  * Build the public summary for a skill row.
  * @param {object} row    a row from the skills table (must include id, name,
  *                        type, owner_id, category_id, visibility, source_url)
+ * @param {number} [userId] the viewer's id — used to compute `starred`. When
+ *                        omitted, `starred` is always false.
  * @returns {{id, name, type, owner:{id,username}, category:(string|null),
- *            tags:string[], visibility, source_url}}
+ *            tags:string[], visibility, source_url, starred:boolean,
+ *            starCount:number}}
  */
-function skillSummary(row) {
+function skillSummary(row, userId) {
   const owner = db
     .prepare(`SELECT id, username FROM users WHERE id = ?`)
     .get(row.owner_id) || { id: row.owner_id, username: null };
@@ -78,6 +84,16 @@ function skillSummary(row) {
     .all(row.id)
     .map((r) => r.name);
 
+  const starCount = db
+    .prepare(`SELECT COUNT(*) AS n FROM stars WHERE skill_id = ?`)
+    .get(row.id).n;
+
+  const starred = userId != null
+    ? !!db
+        .prepare(`SELECT 1 FROM stars WHERE user_id = ? AND skill_id = ?`)
+        .get(userId, row.id)
+    : false;
+
   return {
     id: row.id,
     name: row.name,
@@ -87,19 +103,44 @@ function skillSummary(row) {
     tags,
     visibility: row.visibility,
     source_url: row.source_url ?? null,
+    starred,
+    starCount,
   };
+}
+
+/** True if user is an admin or owns the skill row. */
+function isOwnerOrAdmin(user, row) {
+  return user.role === 'admin' || row.owner_id === user.id;
+}
+
+/**
+ * Resolve whether req.user may see the given skill row, loading group ids only
+ * when the skill is private. Returns a boolean.
+ */
+function viewerCanSee(user, row) {
+  return canSee({
+    user,
+    skill: row,
+    userGroupIds: userGroupIds(user.id),
+    skillGroupIds: row.visibility === 'private' ? skillGroupIds(row.id) : [],
+  });
 }
 
 const SELECT_SKILL = `SELECT id, name, owner_id, type, category_id, visibility, source_url, folder_path, created_at FROM skills`;
 
 // ---------------------------------------------------------------------------
 // GET /  — list every skill the viewer can see
+//
+// Optional filters, applied AFTER the visibility filter and combined with AND:
+//   ?tag=<name>         only skills having that tag
+//   ?category=<name>    only skills in that category
+//   ?starred=true       only skills the viewer has starred
 // ---------------------------------------------------------------------------
 router.get('/', authRequired, (req, res) => {
   const rows = db.prepare(`${SELECT_SKILL} ORDER BY created_at DESC, id DESC`).all();
   const ugids = userGroupIds(req.user.id);
 
-  const visible = rows.filter((row) =>
+  let visible = rows.filter((row) =>
     canSee({
       user: req.user,
       skill: row,
@@ -108,7 +149,46 @@ router.get('/', authRequired, (req, res) => {
     })
   );
 
-  res.json({ skills: visible.map((row) => skillSummary(row)) });
+  // --- post-visibility filters (AND) ---
+  const { tag, category, starred } = req.query;
+
+  if (typeof tag === 'string' && tag.trim()) {
+    const name = tag.trim();
+    const ids = new Set(
+      db
+        .prepare(
+          `SELECT st.skill_id AS id
+             FROM skill_tags st
+             JOIN tags t ON t.id = st.tag_id
+            WHERE t.name = ?`
+        )
+        .all(name)
+        .map((r) => r.id)
+    );
+    visible = visible.filter((row) => ids.has(row.id));
+  }
+
+  if (typeof category === 'string' && category.trim()) {
+    const name = category.trim();
+    const cat = db.prepare(`SELECT id FROM categories WHERE name = ?`).get(name);
+    if (!cat) {
+      visible = [];
+    } else {
+      visible = visible.filter((row) => row.category_id === cat.id);
+    }
+  }
+
+  if (starred === 'true') {
+    const ids = new Set(
+      db
+        .prepare(`SELECT skill_id AS id FROM stars WHERE user_id = ?`)
+        .all(req.user.id)
+        .map((r) => r.id)
+    );
+    visible = visible.filter((row) => ids.has(row.id));
+  }
+
+  res.json({ skills: visible.map((row) => skillSummary(row, req.user.id)) });
 });
 
 // ---------------------------------------------------------------------------
@@ -118,17 +198,225 @@ router.get('/:id', authRequired, (req, res) => {
   const row = db.prepare(`${SELECT_SKILL} WHERE id = ?`).get(req.params.id);
   if (!row) return res.status(404).json({ error: 'skill not found' });
 
-  const allowed = canSee({
-    user: req.user,
-    skill: row,
-    userGroupIds: userGroupIds(req.user.id),
-    skillGroupIds: row.visibility === 'private' ? skillGroupIds(row.id) : [],
-  });
-  if (!allowed) return res.status(403).json({ error: 'forbidden' });
+  if (!viewerCanSee(req.user, row)) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
 
-  const summary = skillSummary(row);
+  const summary = skillSummary(row, req.user.id);
   summary.files = buildFileTree(row.folder_path);
   res.json(summary);
+});
+
+// ---------------------------------------------------------------------------
+// POST /:id/star  — toggle a star for the current user
+// ---------------------------------------------------------------------------
+router.post('/:id/star', authRequired, (req, res) => {
+  const row = db.prepare(`${SELECT_SKILL} WHERE id = ?`).get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'skill not found' });
+
+  if (!viewerCanSee(req.user, row)) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+
+  const existing = db
+    .prepare(`SELECT 1 FROM stars WHERE user_id = ? AND skill_id = ?`)
+    .get(req.user.id, row.id);
+
+  let starred;
+  if (existing) {
+    db.prepare(`DELETE FROM stars WHERE user_id = ? AND skill_id = ?`)
+      .run(req.user.id, row.id);
+    starred = false;
+  } else {
+    db.prepare(`INSERT INTO stars (user_id, skill_id) VALUES (?, ?)`)
+      .run(req.user.id, row.id);
+    starred = true;
+  }
+
+  const starCount = db
+    .prepare(`SELECT COUNT(*) AS n FROM stars WHERE skill_id = ?`)
+    .get(row.id).n;
+
+  res.json({ starred, starCount });
+});
+
+// ---------------------------------------------------------------------------
+// GET /:id/file?path=<rel>  — read one text file from the skill folder
+// ---------------------------------------------------------------------------
+router.get('/:id/file', authRequired, (req, res) => {
+  const row = db.prepare(`${SELECT_SKILL} WHERE id = ?`).get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'skill not found' });
+
+  if (!viewerCanSee(req.user, row)) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+
+  const rel = req.query.path;
+  if (typeof rel !== 'string' || !rel.trim()) {
+    return res.status(400).json({ error: 'path query param is required' });
+  }
+
+  let content;
+  try {
+    content = readSkillFile(row.folder_path, rel);
+  } catch (err) {
+    if (err.message === 'path traversal rejected') {
+      return res.status(400).json({ error: 'invalid path' });
+    }
+    // ENOENT / EISDIR / unreadable -> treat as missing file.
+    return res.status(404).json({ error: 'file not found' });
+  }
+
+  res.json({ path: rel, content });
+});
+
+// ---------------------------------------------------------------------------
+// GET /:id/download  — stream the whole skill folder as a .zip
+// ---------------------------------------------------------------------------
+router.get('/:id/download', authRequired, (req, res) => {
+  const row = db.prepare(`${SELECT_SKILL} WHERE id = ?`).get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'skill not found' });
+
+  if (!viewerCanSee(req.user, row)) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+
+  // Sanitize the skill name for use in a filename.
+  const safeName =
+    (row.name || 'skill').replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') ||
+    'skill';
+
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="${safeName}.zip"`);
+
+  const archive = archiver('zip', { zlib: { level: 9 } });
+  archive.on('error', (err) => {
+    // Headers may already be sent; just destroy the stream.
+    if (!res.headersSent) {
+      res.status(500).json({ error: `zip failed: ${err.message}` });
+    } else {
+      res.destroy(err);
+    }
+  });
+
+  archive.pipe(res);
+  // Place folder contents at the zip root.
+  archive.directory(row.folder_path, false);
+  archive.finalize();
+});
+
+// ---------------------------------------------------------------------------
+// PATCH /:id  — owner/admin: update name, category, tags, visibility
+// ---------------------------------------------------------------------------
+router.patch('/:id', authRequired, (req, res) => {
+  const row = db.prepare(`${SELECT_SKILL} WHERE id = ?`).get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'skill not found' });
+
+  if (!isOwnerOrAdmin(req.user, row)) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+
+  const body = req.body || {};
+  const hasOwn = (k) => Object.prototype.hasOwnProperty.call(body, k);
+
+  // Validate everything before mutating anything.
+  const updates = [];
+  const params = [];
+
+  if (hasOwn('name')) {
+    if (typeof body.name !== 'string' || !body.name.trim()) {
+      return res.status(400).json({ error: 'name must be a non-empty string' });
+    }
+    updates.push('name = ?');
+    params.push(body.name.trim());
+  }
+
+  if (hasOwn('category_id')) {
+    const cid = body.category_id;
+    if (cid === null) {
+      updates.push('category_id = ?');
+      params.push(null);
+    } else if (Number.isInteger(cid)) {
+      const cat = db.prepare(`SELECT id FROM categories WHERE id = ?`).get(cid);
+      if (!cat) return res.status(400).json({ error: 'category_id does not exist' });
+      updates.push('category_id = ?');
+      params.push(cid);
+    } else {
+      return res.status(400).json({ error: 'category_id must be an integer or null' });
+    }
+  }
+
+  if (hasOwn('visibility')) {
+    if (body.visibility !== 'public' && body.visibility !== 'private') {
+      return res.status(400).json({ error: "visibility must be 'public' or 'private'" });
+    }
+    updates.push('visibility = ?');
+    params.push(body.visibility);
+  }
+
+  let tagIds = null;
+  if (hasOwn('tag_ids')) {
+    if (!Array.isArray(body.tag_ids) || !body.tag_ids.every((t) => Number.isInteger(t))) {
+      return res.status(400).json({ error: 'tag_ids must be an array of integers' });
+    }
+    for (const tid of body.tag_ids) {
+      const tag = db.prepare(`SELECT id FROM tags WHERE id = ?`).get(tid);
+      if (!tag) return res.status(400).json({ error: `tag_id ${tid} does not exist` });
+    }
+    tagIds = body.tag_ids;
+  }
+
+  // Apply scalar field updates.
+  if (updates.length > 0) {
+    params.push(row.id);
+    db.prepare(`UPDATE skills SET ${updates.join(', ')} WHERE id = ?`).run(...params);
+  }
+
+  // Replace the tag set if tag_ids was provided.
+  if (tagIds !== null) {
+    db.prepare(`DELETE FROM skill_tags WHERE skill_id = ?`).run(row.id);
+    const insert = db.prepare(
+      `INSERT OR IGNORE INTO skill_tags (skill_id, tag_id) VALUES (?, ?)`
+    );
+    for (const tid of tagIds) insert.run(row.id, tid);
+  }
+
+  const updated = db.prepare(`${SELECT_SKILL} WHERE id = ?`).get(row.id);
+  res.json(skillSummary(updated, req.user.id));
+});
+
+// ---------------------------------------------------------------------------
+// PUT /:id/file  — owner/admin: overwrite an existing file's content
+// ---------------------------------------------------------------------------
+router.put('/:id/file', authRequired, (req, res) => {
+  const row = db.prepare(`${SELECT_SKILL} WHERE id = ?`).get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'skill not found' });
+
+  if (!isOwnerOrAdmin(req.user, row)) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+
+  const { path: rel, content } = req.body || {};
+  if (typeof rel !== 'string' || !rel.trim()) {
+    return res.status(400).json({ error: 'path is required' });
+  }
+  if (typeof content !== 'string') {
+    return res.status(400).json({ error: 'content (string) is required' });
+  }
+
+  try {
+    writeSkillFile(row.folder_path, rel, content);
+  } catch (err) {
+    if (err.message === 'path traversal rejected') {
+      return res.status(400).json({ error: 'invalid path' });
+    }
+    if (err.code === 'ENOENT') {
+      return res.status(404).json({ error: 'file not found' });
+    }
+    return res.status(500).json({ error: `write failed: ${err.message}` });
+  }
+
+  res.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -202,7 +490,7 @@ router.post('/internal', authRequired, upload.single('file'), (req, res) => {
     cleanAll();
 
     const row = db.prepare(`${SELECT_SKILL} WHERE id = ?`).get(id);
-    return res.status(201).json(skillSummary(row));
+    return res.status(201).json(skillSummary(row, req.user.id));
   } catch (err) {
     cleanAll();
     return res.status(500).json({ error: `internal upload failed: ${err.message}` });
@@ -247,7 +535,7 @@ router.post('/external', authRequired, async (req, res) => {
       db.prepare(`UPDATE skills SET folder_path = ? WHERE id = ?`).run(dest, id);
 
       const row = db.prepare(`${SELECT_SKILL} WHERE id = ?`).get(id);
-      created.push(skillSummary(row));
+      created.push(skillSummary(row, req.user.id));
     }
 
     cleanup(repoDir);

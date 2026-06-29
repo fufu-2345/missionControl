@@ -269,6 +269,297 @@ a {
   color: #111;
 }
 
+/* ---- Filters / chips ---- */
+.filters {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin: 1rem 0 0.5rem;
+}
+
+.filter-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.filter-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+  padding-top: 0.3rem;
+  min-width: 5rem;
+}
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.chip {
+  font-size: 0.78rem;
+  padding: 0.25rem 0.65rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.chip:hover {
+  background: #f0f0f2;
+}
+
+.chip-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.chip-active:hover {
+  background: #1d4ed8;
+}
+
+/* ---- Star button on cards ---- */
+.skill-card {
+  position: relative;
+}
+
+.star-btn {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0.1rem 0.25rem;
+  color: var(--text);
+}
+
+.star-btn:hover {
+  transform: scale(1.1);
+}
+
+.star-count {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+/* card content should not slide under the star button */
+.skill-card .skill-card-top {
+  padding-right: 2.5rem;
+}
+
+/* ---- Skill detail page ---- */
+.detail-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+  font-size: 0.9rem;
+}
+
+.detail-tags {
+  margin-bottom: 0.5rem;
+}
+
+.detail-section-title {
+  font-size: 1.05rem;
+  margin: 1.25rem 0 0.5rem;
+}
+
+/* ---- File browser (tree + viewer) ---- */
+.file-browser {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+
+.file-tree {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.6rem;
+  max-height: 60vh;
+  overflow: auto;
+}
+
+.file-tree-empty {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.file-tree-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.file-tree-dir {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 0.15rem 0;
+}
+
+.file-tree-file {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 0.82rem;
+  color: var(--text);
+  cursor: pointer;
+  padding: 0.15rem 0.3rem;
+  border-radius: 4px;
+}
+
+.file-tree-file:hover {
+  background: #f0f0f2;
+}
+
+.file-tree-active {
+  background: #e0e7ff;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.file-pane {
+  min-width: 0;
+}
+
+.file-pane-empty {
+  margin: 0;
+  padding: 1rem;
+  font-size: 0.9rem;
+}
+
+.file-content {
+  margin: 0;
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 8px;
+  padding: 0.9rem 1rem;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre;
+}
+
+.file-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.file-textarea {
+  width: 100%;
+  min-height: 50vh;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  resize: vertical;
+}
+
+.file-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* ---- Skill edit panel (metadata) ---- */
+.edit-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem 1.1rem;
+  margin: 0.75rem 0 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.edit-panel-title {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.edit-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.edit-field input[type='text'],
+.edit-field select {
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.9rem;
+  color: var(--text);
+  background: var(--panel);
+}
+
+.edit-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.edit-visibility {
+  display: flex;
+  gap: 1rem;
+}
+
+.radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-direction: row;
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+.edit-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.edit-saved {
+  font-size: 0.85rem;
+}
+
+@media (max-width: 640px) {
+  .file-browser {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ---- Upload modal ---- */
 .modal-overlay {
   position: fixed;
