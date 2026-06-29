@@ -49,6 +49,25 @@ a {
   color: var(--text);
 }
 
+/* Top-nav links: muted by default, dark + underlined for the active page. */
+.nav-link {
+  color: var(--muted);
+  font-weight: 400;
+  text-decoration: none;
+  padding: 0.2rem 0;
+  border-bottom: 2px solid transparent;
+}
+
+.nav-link:hover {
+  color: var(--text);
+}
+
+.nav-link-active {
+  color: var(--text);
+  font-weight: 600;
+  border-bottom-color: var(--accent);
+}
+
 .topnav-right {
   display: flex;
   align-items: center;

@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "node src/server.js",
     "start": "node src/server.js",
+    "seed": "node src/seed.js",
+    "pretest": "node src/seed.js",
     "test": "vitest run"
   },
   "dependencies": {

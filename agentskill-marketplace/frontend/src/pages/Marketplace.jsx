@@ -184,7 +184,11 @@ export default function Marketplace() {
       {!loading && error && <p className="auth-error">{error}</p>}
 
       {!loading && !error && skills.length === 0 && (
-        <p className="muted">No skills match these filters.</p>
+        <p className="muted">
+          {activeTag || activeCategory || starredOnly
+            ? 'No skills match these filters.'
+            : 'No skills yet — click Upload to add the first one.'}
+        </p>
       )}
 
       {!loading && !error && skills.length > 0 && (

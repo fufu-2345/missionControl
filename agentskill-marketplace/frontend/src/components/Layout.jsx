@@ -1,11 +1,9 @@
 import { Link, NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../auth/AuthContext.jsx';
 
-const navLinkStyle = ({ isActive }) => ({
-  color: isActive ? '#111' : '#555',
-  fontWeight: isActive ? 600 : 400,
-  textDecoration: 'none',
-});
+// NavLink applies the `nav-link-active` class to the current page's link.
+const navLinkClass = ({ isActive }) =>
+  isActive ? 'nav-link nav-link-active' : 'nav-link';
 
 export default function Layout() {
   const { user, token, isAdmin, logout } = useAuth();
@@ -23,14 +21,14 @@ export default function Layout() {
           <Link to="/marketplace" className="brand">
             agentSkill
           </Link>
-          <NavLink to="/marketplace" style={navLinkStyle}>
+          <NavLink to="/marketplace" className={navLinkClass}>
             Marketplace
           </NavLink>
-          <NavLink to="/timeline" style={navLinkStyle}>
+          <NavLink to="/timeline" className={navLinkClass}>
             Timeline
           </NavLink>
           {isAdmin && (
-            <NavLink to="/admin" style={navLinkStyle}>
+            <NavLink to="/admin" className={navLinkClass}>
               Admin
             </NavLink>
           )}
