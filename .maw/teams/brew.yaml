@@ -1,0 +1,8 @@
+name: brew
+description: Brew team — bob/jack/john crew anchored at soulbrew. Runnable from the soulbrew root; project is pinned to fufu-2345/missionControl (the soulbrew repo) so it always targets soulbrew regardless of cwd.
+session: brew
+project: fufu-2345/missionControl
+members:
+  - role: bob
+  - role: jack
+  - role: john
