@@ -25,7 +25,7 @@ export function seed() {
     insertUser.run(username, hash, role);
   }
 
-  ensureUser('admin', 'admin123', 'admin');
+  ensureUser('admin', 'admin', 'admin');
   ensureUser('alice', 'alice123', 'user');
 
   const insertCategory = db.prepare(

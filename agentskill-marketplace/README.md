@@ -66,7 +66,7 @@ The backend seeds these accounts automatically on startup (idempotent — safe t
 
 | Username | Password | Role |
 |---|---|---|
-| `admin` | `admin123` | admin |
+| `admin` | `admin` | admin |
 | `alice` | `alice123` | user |
 
 It also seeds a few categories (`utility`, `data`, `devtools`), tags (`cli`, `ai`, `format`, `git`), and one group (`internal-team`).
