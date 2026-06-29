@@ -4,6 +4,7 @@ import { router as authRouter } from './auth.js';
 import { router as skillsRouter } from './skills.js';
 import { router as metaRouter } from './meta.js';
 import { router as adminRouter } from './admin.js';
+import { router as statsRouter } from './stats.js';
 
 export function createApp() {
   const app = express();
@@ -20,6 +21,8 @@ export function createApp() {
   app.use('/api/admin', adminRouter);
   // Meta lists: /api/tags, /api/categories and /api/groups.
   app.use('/api', metaRouter);
+  // Charts + recommendations: /api/stats/... and /api/recommendations.
+  app.use('/api', statsRouter);
 
   return app;
 }

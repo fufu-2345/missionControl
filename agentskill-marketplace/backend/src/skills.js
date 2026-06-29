@@ -77,7 +77,7 @@ function skillGroups(skillId) {
  *            tags:string[], visibility, source_url, starred:boolean,
  *            starCount:number}}
  */
-function skillSummary(row, userId) {
+export function skillSummary(row, userId) {
   const owner = db
     .prepare(`SELECT id, username FROM users WHERE id = ?`)
     .get(row.owner_id) || { id: row.owner_id, username: null };
@@ -141,6 +141,31 @@ function viewerCanSee(user, row) {
 
 const SELECT_SKILL = `SELECT id, name, owner_id, type, category_id, visibility, source_url, folder_path, created_at FROM skills`;
 
+/**
+ * Every skill row the given user is allowed to see, newest first.
+ *
+ * Applies the §2 visibility rule (canSee) to all skills, loading the viewer's
+ * group ids once and each private skill's group ids on demand. Reusable across
+ * routers (skills list, stats, recommendations) so private skills the viewer
+ * can't see are consistently excluded.
+ *
+ * @param {{id:*, role?:string}} user  the viewer (req.user).
+ * @returns {object[]}                 skill rows (SELECT_SKILL columns).
+ */
+export function getVisibleSkillRows(user) {
+  const rows = db.prepare(`${SELECT_SKILL} ORDER BY created_at DESC, id DESC`).all();
+  const ugids = userGroupIds(user.id);
+
+  return rows.filter((row) =>
+    canSee({
+      user,
+      skill: row,
+      userGroupIds: ugids,
+      skillGroupIds: row.visibility === 'private' ? skillGroupIds(row.id) : [],
+    })
+  );
+}
+
 // ---------------------------------------------------------------------------
 // GET /  — list every skill the viewer can see
 //
@@ -150,17 +175,7 @@ const SELECT_SKILL = `SELECT id, name, owner_id, type, category_id, visibility, 
 //   ?starred=true       only skills the viewer has starred
 // ---------------------------------------------------------------------------
 router.get('/', authRequired, (req, res) => {
-  const rows = db.prepare(`${SELECT_SKILL} ORDER BY created_at DESC, id DESC`).all();
-  const ugids = userGroupIds(req.user.id);
-
-  let visible = rows.filter((row) =>
-    canSee({
-      user: req.user,
-      skill: row,
-      userGroupIds: ugids,
-      skillGroupIds: row.visibility === 'private' ? skillGroupIds(row.id) : [],
-    })
-  );
+  let visible = getVisibleSkillRows(req.user);
 
   // --- post-visibility filters (AND) ---
   const { tag, category, starred } = req.query;

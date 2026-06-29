@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiFetch } from '../api/client.js';
 import UploadModal from '../components/UploadModal.jsx';
+import SkillCard from '../components/SkillCard.jsx';
 
 export default function Marketplace() {
   const navigate = useNavigate();
@@ -10,6 +11,9 @@ export default function Marketplace() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [showUpload, setShowUpload] = useState(false);
+
+  // Recommended zone (content-based on starred skills). Hidden if empty.
+  const [recommended, setRecommended] = useState([]);
 
   // Filter master lists.
   const [tags, setTags] = useState([]); // [{id, name}]
@@ -36,6 +40,20 @@ export default function Marketplace() {
       }
     })();
   }, []);
+
+  // Load recommendations once. Non-fatal: the zone simply stays hidden on error.
+  const fetchRecommendations = useCallback(async () => {
+    try {
+      const data = await apiFetch('/recommendations');
+      setRecommended(Array.isArray(data?.skills) ? data.skills : []);
+    } catch {
+      setRecommended([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchRecommendations();
+  }, [fetchRecommendations]);
 
   // Refetch the grid whenever a filter changes. Builds ?tag=&category=&starred=.
   const fetchSkills = useCallback(async () => {
@@ -65,17 +83,17 @@ export default function Marketplace() {
   const toggleCategory = (name) =>
     setActiveCategory((cur) => (cur === name ? null : name));
 
-  // Star a single card; patch just that card from the response.
+  // Star a single card; patch just that card from the response. Patches both the
+  // main grid and the recommended row so the two stay in sync.
   async function handleStar(skillId) {
     try {
       const res = await apiFetch(`/skills/${skillId}/star`, { method: 'POST' });
-      setSkills((prev) =>
-        prev.map((s) =>
-          s.id === skillId
-            ? { ...s, starred: res.starred, starCount: res.starCount }
-            : s
-        )
-      );
+      const patch = (s) =>
+        s.id === skillId
+          ? { ...s, starred: res.starred, starCount: res.starCount }
+          : s;
+      setSkills((prev) => prev.map(patch));
+      setRecommended((prev) => prev.map(patch));
     } catch (err) {
       setError(err.message || 'Failed to update star.');
     }
@@ -94,7 +112,23 @@ export default function Marketplace() {
         </button>
       </div>
 
-      {/* Recommended zone (content-based) lands in Sprint 5 — placeholder only. */}
+      {/* ---- Recommended zone (content-based; hidden when empty) ---- */}
+      {recommended.length > 0 && (
+        <div className="recommended-zone">
+          <h2 className="recommended-title">Recommended for you</h2>
+          <div className="recommended-row">
+            {recommended.map((skill) => (
+              <div className="recommended-item" key={skill.id}>
+                <SkillCard
+                  skill={skill}
+                  onOpen={() => navigate(`/skills/${skill.id}`)}
+                  onStar={() => handleStar(skill.id)}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* ---- Filter chips ---- */}
       <div className="filters">
@@ -173,65 +207,5 @@ export default function Marketplace() {
         />
       )}
     </section>
-  );
-}
-
-function SkillCard({ skill, onOpen, onStar }) {
-  const isInternal = skill.type === 'internal';
-  // Per spec: red border for internal, black for external.
-  const borderColor = isInternal ? '#dc2626' : '#111111';
-  const tags = Array.isArray(skill.tags) ? skill.tags : [];
-
-  return (
-    <div
-      className="skill-card"
-      style={{ borderColor }}
-      onClick={onOpen}
-      role="button"
-      tabIndex={0}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          onOpen();
-        }
-      }}
-    >
-      <button
-        type="button"
-        className="star-btn"
-        aria-label={skill.starred ? 'Unstar' : 'Star'}
-        onClick={(e) => {
-          e.stopPropagation(); // don't navigate
-          onStar();
-        }}
-      >
-        {skill.starred ? '⭐' : '☆'}
-        {typeof skill.starCount === 'number' && (
-          <span className="star-count">{skill.starCount}</span>
-        )}
-      </button>
-
-      <div className="skill-card-top">
-        <span className="skill-name">{skill.name}</span>
-        <span className={`badge ${isInternal ? 'badge-internal' : 'badge-external'}`}>
-          {skill.type}
-        </span>
-      </div>
-
-      <div className="skill-meta muted">
-        {skill.owner?.username && <span>by {skill.owner.username}</span>}
-        {skill.category && <span>· {skill.category}</span>}
-      </div>
-
-      {tags.length > 0 && (
-        <div className="skill-tags">
-          {tags.map((tag) => (
-            <span key={tag} className="tag-chip">
-              {tag}
-            </span>
-          ))}
-        </div>
-      )}
-    </div>
   );
 }
