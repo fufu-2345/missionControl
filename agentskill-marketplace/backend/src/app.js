@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { router as authRouter } from './auth.js';
+import { router as skillsRouter } from './skills.js';
 
 export function createApp() {
   const app = express();
@@ -13,6 +14,7 @@ export function createApp() {
   });
 
   app.use('/api/auth', authRouter);
+  app.use('/api/skills', skillsRouter);
 
   return app;
 }
