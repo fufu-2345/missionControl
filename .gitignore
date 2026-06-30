@@ -38,3 +38,6 @@ Thumbs.db
 /extension/out/
 
 todo.md
+
+# Oracle / maw runtime artifacts (inbox, team mailbox/manifest, spawn prompts) — machine-local + transient; oracle จริงอยู่ ~/.oracle
+ψ/
