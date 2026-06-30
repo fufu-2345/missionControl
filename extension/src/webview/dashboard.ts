@@ -11,7 +11,13 @@ import {
   setCurrentProjectId,
 } from "../projectState";
 import { MONTHLY_CAP_KEY, computeUsage, localMonthKey, sumByPrefix } from "../usage";
-import { TMUX_FMT, type TmuxSession, parseTmuxSessions } from "./sessions";
+import {
+  TMUX_FMT,
+  type TmuxSession,
+  buildAttachCommand,
+  isSafeSessionName,
+  parseTmuxSessions,
+} from "./sessions";
 import { listSkills } from "./skills";
 
 type Project = {
@@ -34,6 +40,7 @@ let _statusPollTimer: NodeJS.Timeout | undefined;
 // webview, used to validate attach requests.
 const _sessionTerminals = new Map<string, vscode.Terminal>();
 let _lastSessionNames = new Set<string>();
+let _termCleanupRegistered = false;
 
 const STATUS_POLL_MS = 10_000;
 
@@ -130,6 +137,19 @@ export function openDashboardPanel(
     }
   });
 
+  // One global listener: when a session's terminal closes, drop it from the
+  // reuse map so the next click opens a fresh attached terminal.
+  if (!_termCleanupRegistered) {
+    _termCleanupRegistered = true;
+    context.subscriptions.push(
+      vscode.window.onDidCloseTerminal((t) => {
+        for (const [k, v] of _sessionTerminals) {
+          if (v === t) _sessionTerminals.delete(k);
+        }
+      }),
+    );
+  }
+
   panel.webview.onDidReceiveMessage(async (msg) => {
     if (!msg || typeof msg.type !== "string") return;
     switch (msg.type) {
@@ -152,6 +172,49 @@ export function openDashboardPanel(
         lastOnline = online;
         await refreshDataCards();
         await pushSessions(panel);
+        return;
+      }
+      case "attach_session": {
+        const name = typeof msg.name === "string" ? msg.name : "";
+        // Defense in depth: only attach to a name we actually listed, and that
+        // passes the shell-safety whitelist.
+        if (!_lastSessionNames.has(name) || !isSafeSessionName(name)) return;
+
+        const existing = _sessionTerminals.get(name);
+        if (existing && existing.exitStatus === undefined) {
+          existing.show(false); // reuse — focus the already-open terminal
+          return;
+        }
+
+        const term = vscode.window.createTerminal({
+          name: "tmux: " + name,
+          location: vscode.TerminalLocation.Editor,
+        });
+        _sessionTerminals.set(name, term);
+        term.show(false);
+
+        const command = buildAttachCommand(name);
+        let launched = false;
+        const launch = () => {
+          if (launched || term.exitStatus !== undefined) return;
+          launched = true;
+          if (term.shellIntegration) term.shellIntegration.executeCommand(command);
+          else term.sendText(command);
+        };
+        if (term.shellIntegration) {
+          launch();
+        } else {
+          const sub = vscode.window.onDidChangeTerminalShellIntegration((e) => {
+            if (e.terminal === term) {
+              sub.dispose();
+              launch();
+            }
+          });
+          setTimeout(() => {
+            sub.dispose();
+            launch();
+          }, 2500);
+        }
         return;
       }
       case "run": {
