@@ -1,3 +1,5 @@
+import * as cp from "node:child_process";
+
 import * as vscode from "vscode";
 
 import { ApiError, BACKEND_DISABLED, SERVER_URL, api, notifyBackendDisabled } from "../api";
@@ -9,6 +11,7 @@ import {
   setCurrentProjectId,
 } from "../projectState";
 import { MONTHLY_CAP_KEY, computeUsage, localMonthKey, sumByPrefix } from "../usage";
+import { TMUX_FMT, type TmuxSession, parseTmuxSessions } from "./sessions";
 import { listSkills } from "./skills";
 
 type Project = {
@@ -25,6 +28,12 @@ type Project = {
 let _panel: vscode.WebviewPanel | undefined;
 let _unsubProjectChange: (() => void) | undefined;
 let _statusPollTimer: NodeJS.Timeout | undefined;
+
+// Sessions panel state. _sessionTerminals reuses one editor terminal per tmux
+// session (Task: click→attach); _lastSessionNames is the set we last showed the
+// webview, used to validate attach requests.
+const _sessionTerminals = new Map<string, vscode.Terminal>();
+let _lastSessionNames = new Set<string>();
 
 const STATUS_POLL_MS = 10_000;
 
@@ -89,6 +98,7 @@ export function openDashboardPanel(
 
   const pollTick = async () => {
     const online = await pushStatus(panel);
+    await pushSessions(panel); // tmux is local — refresh regardless of maw/oracle
     if (online) {
       if (!lastOnline || !projectsLoaded) {
         await refreshDataCards(); // edge: also re-fetch the project list
@@ -127,6 +137,7 @@ export function openDashboardPanel(
         // First load — push everything we have.
         lastOnline = await pushStatus(panel);
         await refreshDataCards();
+        await pushSessions(panel);
         // Start the poller (one per panel lifetime). pollTick self-heals the
         // data cards if the backend was still booting when "ready" fired.
         if (!_statusPollTimer) {
@@ -140,6 +151,7 @@ export function openDashboardPanel(
         const online = await pushStatus(panel);
         lastOnline = online;
         await refreshDataCards();
+        await pushSessions(panel);
         return;
       }
       case "run": {
@@ -204,6 +216,21 @@ export function pushDashboardEvent(event: string, data: unknown): void {
     data,
     ts: Date.now(),
   });
+}
+
+function listTmuxSessions(): Promise<TmuxSession[]> {
+  return new Promise((resolve) => {
+    cp.execFile("tmux", ["list-sessions", "-F", TMUX_FMT], { timeout: 700 }, (err, stdout) => {
+      // No server / error → treat as zero sessions (not a failure).
+      resolve(err ? [] : parseTmuxSessions(stdout.toString()));
+    });
+  });
+}
+
+async function pushSessions(panel: vscode.WebviewPanel): Promise<void> {
+  const sessions = await listTmuxSessions();
+  _lastSessionNames = new Set(sessions.map((s) => s.name));
+  panel.webview.postMessage({ type: "sessions", sessions });
 }
 
 async function pushStatus(panel: vscode.WebviewPanel): Promise<boolean> {
@@ -565,6 +592,14 @@ function renderHtml(): string {
     font-size: 11px;
     margin-left: 8px;
   }
+  .session-row { display: flex; align-items: center; gap: 10px; padding: 8px 6px; border-radius: 4px; cursor: pointer; }
+  .session-row:hover { background: var(--vscode-list-hoverBackground); }
+  .session-row .sdot { width: 8px; height: 8px; border-radius: 50%; background: #888; flex-shrink: 0; }
+  .session-row .sdot.on { background: #3fb950; }
+  .session-row .smeta { display: flex; flex-direction: column; min-width: 0; }
+  .session-row .sname { font-size: 13px; font-weight: 600; }
+  .session-row .ssub { font-size: 11px; opacity: 0.7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sessions-empty { opacity: 0.6; font-size: 12px; padding: 6px; }
 </style>
 </head>
 <body>
@@ -593,6 +628,11 @@ function renderHtml(): string {
         <span class="label">Share memory cross-project</span>
         <span class="hint" id="memshareHint">— recall lessons from all projects (default: isolated)</span>
       </div>
+    </div>
+
+    <div class="group-label">Sessions</div>
+    <div class="card">
+      <div id="sessionsList" class="sessions-empty">(loading…)</div>
     </div>
 
     <div class="group-label">Workflow</div>
@@ -742,6 +782,29 @@ function renderHtml(): string {
     document.getElementById("projectPid").textContent = pid ? "pid: " + pid : "";
   }
 
+  function renderSessions(sessions) {
+    const root = document.getElementById("sessionsList");
+    if (!sessions || !sessions.length) {
+      root.className = "sessions-empty";
+      root.textContent = "(no tmux sessions running)";
+      return;
+    }
+    root.className = "";
+    root.innerHTML = sessions.map((s) =>
+      '<div class="session-row" data-name="' + escapeHtml(s.name) + '">'
+      + '<span class="sdot ' + (s.attached ? 'on' : '') + '"></span>'
+      + '<span class="smeta">'
+      + '<span class="sname">' + escapeHtml(s.name) + '</span>'
+      + '<span class="ssub">' + escapeHtml(s.windows + ' win · ' + s.cmd + '  ' + s.cwd) + '</span>'
+      + '</span></div>'
+    ).join('');
+    root.querySelectorAll('.session-row').forEach((el) => {
+      el.addEventListener('click', () => {
+        vscode.postMessage({ type: 'attach_session', name: el.dataset.name });
+      });
+    });
+  }
+
   function renderProjects(projects, current, error) {
     const sel = document.getElementById("projectSelect");
     const opts = ['<option value="">(active project)</option>']
@@ -812,6 +875,8 @@ function renderHtml(): string {
       sub.textContent = (m.enabled ?? 0) + " active / " + (m.total ?? 0) + " total";
     } else if (m.type === "memory_share") {
       renderMemShare(m);
+    } else if (m.type === "sessions") {
+      renderSessions(m.sessions || []);
     } else if (m.type === "ws_event") {
       pushFeed(m.event, m.data, m.ts);
     }
