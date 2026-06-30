@@ -701,8 +701,8 @@ function renderHtml(): string {
     <div class="group-label">Workflow</div>
     <div class="grid cols-3">
       <button class="tile primary" type="button" onclick="run('missioncontrol.claude')">
-        <div class="title">💬 Open Claude</div>
-        <div class="sub">เปิด Claude Code CLI ในเทอร์มินัล (soulbrew)</div>
+        <div class="title">Open Claude</div>
+        <div class="sub">เลือก project → เปิด Claude ใน tmux (ปิด tab ไม่ตาย)</div>
       </button>
       <button class="tile" type="button" onclick="run('missioncontrol.status')">
         <div class="title">View Status</div>
