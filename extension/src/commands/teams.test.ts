@@ -2,8 +2,9 @@ import { expect, test } from "bun:test";
 
 import {
   buildKickoffPrompt,
-  buildWakeAttachCommand,
+  buildLaunchCommand,
   isSafeOracleName,
+  parseOraclePath,
   parseTeamRoster,
 } from "./teams";
 
@@ -71,20 +72,35 @@ test("isSafeOracleName: whitelist", () => {
   expect(isSafeOracleName("$(whoami)")).toBe(false);
 });
 
-test("buildWakeAttachCommand: single-quoted + --attach (no kickoff)", () => {
-  expect(buildWakeAttachCommand("foreman")).toBe("maw wake 'foreman' --attach");
-});
-
-test("buildWakeAttachCommand: with kickoff → adds -p (single-quoted)", () => {
-  expect(buildWakeAttachCommand("foreman", "hi there")).toBe(
-    "maw wake 'foreman' --attach -p 'hi there'",
+test("buildLaunchCommand: cd + fresh claude with single-quoted kickoff", () => {
+  expect(buildLaunchCommand("/home/x/foreman-oracle", "hello")).toBe(
+    "cd '/home/x/foreman-oracle' && claude --dangerously-skip-permissions 'hello'",
   );
 });
 
-test("buildWakeAttachCommand: kickoff with a single quote is shell-escaped", () => {
-  expect(buildWakeAttachCommand("foreman", "it's fine")).toBe(
-    "maw wake 'foreman' --attach -p 'it'\\''s fine'",
+test("buildLaunchCommand: NO --continue (fresh session, not resume)", () => {
+  expect(buildLaunchCommand("/x", "hi")).not.toContain("--continue");
+});
+
+test("buildLaunchCommand: single quote in kickoff is shell-escaped", () => {
+  expect(buildLaunchCommand("/x", "it's fine")).toBe(
+    "cd '/x' && claude --dangerously-skip-permissions 'it'\\''s fine'",
   );
+});
+
+test("parseOraclePath: finds local_path by name", () => {
+  const raw = JSON.stringify({
+    oracles: [
+      { name: "bob", local_path: "/p/bob-oracle" },
+      { name: "foreman", local_path: "/p/foreman-oracle" },
+    ],
+  });
+  expect(parseOraclePath(raw, "foreman")).toBe("/p/foreman-oracle");
+  expect(parseOraclePath(raw, "nope")).toBeNull();
+});
+
+test("parseOraclePath: bad JSON → null", () => {
+  expect(parseOraclePath("{bad", "foreman")).toBeNull();
 });
 
 test("buildKickoffPrompt: names team/orchestrator/workers + runs drive not bootstrap", () => {

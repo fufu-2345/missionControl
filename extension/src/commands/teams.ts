@@ -64,7 +64,7 @@ export function buildKickoffPrompt(
     ? workers.join(", ")
     : "(ทีมนี้ยังไม่มี worker — เชิญเพิ่มก่อนแจกงาน)";
   return [
-    `คุณคือ orchestrator ชื่อ "${orchestrator}" ของทีม "${team}".`,
+    `คุณคือ orchestrator ชื่อ ${orchestrator} ของทีม ${team}.`,
     `Workers ที่ dispatch ได้: ${w}.`,
     `รัน skill /orches-drive เดี๋ยวนี้: ทักผมสั้นๆ → ถาม build requirement → discuss ให้ชัด →` +
       ` แตกเป็น sprint (คุณกำหนดจำนวนเอง) → แจกงาน worker ด้วย tmux send-keys → poll .orches-done →` +
@@ -73,12 +73,31 @@ export function buildKickoffPrompt(
   ].join(" ");
 }
 
-/** Shell command to wake + attach an orchestrator oracle, optionally injecting a
- *  kickoff prompt (`maw wake -p`). Caller MUST validate the name with
- *  isSafeOracleName first; the name + prompt are single-quoted (prompt escaped).
- *  `maw wake --attach` reuses the oracle's own session if already awake. */
-export function buildWakeAttachCommand(orchestrator: string, kickoff?: string): string {
-  let cmd = `maw wake '${orchestrator}' --attach`;
-  if (kickoff && kickoff.trim()) cmd += ` -p ${shSingleQuote(kickoff)}`;
-  return cmd;
+/** Find an oracle's local repo path from `~/.maw/oracles.json` content. */
+export function parseOraclePath(oraclesJson: string, name: string): string | null {
+  try {
+    const data = JSON.parse(oraclesJson) as {
+      oracles?: { name?: string; local_path?: string }[];
+    };
+    const list = Array.isArray(data?.oracles) ? data.oracles : [];
+    const hit = list.find(
+      (o) => o?.name === name && typeof o.local_path === "string",
+    );
+    return hit?.local_path ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Command to launch the orchestrator as a FRESH interactive claude in its own
+ *  repo dir (loads its CLAUDE.md + ψ + global skills), with the kickoff prompt
+ *  as the first message so it immediately runs /orches-drive. Avoids `--continue`
+ *  (which EXITS when the oracle has no prior conversation, dropping to a bash
+ *  shell — the "syntax error near (" bug) and the fragile post-launch send-keys
+ *  injection. Both args are single-quoted (embedded ' escaped). */
+export function buildLaunchCommand(repoPath: string, kickoff: string): string {
+  return (
+    `cd ${shSingleQuote(repoPath)} && ` +
+    `claude --dangerously-skip-permissions ${shSingleQuote(kickoff)}`
+  );
 }

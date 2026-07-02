@@ -6,11 +6,14 @@ import * as vscode from "vscode";
 
 import {
   buildKickoffPrompt,
-  buildWakeAttachCommand,
+  buildLaunchCommand,
   isSafeOracleName,
   type OracleTeam,
+  parseOraclePath,
   parseTeamRoster,
 } from "./teams";
+
+const ORACLES_JSON = path.join(os.homedir(), ".maw", "oracles.json");
 
 // "Start Orchestrator" — a CODE-ONLY bootstrap (no LLM / no skill): read the
 // oracle-team rosters off disk, let the user pick a team + orchestrator, then
@@ -90,9 +93,35 @@ export async function startOrchestratorCommand(_context: vscode.ExtensionContext
     return;
   }
 
-  // 3) fresh editor terminal → wake+attach just the orchestrator
+  // 3) resolve the orchestrator's repo path (launch claude in ITS dir so it
+  //    loads its CLAUDE.md + ψ). Path comes from the oracles.json scan cache.
+  let repoPath: string | null = null;
+  try {
+    repoPath = parseOraclePath(fs.readFileSync(ORACLES_JSON, "utf8"), orch);
+  } catch {
+    repoPath = null;
+  }
+  if (!repoPath) {
+    vscode.window.showErrorMessage(
+      `Mission Control: หา repo ของ '${orch}' ไม่เจอใน ~/.maw/oracles.json — ลองรัน \`maw oracle scan\` ก่อน`,
+    );
+    return;
+  }
+
+  // 4) build the launch: workers (non-orchestrator members) + a kickoff prompt so
+  //    the orchestrator immediately runs /orches-drive with its team context.
+  const workers = team.members
+    .filter((m) => m.role !== "orchestrator")
+    .map((m) => m.oracle);
+  const command = buildLaunchCommand(
+    repoPath,
+    buildKickoffPrompt(team.name, orch, workers),
+  );
+
+  // 5) fresh editor terminal → run it (fresh interactive claude, NO --continue,
+  //    kickoff as the first message so foreman starts the flow immediately).
   if (_orchTerminal && _orchTerminal.exitStatus === undefined) {
-    _orchTerminal.dispose(); // avoid stacking attaches on repeated clicks
+    _orchTerminal.dispose(); // avoid stacking on repeated clicks
   }
   const term = vscode.window.createTerminal({
     name: `orchestrator: ${orch}`,
@@ -100,18 +129,6 @@ export async function startOrchestratorCommand(_context: vscode.ExtensionContext
   });
   _orchTerminal = term;
   term.show(false);
-
-  // Workers = every non-orchestrator member; foreman dispatches to these.
-  const workers = team.members
-    .filter((m) => m.role !== "orchestrator")
-    .map((m) => m.oracle);
-  // Wake + attach + inject a kickoff prompt so the orchestrator immediately runs
-  // the /orches-drive flow (discuss → sprint → dispatch → verify → merge) with
-  // its team context — not just sit idle.
-  const command = buildWakeAttachCommand(
-    orch,
-    buildKickoffPrompt(team.name, orch, workers),
-  );
   let launched = false;
   const launch = () => {
     if (launched || term.exitStatus !== undefined) return;
