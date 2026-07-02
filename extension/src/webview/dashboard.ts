@@ -104,8 +104,8 @@ export function openDashboardPanel(
   };
 
   const pollTick = async () => {
+    await pushSessions(panel); // tmux is local + fast — refresh first, independent of backend
     const online = await pushStatus(panel);
-    await pushSessions(panel); // tmux is local — refresh regardless of maw/oracle
     if (online) {
       if (!lastOnline || !projectsLoaded) {
         await refreshDataCards(); // edge: also re-fetch the project list
@@ -154,10 +154,13 @@ export function openDashboardPanel(
     if (!msg || typeof msg.type !== "string") return;
     switch (msg.type) {
       case "ready": {
-        // First load — push everything we have.
+        // Sessions are a fast local tmux read — push them FIRST + independently
+        // so they never wait behind (or break on) the backend-dependent status /
+        // data-card fetches. That ordering was the "(loading…) hangs" the user hit
+        // whenever the maw/oracle backend was down.
+        await pushSessions(panel);
         lastOnline = await pushStatus(panel);
         await refreshDataCards();
-        await pushSessions(panel);
         // Start the poller (one per panel lifetime). pollTick self-heals the
         // data cards if the backend was still booting when "ready" fired.
         if (!_statusPollTimer) {
@@ -168,10 +171,10 @@ export function openDashboardPanel(
         return;
       }
       case "refresh": {
+        await pushSessions(panel); // fast local tmux — first, never wait on backend
         const online = await pushStatus(panel);
         lastOnline = online;
         await refreshDataCards();
-        await pushSessions(panel);
         return;
       }
       case "attach_session": {
