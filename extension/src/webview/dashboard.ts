@@ -733,6 +733,10 @@ function renderHtml(): string {
         <div class="title">Open Terminal</div>
         <div class="sub">เปิด CLI (bash) ที่ soulbrew root — รัน maw/git</div>
       </button>
+      <button class="tile primary" type="button" onclick="run('missioncontrol.startOrchestrator')">
+        <div class="title">Start Orchestrator</div>
+        <div class="sub">เลือกทีม → ปลุก orchestrator + attach (code ล้วน ไม่ผ่าน LLM, ทันที)</div>
+      </button>
       <button class="tile" type="button" onclick="run('missioncontrol.status')">
         <div class="title">View Status</div>
         <div class="sub" id="statusSub">maw · oracle · git — เช็คสถานะ local</div>

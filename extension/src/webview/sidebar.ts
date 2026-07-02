@@ -276,6 +276,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   <button class="btn primary" id="openDashboard">Open Dashboard</button>
   <button class="btn primary" data-cmd="missioncontrol.claude">Open Claude</button>
   <button class="btn primary" data-cmd="missioncontrol.terminal">Open Terminal</button>
+  <button class="btn primary" data-cmd="missioncontrol.startOrchestrator">Start Orchestrator</button>
   <button class="btn" id="mawToggle" data-cmd="missioncontrol.mawToggle">maw ui…</button>
   <button class="btn" data-cmd="missioncontrol.skills">Skills</button>
 
