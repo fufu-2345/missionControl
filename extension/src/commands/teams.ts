@@ -47,9 +47,38 @@ export function isSafeOracleName(name: string): boolean {
   return /^[A-Za-z0-9._-]+$/.test(name);
 }
 
-/** Shell command to wake + attach an orchestrator oracle. Caller MUST validate
- *  with isSafeOracleName first; the name is single-quoted. `maw wake --attach`
- *  reuses the oracle's own session if already awake, so re-runs are safe. */
-export function buildWakeAttachCommand(orchestrator: string): string {
-  return `maw wake '${orchestrator}' --attach`;
+/** Wrap a string as a safe single-quoted shell argument (escapes embedded '). */
+function shSingleQuote(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
+/** The kickoff prompt injected into the woken orchestrator so it immediately
+ *  runs the /orches-drive loop (NOT the bootstrap) with its team context —
+ *  turning the fast code-wake into the full /orches flow. */
+export function buildKickoffPrompt(
+  team: string,
+  orchestrator: string,
+  workers: string[],
+): string {
+  const w = workers.length
+    ? workers.join(", ")
+    : "(ทีมนี้ยังไม่มี worker — เชิญเพิ่มก่อนแจกงาน)";
+  return [
+    `คุณคือ orchestrator ชื่อ "${orchestrator}" ของทีม "${team}".`,
+    `Workers ที่ dispatch ได้: ${w}.`,
+    `รัน skill /orches-drive เดี๋ยวนี้: ทักผมสั้นๆ → ถาม build requirement → discuss ให้ชัด →` +
+      ` แตกเป็น sprint (คุณกำหนดจำนวนเอง) → แจกงาน worker ด้วย tmux send-keys → poll .orches-done →` +
+      ` verify → git merge เข้า main → วนจนจบ → capture memory.`,
+    `อย่ารัน /orches (นั่นคือ bootstrap เลือกทีม/ปลุก — คุณผ่านมาแล้ว) และอย่า dispatch งานให้ตัวเอง.`,
+  ].join(" ");
+}
+
+/** Shell command to wake + attach an orchestrator oracle, optionally injecting a
+ *  kickoff prompt (`maw wake -p`). Caller MUST validate the name with
+ *  isSafeOracleName first; the name + prompt are single-quoted (prompt escaped).
+ *  `maw wake --attach` reuses the oracle's own session if already awake. */
+export function buildWakeAttachCommand(orchestrator: string, kickoff?: string): string {
+  let cmd = `maw wake '${orchestrator}' --attach`;
+  if (kickoff && kickoff.trim()) cmd += ` -p ${shSingleQuote(kickoff)}`;
+  return cmd;
 }

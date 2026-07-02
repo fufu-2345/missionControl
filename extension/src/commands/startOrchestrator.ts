@@ -5,6 +5,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 
 import {
+  buildKickoffPrompt,
   buildWakeAttachCommand,
   isSafeOracleName,
   type OracleTeam,
@@ -100,7 +101,17 @@ export async function startOrchestratorCommand(_context: vscode.ExtensionContext
   _orchTerminal = term;
   term.show(false);
 
-  const command = buildWakeAttachCommand(orch); // maw wake '<orch>' --attach
+  // Workers = every non-orchestrator member; foreman dispatches to these.
+  const workers = team.members
+    .filter((m) => m.role !== "orchestrator")
+    .map((m) => m.oracle);
+  // Wake + attach + inject a kickoff prompt so the orchestrator immediately runs
+  // the /orches-drive flow (discuss → sprint → dispatch → verify → merge) with
+  // its team context — not just sit idle.
+  const command = buildWakeAttachCommand(
+    orch,
+    buildKickoffPrompt(team.name, orch, workers),
+  );
   let launched = false;
   const launch = () => {
     if (launched || term.exitStatus !== undefined) return;
@@ -124,7 +135,7 @@ export async function startOrchestratorCommand(_context: vscode.ExtensionContext
   }
 
   vscode.window.showInformationMessage(
-    `Mission Control: waking orchestrator '${orch}' (team ${team.name}) — ` +
-      `พิมพ์ requirement ใน terminal ได้เลย · worker จะถูกปลุกตอน orchestrator แจกงาน`,
+    `Mission Control: ปลุก orchestrator '${orch}' (team ${team.name}) + เริ่ม /orches-drive — ` +
+      `foreman จะถาม requirement ใน terminal เอง · worker ปลุกตอนแจกงาน`,
   );
 }

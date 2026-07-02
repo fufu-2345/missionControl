@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import {
+  buildKickoffPrompt,
   buildWakeAttachCommand,
   isSafeOracleName,
   parseTeamRoster,
@@ -70,6 +71,31 @@ test("isSafeOracleName: whitelist", () => {
   expect(isSafeOracleName("$(whoami)")).toBe(false);
 });
 
-test("buildWakeAttachCommand: single-quoted + --attach", () => {
+test("buildWakeAttachCommand: single-quoted + --attach (no kickoff)", () => {
   expect(buildWakeAttachCommand("foreman")).toBe("maw wake 'foreman' --attach");
+});
+
+test("buildWakeAttachCommand: with kickoff → adds -p (single-quoted)", () => {
+  expect(buildWakeAttachCommand("foreman", "hi there")).toBe(
+    "maw wake 'foreman' --attach -p 'hi there'",
+  );
+});
+
+test("buildWakeAttachCommand: kickoff with a single quote is shell-escaped", () => {
+  expect(buildWakeAttachCommand("foreman", "it's fine")).toBe(
+    "maw wake 'foreman' --attach -p 'it'\\''s fine'",
+  );
+});
+
+test("buildKickoffPrompt: names team/orchestrator/workers + runs drive not bootstrap", () => {
+  const p = buildKickoffPrompt("carbon", "foreman", ["bob", "jack"]);
+  expect(p).toContain("carbon");
+  expect(p).toContain("foreman");
+  expect(p).toContain("bob, jack");
+  expect(p).toContain("/orches-drive");
+  expect(p).toContain("อย่ารัน /orches"); // must NOT re-bootstrap
+});
+
+test("buildKickoffPrompt: no workers → hint text", () => {
+  expect(buildKickoffPrompt("orch-dev", "foreman", [])).toContain("ยังไม่มี worker");
 });
