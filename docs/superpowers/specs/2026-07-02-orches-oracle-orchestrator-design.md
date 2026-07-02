@@ -104,7 +104,7 @@ The orchestrator uses the **standard oracle memory layers** exactly like any ora
 - Verify gate every sprint — no merge / no next sprint on failure.
 - Dispatch live via `maw hey` / `tmux send-keys` — **never** `maw team send` (that is inbox-only, does not inject).
 - Explicit memory capture (cross-repo) — passive hooks won't fire from the project repo.
-- Teardown = `maw team shutdown --merge` (preserve memory), **not** kill-by-PID.
+- Teardown = **per-oracle** (each worker's `/rrr` + Stop hook saves its ψ; leave sessions to sleep or `tmux kill-session` *after* capture). **NOT** `maw team shutdown --merge` — that verb only works on spawn/`up` live-worker teams (reads `config.json`); oracle-member teams have only `oracle-members.json` and throw "team not found". *(Corrected by the 2026-07-02 build audit — see §12.)*
 - Worker prompts pin the **absolute** worktree path.
 - Orchestrator is **excluded from its own worker pool** (recursion/self-dispatch hazard; `maw hey` filters `agentType: team-lead`, scheduler guards `target==self`, but the skill must also enforce it).
 
@@ -138,3 +138,22 @@ Verified against maw source (`Soul-Brews-Studio/maw-js` v26.6.14-alpha) + live p
 - **crontab mode (backlog):** a third, scheduled-kickoff mode. Leave room; do not build in v1.
 - **Parallel orchestrators (future):** disjoint worktrees; needs cross-orchestrator coordination logic (maw has no primitive).
 - **`orches-skills` repo bootstrapping:** create the repo, move `/orches` + add `/orches-drive`, set up the symlink into `~/.claude/skills/`, retire the stray `soulbrew/claude-skills/orches` copy.
+
+## 12. Post-build audit corrections (2026-07-02)
+
+A read-only 5-agent audit of the initial build corrected several assumptions. The skills (`orches-skills/`) already reflect these; this section keeps the spec honest:
+
+- **Teardown is per-oracle, not `maw team shutdown`.** `shutdown` reads `config.json` (live-worker/`up` teams); oracle-member teams have only `oracle-members.json` → "team not found". Preserve memory via each worker's `/rrr` + Stop hook, then let sessions sleep / `tmux kill-session` after capture.
+- **Live dispatch/re-injection uses raw `tmux send-keys`, not `maw hey`.** `maw hey` has a busy-guard: when the target is busy (which a worker is for the whole task), it queues to the inbox instead of injecting into the pane. `maw hey` is fine only for an *idle* target. `maw team send` remains inbox-only.
+- **Poll loop needs a timeout + pane-liveness check.** A bare `while [ ! -f .orches-done ]` hangs forever if a worker dies or the dispatch landed in an inbox. Add a max-iterations/elapsed cap + `tmux list-panes` liveness → escalate to the user; never hang, never merge on timeout.
+- **Worker pane-ids must be resolved explicitly** (from `maw team bring` output / `maw ls` / `tmux ls`) before dispatch — they are not in the oracle-member roster.
+- **Worker-name collision guard:** do not `bring`/dispatch an oracle already live in another session (e.g. `carbon`=bob/jack/john collides with the live `brew` team) — would spin a 2nd claude on the same repo/ψ.
+- **Self-dispatch is asserted at runtime** (`target != own oracle name`), not just prose.
+- **A skill cannot "block and wait."** Checkpoint mode = end the turn; resume when the next message arrives (user types after attach, or `maw hey`/`maw wake -p`). Auto mode = continue across tool calls in one turn; long overnight runs need an external re-trigger (`maw wake -p` / cron-backlog).
+- **`maw team bring` DOES work for oracle-member teams** (an audit sub-claim that it doesn't was a false alarm from grepping the non-live plugin copy).
+- **ψ vaults are intentionally gitignored fleet-wide** (`ψ/` in each oracle's `.gitignore`); "own ψ" (G1) is satisfied at runtime (`oracles.json has_psi:true`), not by committing ψ. `foreman-oracle` now has a matching `.gitignore`.
+- **Minor:** spec §8's mention of the `agentType: team-lead` filter is imprecise for oracle-member rosters (those exclude by name via `excludeSelf`); behavior is safe because the skills enforce role→worker/exclude-self manually.
+
+### Build status (2026-07-02, autonomous run)
+DONE (local, safe): plan, both skills (with audit fixes), `foreman-oracle` offline scaffold + registered + tagged `role:orchestrator` in team `orch-dev`, `/orches-drive` symlinked, static smoke test 22/22.
+DEFERRED (need user): GitHub push of `orches-skills` + `foreman-oracle`; `/orches` v1→v2 cutover; **inviting non-colliding worker oracles into `orch-dev`** (a hard precondition — it currently has only foreman); the first live end-to-end run (watch closely; stop if a gap needs maw source).
