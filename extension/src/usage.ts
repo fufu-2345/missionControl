@@ -104,6 +104,39 @@ let summaryAt = 0;
 let inFlight: Promise<UsageSummary> | null = null;
 const SUMMARY_TTL = 15_000;
 
+// Persist the per-file cache across extension reloads (F5 / window reload).
+// Without this, every reload does a cold full parse of ALL transcripts
+// (~450MB / 1000+ files → several seconds); with it, only files whose
+// mtime/size changed since last run get re-parsed. Best-effort: any read/write
+// error just falls back to an in-memory-only cold scan.
+const CACHE_FILE = path.join(os.homedir(), ".cache", "mission-control", "usage-filecache.json");
+let hydrated = false;
+
+async function hydrateFileCache(): Promise<void> {
+  if (hydrated) return;
+  hydrated = true; // attempt once per process; a miss just means a cold scan
+  try {
+    const raw = await fs.promises.readFile(CACHE_FILE, "utf8");
+    const obj = JSON.parse(raw) as { v?: number; entries?: [string, FileAgg][] };
+    if (obj?.v === 1 && Array.isArray(obj.entries)) {
+      for (const [k, v] of obj.entries) fileCache.set(k, v);
+    }
+  } catch {
+    // no cache yet / unreadable — the cold scan below will rebuild it
+  }
+}
+
+async function saveFileCache(currentFiles: string[]): Promise<void> {
+  try {
+    const keep = new Set(currentFiles); // drop entries for vanished transcripts
+    const entries = [...fileCache].filter(([k]) => keep.has(k));
+    await fs.promises.mkdir(path.dirname(CACHE_FILE), { recursive: true });
+    await fs.promises.writeFile(CACHE_FILE, JSON.stringify({ v: 1, entries }));
+  } catch {
+    // best-effort — a failed write just means the next reload cold-scans
+  }
+}
+
 function projectsDir(): string {
   const base = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
   return path.join(base, "projects");
@@ -203,6 +236,7 @@ async function aggregateFile(file: string): Promise<FileAgg> {
 async function scan(): Promise<UsageSummary> {
   const files: string[] = [];
   await collectJsonl(projectsDir(), files);
+  await hydrateFileCache(); // reuse last run's per-file aggregates across reloads
   const total: Bucket = { cost: 0, tokens: 0 };
   const byDay: Record<string, Bucket> = {};
   const byProject: Record<string, Bucket> = {};
@@ -229,6 +263,7 @@ async function scan(): Promise<UsageSummary> {
   }
   summaryCache = { total, byDay, byProject, fileCount: files.length, computedAt: Date.now() };
   summaryAt = summaryCache.computedAt;
+  void saveFileCache(files); // persist for the next reload (fire-and-forget)
   return summaryCache;
 }
 
