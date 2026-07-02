@@ -704,6 +704,10 @@ function renderHtml(): string {
         <div class="title">Open Claude</div>
         <div class="sub">เลือก project → เปิด Claude ใน tmux (ปิด tab ไม่ตาย)</div>
       </button>
+      <button class="tile" type="button" onclick="run('missioncontrol.terminal')">
+        <div class="title">Open Terminal</div>
+        <div class="sub">เปิด CLI (bash) ที่ soulbrew root — รัน maw/git</div>
+      </button>
       <button class="tile" type="button" onclick="run('missioncontrol.status')">
         <div class="title">View Status</div>
         <div class="sub" id="statusSub">maw · oracle · git — เช็คสถานะ local</div>
