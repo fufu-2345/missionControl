@@ -217,6 +217,29 @@ export function openDashboardPanel(
         }
         return;
       }
+      case "kill_session": {
+        const name = typeof msg.name === "string" ? msg.name : "";
+        // Defense in depth: only kill a name we actually listed + whitelisted.
+        if (!_lastSessionNames.has(name) || !isSafeSessionName(name)) return;
+        const pick = await vscode.window.showWarningMessage(
+          `Kill tmux session '${name}'? This closes all its windows.`,
+          { modal: true },
+          "Kill",
+        );
+        if (pick !== "Kill") return;
+        await new Promise<void>((resolve) => {
+          // execFile (no shell) — args passed as array, name already whitelisted.
+          cp.execFile("tmux", ["kill-session", "-t", name], { timeout: 2000 }, () => resolve());
+        });
+        // Drop any reused attach-terminal for the now-dead session.
+        const term = _sessionTerminals.get(name);
+        if (term) {
+          term.dispose();
+          _sessionTerminals.delete(name);
+        }
+        await pushSessions(panel); // refresh the list (session is gone now)
+        return;
+      }
       case "run": {
         if (typeof msg.command === "string") {
           void vscode.commands.executeCommand(msg.command);
@@ -662,6 +685,8 @@ function renderHtml(): string {
   .session-row .smeta { display: flex; flex-direction: column; min-width: 0; }
   .session-row .sname { font-size: 13px; font-weight: 600; }
   .session-row .ssub { font-size: 11px; opacity: 0.7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .session-row .session-kill { margin-left: auto; flex-shrink: 0; background: transparent; border: none; color: var(--vscode-foreground); opacity: 0.35; cursor: pointer; font-size: 13px; line-height: 1; padding: 3px 7px; border-radius: 3px; }
+  .session-row .session-kill:hover { opacity: 1; background: var(--vscode-inputValidation-errorBackground, #5a1d1d); color: #fff; }
   .sessions-empty { opacity: 0.6; font-size: 12px; padding: 6px; }
 </style>
 </head>
@@ -863,11 +888,19 @@ function renderHtml(): string {
       + '<span class="smeta">'
       + '<span class="sname">' + escapeHtml(s.name) + '</span>'
       + '<span class="ssub">' + escapeHtml(s.windows + ' win · ' + s.cmd + '  ' + s.cwd) + '</span>'
-      + '</span></div>'
+      + '</span>'
+      + '<button class="session-kill" title="Kill session" data-kill="' + escapeHtml(s.name) + '">✕</button>'
+      + '</div>'
     ).join('');
     root.querySelectorAll('.session-row').forEach((el) => {
       el.addEventListener('click', () => {
         vscode.postMessage({ type: 'attach_session', name: el.dataset.name });
+      });
+    });
+    root.querySelectorAll('.session-kill').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation(); // don't trigger the row's attach click
+        vscode.postMessage({ type: 'kill_session', name: btn.dataset.kill });
       });
     });
   }
