@@ -6,7 +6,7 @@ import * as vscode from "vscode";
 
 import {
   buildKickoffPrompt,
-  buildLaunchCommand,
+  buildTmuxLaunchCommand,
   isSafeOracleName,
   type OracleTeam,
   parseOraclePath,
@@ -113,13 +113,15 @@ export async function startOrchestratorCommand(_context: vscode.ExtensionContext
   const workers = team.members
     .filter((m) => m.role !== "orchestrator")
     .map((m) => m.oracle);
-  const command = buildLaunchCommand(
+  const command = buildTmuxLaunchCommand(
+    orch,
     repoPath,
     buildKickoffPrompt(team.name, orch, workers),
   );
 
-  // 5) fresh editor terminal → run it (fresh interactive claude, NO --continue,
-  //    kickoff as the first message so foreman starts the flow immediately).
+  // 5) editor terminal attaches to tmux session claude-<orch> (created fresh
+  //    with claude+kickoff on first click; -A reattaches on later clicks).
+  //    Closing the tab only detaches — the orchestrator keeps running.
   if (_orchTerminal && _orchTerminal.exitStatus === undefined) {
     _orchTerminal.dispose(); // avoid stacking on repeated clicks
   }

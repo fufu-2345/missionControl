@@ -69,6 +69,8 @@ export function buildKickoffPrompt(
     `รัน skill /orches-drive เดี๋ยวนี้: ทักผมสั้นๆ → ถาม build requirement → discuss ให้ชัด →` +
       ` แตกเป็น sprint (คุณกำหนดจำนวนเอง) → แจกงาน worker ด้วย tmux send-keys → poll .orches-done →` +
       ` verify → git merge เข้า main → วนจนจบ → capture memory.`,
+    `worker ที่ยังหลับ: ปลุกด้วย maw wake <ชื่อ> — มันจะตื่นใน repo ของมันเอง ปกติ ไม่ต้องย้าย` +
+      ` เพราะตัวงานที่ dispatch พิน absolute worktree path ของ project อยู่แล้ว.`,
     `อย่ารัน /orches (นั่นคือ bootstrap เลือกทีม/ปลุก — คุณผ่านมาแล้ว) และอย่า dispatch งานให้ตัวเอง.`,
   ].join(" ");
 }
@@ -89,15 +91,23 @@ export function parseOraclePath(oraclesJson: string, name: string): string | nul
   }
 }
 
-/** Command to launch the orchestrator as a FRESH interactive claude in its own
- *  repo dir (loads its CLAUDE.md + ψ + global skills), with the kickoff prompt
- *  as the first message so it immediately runs /orches-drive. Avoids `--continue`
- *  (which EXITS when the oracle has no prior conversation, dropping to a bash
- *  shell — the "syntax error near (" bug) and the fragile post-launch send-keys
- *  injection. Both args are single-quoted (embedded ' escaped). */
-export function buildLaunchCommand(repoPath: string, kickoff: string): string {
-  return (
+/** Command to launch the orchestrator INSIDE a tmux session (`claude-<orch>`),
+ *  as a FRESH interactive claude in its own repo dir (loads its CLAUDE.md + ψ +
+ *  global skills), with the kickoff as the first message.
+ *  Why tmux (not a bare editor terminal): (1) closing the tab only DETACHES —
+ *  the orchestrator survives; (2) its Bash subprocesses inherit $TMUX so
+ *  `maw team bring` / `tmux send-keys` dispatch works (a bare terminal has no
+ *  $TMUX → bring fails "not in tmux"); (3) it shows up in the Sessions panel.
+ *  `-A` reattaches if the session already exists (the launch command only runs
+ *  on first creation — safe to re-click). No `--continue` (exits for a fresh
+ *  oracle with no prior conversation). All layers single-quote-escaped. */
+export function buildTmuxLaunchCommand(
+  orchestrator: string,
+  repoPath: string,
+  kickoff: string,
+): string {
+  const inner =
     `cd ${shSingleQuote(repoPath)} && ` +
-    `claude --dangerously-skip-permissions ${shSingleQuote(kickoff)}`
-  );
+    `claude --dangerously-skip-permissions ${shSingleQuote(kickoff)}`;
+  return `tmux new-session -A -s ${shSingleQuote(`claude-${orchestrator}`)} ${shSingleQuote(inner)}`;
 }

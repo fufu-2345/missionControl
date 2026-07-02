@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 
 import {
   buildKickoffPrompt,
-  buildLaunchCommand,
+  buildTmuxLaunchCommand,
   isSafeOracleName,
   parseOraclePath,
   parseTeamRoster,
@@ -72,20 +72,26 @@ test("isSafeOracleName: whitelist", () => {
   expect(isSafeOracleName("$(whoami)")).toBe(false);
 });
 
-test("buildLaunchCommand: cd + fresh claude with single-quoted kickoff", () => {
-  expect(buildLaunchCommand("/home/x/foreman-oracle", "hello")).toBe(
-    "cd '/home/x/foreman-oracle' && claude --dangerously-skip-permissions 'hello'",
-  );
+test("buildTmuxLaunchCommand: tmux new-session -A wrapping cd + fresh claude", () => {
+  const cmd = buildTmuxLaunchCommand("foreman", "/p/foreman-oracle", "hello");
+  expect(cmd.startsWith("tmux new-session -A -s 'claude-foreman' '")).toBe(true);
+  expect(cmd).toContain("cd "); // inner: cd into the oracle repo
+  expect(cmd).toContain("/p/foreman-oracle");
+  expect(cmd).toContain("claude --dangerously-skip-permissions");
+  expect(cmd).toContain("hello");
 });
 
-test("buildLaunchCommand: NO --continue (fresh session, not resume)", () => {
-  expect(buildLaunchCommand("/x", "hi")).not.toContain("--continue");
+test("buildTmuxLaunchCommand: NO --continue (fresh session, not resume)", () => {
+  expect(buildTmuxLaunchCommand("foreman", "/x", "hi")).not.toContain("--continue");
 });
 
-test("buildLaunchCommand: single quote in kickoff is shell-escaped", () => {
-  expect(buildLaunchCommand("/x", "it's fine")).toBe(
-    "cd '/x' && claude --dangerously-skip-permissions 'it'\\''s fine'",
-  );
+test("buildTmuxLaunchCommand: inner single-quotes survive shell round-trip", () => {
+  // Structural check: the inner command's quotes must be escaped for the outer
+  // single-quoted tmux arg — bash unwraps '\'' back into a literal '.
+  const cmd = buildTmuxLaunchCommand("foreman", "/x", "it's (fine)");
+  expect(cmd).toContain("'\\''"); // escaped inner quote present
+  expect(cmd).toContain("it"); // kickoff text carried through
+  expect(cmd).toContain("(fine)");
 });
 
 test("parseOraclePath: finds local_path by name", () => {
