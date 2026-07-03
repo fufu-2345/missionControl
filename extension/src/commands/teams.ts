@@ -75,6 +75,33 @@ export function buildKickoffPrompt(
   ].join(" ");
 }
 
+/** Resume kickoff — injected when the user picks "⏮ ทำต่อ" instead of a fresh
+ *  build. Unlike buildKickoffPrompt (which tells the orchestrator to ASK for a
+ *  new requirement), this points it at an EXISTING project and tells it to read
+ *  the leftover state and pick up where the last run stopped. Pairs with the
+ *  `/orches-drive` resume mode (skip Step 0-1, read state → propose next sprint). */
+export function buildResumeKickoff(
+  projectName: string,
+  projectPath: string,
+  team: string,
+  orchestrator: string,
+  workers: string[],
+): string {
+  const w = workers.length
+    ? workers.join(", ")
+    : "(ทีมนี้ยังไม่มี worker — เชิญเพิ่มก่อนแจกงาน)";
+  return [
+    `คุณคือ orchestrator ชื่อ ${orchestrator} ของทีม ${team}.`,
+    `Workers ที่ dispatch ได้: ${w}.`,
+    `รัน skill /orches-drive แบบ RESUME กับ project ที่ค้างอยู่: "${projectName}" (absolute path: ${projectPath}).`,
+    `อย่าถาม build requirement ใหม่ — แทนที่ด้วย: อ่าน state เดิมก่อน` +
+      ` (docs/sprint-*.md, git log --oneline, git worktree list, .orches-notes.md ใน worktree agents/* ที่ยังเปิด) →` +
+      ` สรุปให้ user ฟังสั้นๆ ว่าทำถึง sprint ไหน ค้างอะไร → เสนอ sprint ถัดไป → รอ user สั่งไปต่อ.`,
+    `จากนั้นวน /orches-drive ปกติ: แจกงาน worker → poll .orches-done → verify → git merge เข้า main → capture memory. อย่า dispatch งานให้ตัวเอง.`,
+    `อย่ารัน /orches (bootstrap — คุณผ่านมาแล้ว).`,
+  ].join(" ");
+}
+
 /** Find an oracle's pinned tmux session name from maw config content
  *  (`sessions` map in `~/.config/maw/maw.config.*.json`). The pin is what
  *  `maw wake` resolves FIRST, so the button launching into the same name means

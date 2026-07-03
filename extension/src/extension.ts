@@ -17,7 +17,7 @@ import { statusCommand } from "./commands/status";
 import { terminalCommand } from "./commands/terminal";
 import { PROJECT_STATE_KEY, setCurrentProjectId } from "./projectState";
 import { registerStatusBar } from "./statusBar";
-import { pushDashboardEvent } from "./webview/dashboard";
+import { pushDashboardEvent, requestOrchWizard } from "./webview/dashboard";
 import { registerSidebar } from "./webview/sidebar";
 import { openIdeasPanel, type Idea } from "./webview/ideas";
 import { openPRPanel, type PRInfo } from "./webview/pr";
@@ -47,6 +47,12 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("missioncontrol.mawToggle", () => mawToggleCommand(context)),
     vscode.commands.registerCommand("missioncontrol.terminal", () => terminalCommand(context)),
     vscode.commands.registerCommand("missioncontrol.startOrchestrator", () => startOrchestratorCommand(context)),
+    vscode.commands.registerCommand("missioncontrol.orchestratorNew", () =>
+      requestOrchWizard(context, "new"),
+    ),
+    vscode.commands.registerCommand("missioncontrol.orchestratorContinue", () =>
+      requestOrchWizard(context, "continue"),
+    ),
   ];
   context.subscriptions.push(...registrations);
 

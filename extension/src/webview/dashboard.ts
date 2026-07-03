@@ -10,6 +10,14 @@ import {
   onProjectChange,
   setCurrentProjectId,
 } from "../projectState";
+import {
+  defaultTeamFor,
+  launchOrchestrator,
+  listOrchestratorTeams,
+  scanResumableProjects,
+} from "../commands/startOrchestrator";
+import type { OracleTeam } from "../commands/teams";
+import type { ResumableProject } from "../commands/orchestratorResume";
 import { MONTHLY_CAP_KEY, computeUsage, localMonthKey, sumByPrefix } from "../usage";
 import {
   TMUX_FMT,
@@ -43,6 +51,22 @@ let _lastSessionNames = new Set<string>();
 let _termCleanupRegistered = false;
 
 const STATUS_POLL_MS = 10_000;
+
+// Transient state for the in-screen "Start / Continue Orchestrator" wizard
+// (project → team → orchestrator). Reset when it closes or launches.
+type OrchStep = "project" | "team" | "orch";
+let _orch:
+  | {
+      mode: "new" | "continue";
+      step: OrchStep;
+      projects?: ResumableProject[];
+      project?: ResumableProject;
+      team?: OracleTeam;
+    }
+  | undefined;
+// Set when the wizard is launched from the sidebar (dashboard may still be
+// booting) — consumed on the webview's "ready" so the screen shows once loaded.
+let _pendingOrchMode: "new" | "continue" | undefined;
 
 /**
  * Open (or reveal) the Mission Control dashboard — a full editor-area
@@ -168,6 +192,11 @@ export function openDashboardPanel(
             void pollTick();
           }, STATUS_POLL_MS);
         }
+        // Wizard requested from the sidebar before the webview was ready.
+        if (_pendingOrchMode) {
+          startOrchWizard(panel, _pendingOrchMode);
+          _pendingOrchMode = undefined;
+        }
         return;
       }
       case "refresh": {
@@ -280,6 +309,19 @@ export function openDashboardPanel(
         await promptNewProject(panel, context);
         return;
       }
+      case "orch_open": {
+        startOrchWizard(panel, msg.mode === "continue" ? "continue" : "new");
+        return;
+      }
+      case "orch_pick": {
+        handleOrchPick(panel, typeof msg.value === "string" ? msg.value : "");
+        return;
+      }
+      case "orch_back": {
+        _orch = undefined;
+        panel.webview.postMessage({ type: "orch_close" });
+        return;
+      }
       case "close": {
         panel.dispose();
         return;
@@ -294,6 +336,133 @@ export function openDashboardPanel(
   }
 
   return panel;
+}
+
+// ── In-screen "Start / Continue Orchestrator" wizard (host side) ──────────────
+
+/** Open the first wizard screen in an already-ready dashboard webview. */
+function startOrchWizard(panel: vscode.WebviewPanel, mode: "new" | "continue") {
+  if (mode === "new") {
+    _orch = { mode, step: "team" };
+    pushOrchTeamScreen(panel);
+  } else {
+    const projects = scanResumableProjects();
+    _orch = { mode, step: "project", projects };
+    pushOrchProjectScreen(panel, projects);
+  }
+}
+
+/** Entry point for the sidebar buttons: reveal/open the dashboard, then start
+ *  the wizard — immediately if it was already open, else on its "ready". */
+export function requestOrchWizard(
+  context: vscode.ExtensionContext,
+  mode: "new" | "continue",
+) {
+  const wasOpen = !!_panel;
+  const panel = openDashboardPanel(context);
+  if (wasOpen) {
+    startOrchWizard(panel, mode);
+  } else {
+    _pendingOrchMode = mode; // consumed on "ready"
+  }
+}
+
+function pushOrchProjectScreen(panel: vscode.WebviewPanel, projects: ResumableProject[]) {
+  const items = projects.map((p) => ({
+    value: p.path,
+    label: p.name,
+    sub:
+      `${p.sprintDocs} sprint docs · ${p.openWorktrees} worktree` +
+      (p.metaTeam ? ` · ทำล่าสุด: ${p.metaTeam}` : ""),
+  }));
+  panel.webview.postMessage({
+    type: "orch_screen",
+    title: "⏮ ทำต่อ — เลือก project ค้าง",
+    subtitle: items.length
+      ? "เลือก project ที่จะ resume (scan ทุก repo)"
+      : "ไม่พบงานค้าง — ต้องมี docs/sprint-*.md หรือ worktree agents/* เปิดอยู่",
+    items,
+  });
+}
+
+function pushOrchTeamScreen(panel: vscode.WebviewPanel) {
+  const teams = listOrchestratorTeams();
+  const def = _orch?.project ? defaultTeamFor(_orch.project, teams) : null;
+  const items = teams.map((t) => ({
+    value: t.name,
+    label: t.name + (t.name === def ? "  ⭐ (ทำล่าสุด)" : ""),
+    sub: `${t.members.length} members · orchestrator: ${
+      t.orchestrators.join(", ") || "(none)"
+    }`,
+  }));
+  panel.webview.postMessage({
+    type: "orch_screen",
+    title: (_orch?.mode === "continue" ? "⏮ ทำต่อ" : "▶ เริ่มใหม่") + " — เลือกทีม",
+    subtitle: _orch?.project ? `project: ${_orch.project.name}` : "เลือก oracle-team",
+    items,
+  });
+}
+
+function pushOrchOrchestratorScreen(panel: vscode.WebviewPanel, team: OracleTeam) {
+  panel.webview.postMessage({
+    type: "orch_screen",
+    title: `${team.name} — เลือก orchestrator`,
+    subtitle: "ทีมนี้มี orchestrator หลายตัว",
+    items: team.orchestrators.map((o) => ({ value: o, label: o, sub: "orchestrator" })),
+  });
+}
+
+function handleOrchPick(panel: vscode.WebviewPanel, value: string) {
+  if (!_orch || !value) return;
+  if (_orch.step === "project") {
+    const p = (_orch.projects ?? []).find((x) => x.path === value);
+    if (!p) return;
+    _orch.project = p;
+    _orch.step = "team";
+    pushOrchTeamScreen(panel);
+    return;
+  }
+  if (_orch.step === "team") {
+    const team = listOrchestratorTeams().find((t) => t.name === value);
+    if (!team) return;
+    if (!team.orchestrators.length) {
+      vscode.window.showWarningMessage(
+        `Mission Control: ทีม '${team.name}' ไม่มี member role:orchestrator — tag ก่อน: ` +
+          `maw team oracle-invite <ชื่อ> --team ${team.name} --role orchestrator`,
+      );
+      return;
+    }
+    _orch.team = team;
+    if (team.orchestrators.length === 1) {
+      doOrchLaunch(panel, team.orchestrators[0]);
+    } else {
+      _orch.step = "orch";
+      pushOrchOrchestratorScreen(panel, team);
+    }
+    return;
+  }
+  if (_orch.step === "orch") {
+    doOrchLaunch(panel, value);
+  }
+}
+
+function doOrchLaunch(panel: vscode.WebviewPanel, orch: string) {
+  if (!_orch?.team) return;
+  const team = _orch.team;
+  const project = _orch.project;
+  const mode: "new" | "resume" = _orch.mode === "continue" ? "resume" : "new";
+  const err = launchOrchestrator({ orch, team, mode, project });
+  _orch = undefined;
+  panel.webview.postMessage({ type: "orch_close" });
+  if (err) {
+    vscode.window.showErrorMessage(`Mission Control: ${err}`);
+    return;
+  }
+  vscode.window.showInformationMessage(
+    mode === "resume"
+      ? `Mission Control: resume '${orch}' (team ${team.name}) → project ${project?.name} · อ่าน state เดิม + เสนอ sprint ต่อ`
+      : `Mission Control: ปลุก '${orch}' (team ${team.name}) + เริ่ม build ใหม่ (ถาม requirement)`,
+  );
 }
 
 /**
@@ -694,6 +863,28 @@ function renderHtml(): string {
   .session-row .session-kill { margin-left: auto; flex-shrink: 0; background: transparent; border: none; color: var(--vscode-foreground); opacity: 0.35; cursor: pointer; font-size: 13px; line-height: 1; padding: 3px 7px; border-radius: 3px; }
   .session-row .session-kill:hover { opacity: 1; background: var(--vscode-inputValidation-errorBackground, #5a1d1d); color: #fff; }
   .sessions-empty { opacity: 0.6; font-size: 12px; padding: 6px; }
+
+  /* In-screen Start/Continue Orchestrator wizard (SPA overlay) */
+  .orch-screen { display: none; position: fixed; inset: 0; z-index: 50;
+    background: var(--vscode-editor-background); flex-direction: column;
+    padding: 20px 24px; overflow-y: auto; }
+  .orch-topbar { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 18px; }
+  .orch-back { flex-shrink: 0; background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
+    color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
+    border: none; border-radius: 5px; padding: 7px 13px; cursor: pointer; font-size: 13px; }
+  .orch-back:hover { opacity: 0.85; }
+  .orch-heads { min-width: 0; }
+  .orch-title { font-size: 17px; font-weight: 700; }
+  .orch-subtitle { font-size: 12px; opacity: 0.7; margin-top: 3px; }
+  .orch-list { display: flex; flex-direction: column; gap: 8px; max-width: 720px; }
+  .orch-item { display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
+    text-align: left; width: 100%; background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.1));
+    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); border-radius: 7px;
+    padding: 12px 14px; cursor: pointer; color: var(--vscode-foreground); }
+  .orch-item:hover { border-color: var(--vscode-focusBorder); background: var(--vscode-list-activeSelectionBackground, rgba(128,128,128,0.2)); }
+  .orch-item .oi-label { font-size: 14px; font-weight: 600; }
+  .orch-item .oi-sub { font-size: 11px; opacity: 0.7; }
+  .orch-empty { opacity: 0.6; font-size: 12px; padding: 10px; }
 </style>
 </head>
 <body>
@@ -739,9 +930,13 @@ function renderHtml(): string {
         <div class="title">Open Terminal</div>
         <div class="sub">เปิด CLI (bash) ที่ soulbrew root — รัน maw/git</div>
       </button>
-      <button class="tile primary" type="button" onclick="run('missioncontrol.startOrchestrator')">
-        <div class="title">Start Orchestrator</div>
-        <div class="sub">เลือกทีม → ปลุก orchestrator + attach (code ล้วน ไม่ผ่าน LLM, ทันที)</div>
+      <button class="tile primary" type="button" onclick="orchStart('new')">
+        <div class="title">▶ เริ่มใหม่ (Orchestrator)</div>
+        <div class="sub">เลือกทีมในจอ → ปลุก orchestrator + attach → build ใหม่ (ถาม requirement)</div>
+      </button>
+      <button class="tile" type="button" onclick="orchStart('continue')">
+        <div class="title">⏮ ทำต่อ (Orchestrator)</div>
+        <div class="sub">เลือก project ค้าง → เลือกทีม → resume จาก state เดิม (ไม่ถาม requirement ใหม่)</div>
       </button>
       <button class="tile" type="button" onclick="run('missioncontrol.status')">
         <div class="title">View Status</div>
@@ -792,6 +987,17 @@ function renderHtml(): string {
     <div class="feed" id="feed">
       <div class="empty">(ไม่มี live events — ต้องมี backend/WebSocket)</div>
     </div>
+  </div>
+
+  <div id="orchScreen" class="orch-screen">
+    <div class="orch-topbar">
+      <button class="orch-back" type="button" onclick="orchBack()">← back</button>
+      <div class="orch-heads">
+        <div id="orchTitle" class="orch-title"></div>
+        <div id="orchSubtitle" class="orch-subtitle"></div>
+      </div>
+    </div>
+    <div id="orchList" class="orch-list"></div>
   </div>
 
 <script>
@@ -932,6 +1138,33 @@ function renderHtml(): string {
   function run(command) { vscode.postMessage({ type: "run", command }); }
   function refresh() { vscode.postMessage({ type: "refresh" }); }
   function newProject() { vscode.postMessage({ type: "new_project" }); }
+  function orchStart(mode) { vscode.postMessage({ type: "orch_open", mode }); }
+  function orchBack() { vscode.postMessage({ type: "orch_back" }); }
+
+  function renderOrchScreen(m) {
+    const scr = document.getElementById("orchScreen");
+    document.getElementById("orchTitle").textContent = m.title || "";
+    document.getElementById("orchSubtitle").textContent = m.subtitle || "";
+    const list = document.getElementById("orchList");
+    const items = m.items || [];
+    list.innerHTML = items.length
+      ? items.map((it) =>
+          '<button class="orch-item" type="button" data-value="' + escapeHtml(it.value) + '">'
+          + '<span class="oi-label">' + escapeHtml(it.label) + '</span>'
+          + (it.sub ? '<span class="oi-sub">' + escapeHtml(it.sub) + '</span>' : '')
+          + '</button>'
+        ).join('')
+      : '<div class="orch-empty">(ไม่มีรายการ)</div>';
+    list.querySelectorAll('.orch-item').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        vscode.postMessage({ type: "orch_pick", value: btn.dataset.value });
+      });
+    });
+    scr.style.display = "flex";
+  }
+  function hideOrchScreen() {
+    document.getElementById("orchScreen").style.display = "none";
+  }
   function toggleMemShare(enabled) {
     vscode.postMessage({ type: "toggle_memory_share", enabled });
   }
@@ -987,6 +1220,10 @@ function renderHtml(): string {
       renderMemShare(m);
     } else if (m.type === "sessions") {
       renderSessions(m.sessions || []);
+    } else if (m.type === "orch_screen") {
+      renderOrchScreen(m);
+    } else if (m.type === "orch_close") {
+      hideOrchScreen();
     } else if (m.type === "ws_event") {
       pushFeed(m.event, m.data, m.ts);
     }

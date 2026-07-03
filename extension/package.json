@@ -41,6 +41,14 @@
         "title": "Mission Control: Start Orchestrator"
       },
       {
+        "command": "missioncontrol.orchestratorNew",
+        "title": "Mission Control: Orchestrator — เริ่มใหม่"
+      },
+      {
+        "command": "missioncontrol.orchestratorContinue",
+        "title": "Mission Control: Orchestrator — ทำต่อ"
+      },
+      {
         "command": "missioncontrol.install",
         "title": "Mission Control: Install"
       },
