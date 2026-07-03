@@ -232,7 +232,10 @@ export function openDashboardPanel(
         if (pick !== "Kill") return;
         await new Promise<void>((resolve) => {
           // execFile (no shell) — args passed as array, name already whitelisted.
-          cp.execFile("tmux", ["kill-session", "-t", name], { timeout: 2000 }, () => resolve());
+          // "=" = exact-match target: plain names prefix-match, so if this
+          // session died while the modal was open tmux would kill a DIFFERENT
+          // session sharing the prefix (verified live: -t zz-a killed zz-ab).
+          cp.execFile("tmux", ["kill-session", "-t", `=${name}`], { timeout: 2000 }, () => resolve());
         });
         // Drop any reused attach-terminal for the now-dead session.
         const term = _sessionTerminals.get(name);

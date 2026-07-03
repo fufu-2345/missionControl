@@ -128,8 +128,16 @@ export function buildTmuxLaunchCommand(
   sessionName?: string,
 ): string {
   const session = sessionName?.trim() || `claude-${orchestrator}`;
+  // -n names the initial window after the repo (e.g. foreman-oracle): maw wake
+  // recognizes a live oracle by its WINDOW name — without this, `maw wake
+  // foreman -p` sees no foreman window and opens a SECOND claude (twin) on the
+  // same repo/conversation instead of injecting into this one.
+  const window = repoPath.replace(/\/+$/, "").split("/").pop() || orchestrator;
   const inner =
     `cd ${shSingleQuote(repoPath)} && ` +
     `claude --dangerously-skip-permissions ${shSingleQuote(kickoff)}`;
-  return `tmux new-session -A -s ${shSingleQuote(session)} ${shSingleQuote(inner)}`;
+  return (
+    `tmux new-session -A -s ${shSingleQuote(session)} ` +
+    `-n ${shSingleQuote(window)} ${shSingleQuote(inner)}`
+  );
 }

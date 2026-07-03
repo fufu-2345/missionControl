@@ -25,13 +25,13 @@ test("parseSessionPin: missing oracle / empty / bad JSON → null", () => {
 
 test("buildTmuxLaunchCommand: pinned session name wins over claude-<orch>", () => {
   const cmd = buildTmuxLaunchCommand("foreman", "/p/foreman-oracle", "hi", "09-foreman");
-  expect(cmd.startsWith("tmux new-session -A -s '09-foreman' '")).toBe(true);
+  expect(cmd.startsWith("tmux new-session -A -s '09-foreman' -n 'foreman-oracle' '")).toBe(true);
   expect(cmd).not.toContain("claude-foreman");
 });
 
 test("buildTmuxLaunchCommand: blank pin falls back to claude-<orch>", () => {
   const cmd = buildTmuxLaunchCommand("foreman", "/p/foreman-oracle", "hi", "  ");
-  expect(cmd.startsWith("tmux new-session -A -s 'claude-foreman' '")).toBe(true);
+  expect(cmd.startsWith("tmux new-session -A -s 'claude-foreman' -n 'foreman-oracle' '")).toBe(true);
 });
 
 test("parseTeamRoster: valid roster with an orchestrator", () => {
@@ -100,7 +100,7 @@ test("isSafeOracleName: whitelist", () => {
 
 test("buildTmuxLaunchCommand: tmux new-session -A wrapping cd + fresh claude", () => {
   const cmd = buildTmuxLaunchCommand("foreman", "/p/foreman-oracle", "hello");
-  expect(cmd.startsWith("tmux new-session -A -s 'claude-foreman' '")).toBe(true);
+  expect(cmd.startsWith("tmux new-session -A -s 'claude-foreman' -n 'foreman-oracle' '")).toBe(true);
   expect(cmd).toContain("cd "); // inner: cd into the oracle repo
   expect(cmd).toContain("/p/foreman-oracle");
   expect(cmd).toContain("claude --dangerously-skip-permissions");

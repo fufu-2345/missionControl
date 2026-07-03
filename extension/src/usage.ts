@@ -110,6 +110,10 @@ const SUMMARY_TTL = 15_000;
 // mtime/size changed since last run get re-parsed. Best-effort: any read/write
 // error just falls back to an in-memory-only cold scan.
 const CACHE_FILE = path.join(os.homedir(), ".cache", "mission-control", "usage-filecache.json");
+// Bump whenever cached numbers become wrong wholesale — e.g. the ratesFor price
+// table changes or the scan itself changes shape (v2: depth limit 4→12) — so
+// hydrate discards the stale cache and the next scan recomputes everything.
+const CACHE_VERSION = 2;
 let hydrated = false;
 
 async function hydrateFileCache(): Promise<void> {
@@ -118,7 +122,7 @@ async function hydrateFileCache(): Promise<void> {
   try {
     const raw = await fs.promises.readFile(CACHE_FILE, "utf8");
     const obj = JSON.parse(raw) as { v?: number; entries?: [string, FileAgg][] };
-    if (obj?.v === 1 && Array.isArray(obj.entries)) {
+    if (obj?.v === CACHE_VERSION && Array.isArray(obj.entries)) {
       for (const [k, v] of obj.entries) fileCache.set(k, v);
     }
   } catch {
@@ -131,7 +135,7 @@ async function saveFileCache(currentFiles: string[]): Promise<void> {
     const keep = new Set(currentFiles); // drop entries for vanished transcripts
     const entries = [...fileCache].filter(([k]) => keep.has(k));
     await fs.promises.mkdir(path.dirname(CACHE_FILE), { recursive: true });
-    await fs.promises.writeFile(CACHE_FILE, JSON.stringify({ v: 1, entries }));
+    await fs.promises.writeFile(CACHE_FILE, JSON.stringify({ v: CACHE_VERSION, entries }));
   } catch {
     // best-effort — a failed write just means the next reload cold-scans
   }
@@ -143,7 +147,10 @@ function projectsDir(): string {
 }
 
 async function collectJsonl(dir: string, out: string[], depth = 0): Promise<void> {
-  if (depth > 4) return;
+  // 12, not 4: workflow subagent transcripts live at
+  // <proj>/<session>/subagents/workflows/wf_*/agent-*.jsonl (depth 5) — the old
+  // limit of 4 silently dropped ~2/3 of all transcripts (~$260 undercounted).
+  if (depth > 12) return;
   let entries: fs.Dirent[];
   try {
     entries = await fs.promises.readdir(dir, { withFileTypes: true });

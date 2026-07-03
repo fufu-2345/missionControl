@@ -33,6 +33,14 @@
     },
     "commands": [
       {
+        "command": "missioncontrol.terminal",
+        "title": "Mission Control: Open Terminal"
+      },
+      {
+        "command": "missioncontrol.startOrchestrator",
+        "title": "Mission Control: Start Orchestrator"
+      },
+      {
         "command": "missioncontrol.install",
         "title": "Mission Control: Install"
       },

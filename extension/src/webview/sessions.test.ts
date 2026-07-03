@@ -25,6 +25,8 @@ test("isSafeSessionName accepts normal names, rejects injection", () => {
   expect(isSafeSessionName('q"x')).toBe(false);
 });
 
-test("buildAttachCommand single-quotes the name", () => {
-  expect(buildAttachCommand("carbon")).toBe("tmux attach -t 'carbon'");
+test("buildAttachCommand single-quotes the name with exact-match prefix", () => {
+  // "=" forces exact target matching — plain names prefix-match in tmux, which
+  // can attach/kill a different session once the exact one is gone.
+  expect(buildAttachCommand("carbon")).toBe("tmux attach -t '=carbon'");
 });

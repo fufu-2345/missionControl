@@ -46,7 +46,10 @@ export function isSafeSessionName(name: string): boolean {
 }
 
 /** Shell command to attach to a session. Caller MUST validate with
- *  isSafeSessionName first; the name is single-quoted. */
+ *  isSafeSessionName first; the name is single-quoted. The `=` prefix forces
+ *  an EXACT session-name match — without it tmux falls back to prefix/fnmatch
+ *  matching, so if the named session died you could silently attach to (or,
+ *  in the kill path, destroy) a different session sharing the prefix. */
 export function buildAttachCommand(name: string): string {
-  return `tmux attach -t '${name}'`;
+  return `tmux attach -t '=${name}'`;
 }
