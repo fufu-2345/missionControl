@@ -17,20 +17,30 @@ import {
 const ORACLES_JSON = path.join(os.homedir(), ".maw", "oracles.json");
 const MAW_CONFIG_DIR = path.join(os.homedir(), ".config", "maw");
 
-/** The oracle's pinned tmux session from the newest `maw.config*.json` (the
- *  filename carries a schema number, e.g. maw.config.50.json — don't hardcode
- *  it). null → no pin → the button falls back to `claude-<orch>`. */
+// Same rule as maw itself (src/config/load.ts CONFIG_FILE_REGEX): weighted
+// numbered files, NOT newest-mtime — a touched legacy maw.config.json must not
+// shadow the real weighted config, or the button and `maw wake` would resolve
+// different sessions (the split-brain the pin exists to prevent).
+const MAW_CONFIG_FILE_REGEX = /^maw\.config\.(\d+)(\.local)?\.json$/;
+
+/** The oracle's pinned tmux session from maw's weighted config files, highest
+ *  weight first (`.local` overlays its base). null → no pin → `claude-<orch>`. */
 function readSessionPin(oracle: string): string | null {
   try {
-    const newest = fs
+    const ranked = fs
       .readdirSync(MAW_CONFIG_DIR)
-      .filter((f) => /^maw\.config.*\.json$/.test(f))
-      .map((f) => {
-        const p = path.join(MAW_CONFIG_DIR, f);
-        return { p, mtime: fs.statSync(p).mtimeMs };
-      })
-      .sort((a, b) => b.mtime - a.mtime)[0];
-    return newest ? parseSessionPin(fs.readFileSync(newest.p, "utf8"), oracle) : null;
+      .map((f) => MAW_CONFIG_FILE_REGEX.exec(f))
+      .filter((m): m is RegExpExecArray => !!m)
+      .map((m) => ({ f: m[0], num: parseInt(m[1], 10), local: m[2] ? 1 : 0 }))
+      .sort((a, b) => b.num - a.num || b.local - a.local);
+    for (const c of ranked) {
+      const pin = parseSessionPin(
+        fs.readFileSync(path.join(MAW_CONFIG_DIR, c.f), "utf8"),
+        oracle,
+      );
+      if (pin) return pin;
+    }
+    return null;
   } catch {
     return null;
   }

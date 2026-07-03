@@ -170,13 +170,15 @@ function bump(map: Record<string, Bucket>, key: string, cost: number, tokens: nu
   b.tokens += tokens;
 }
 
-async function aggregateFile(file: string): Promise<FileAgg> {
+async function aggregateFile(file: string): Promise<FileAgg | null> {
   const agg: FileAgg = { mtimeMs: 0, size: 0, cost: 0, tokens: 0, byDay: {}, byProject: {} };
   let raw: string;
   try {
     raw = await fs.promises.readFile(file, "utf8");
   } catch {
-    return agg;
+    // null = "don't know", NOT "$0" — caching an empty agg here would freeze a
+    // finished session at $0 forever (its mtime never changes again).
+    return null;
   }
   // Dedupe within a file on requestId:message.id — compaction re-logs assistant
   // lines, and counting them twice would inflate the bill (ccusage does the same).
@@ -256,7 +258,9 @@ async function scan(): Promise<UsageSummary> {
     }
     let agg = fileCache.get(file);
     if (!agg || agg.mtimeMs !== st.mtimeMs || agg.size !== st.size) {
-      agg = await aggregateFile(file);
+      const fresh = await aggregateFile(file);
+      if (!fresh) continue; // transient read failure — retry next scan, don't cache $0
+      agg = fresh;
       agg.mtimeMs = st.mtimeMs;
       agg.size = st.size;
       fileCache.set(file, agg);
