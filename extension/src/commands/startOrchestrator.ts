@@ -10,10 +10,31 @@ import {
   isSafeOracleName,
   type OracleTeam,
   parseOraclePath,
+  parseSessionPin,
   parseTeamRoster,
 } from "./teams";
 
 const ORACLES_JSON = path.join(os.homedir(), ".maw", "oracles.json");
+const MAW_CONFIG_DIR = path.join(os.homedir(), ".config", "maw");
+
+/** The oracle's pinned tmux session from the newest `maw.config*.json` (the
+ *  filename carries a schema number, e.g. maw.config.50.json — don't hardcode
+ *  it). null → no pin → the button falls back to `claude-<orch>`. */
+function readSessionPin(oracle: string): string | null {
+  try {
+    const newest = fs
+      .readdirSync(MAW_CONFIG_DIR)
+      .filter((f) => /^maw\.config.*\.json$/.test(f))
+      .map((f) => {
+        const p = path.join(MAW_CONFIG_DIR, f);
+        return { p, mtime: fs.statSync(p).mtimeMs };
+      })
+      .sort((a, b) => b.mtime - a.mtime)[0];
+    return newest ? parseSessionPin(fs.readFileSync(newest.p, "utf8"), oracle) : null;
+  } catch {
+    return null;
+  }
+}
 
 // "Start Orchestrator" — a CODE-ONLY bootstrap (no LLM / no skill): read the
 // oracle-team rosters off disk, let the user pick a team + orchestrator, then
@@ -113,14 +134,16 @@ export async function startOrchestratorCommand(_context: vscode.ExtensionContext
   const workers = team.members
     .filter((m) => m.role !== "orchestrator")
     .map((m) => m.oracle);
+  const sessionName = readSessionPin(orch) ?? undefined; // pinned (09-foreman) or claude-<orch>
   const command = buildTmuxLaunchCommand(
     orch,
     repoPath,
     buildKickoffPrompt(team.name, orch, workers),
+    sessionName,
   );
 
-  // 5) editor terminal attaches to tmux session claude-<orch> (created fresh
-  //    with claude+kickoff on first click; -A reattaches on later clicks).
+  // 5) editor terminal attaches to the orchestrator's tmux session (created
+  //    fresh with claude+kickoff on first click; -A reattaches on later clicks).
   //    Closing the tab only detaches — the orchestrator keeps running.
   if (_orchTerminal && _orchTerminal.exitStatus === undefined) {
     _orchTerminal.dispose(); // avoid stacking on repeated clicks

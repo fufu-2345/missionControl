@@ -5,8 +5,34 @@ import {
   buildTmuxLaunchCommand,
   isSafeOracleName,
   parseOraclePath,
+  parseSessionPin,
   parseTeamRoster,
 } from "./teams";
+
+test("parseSessionPin: finds pinned session for an oracle", () => {
+  const cfg = JSON.stringify({ sessions: { foreman: "09-foreman", bob: "05-bob" } });
+  expect(parseSessionPin(cfg, "foreman")).toBe("09-foreman");
+  expect(parseSessionPin(cfg, "bob")).toBe("05-bob");
+});
+
+test("parseSessionPin: missing oracle / empty / bad JSON → null", () => {
+  expect(parseSessionPin(JSON.stringify({ sessions: {} }), "foreman")).toBeNull();
+  expect(parseSessionPin(JSON.stringify({}), "foreman")).toBeNull();
+  expect(parseSessionPin(JSON.stringify({ sessions: { foreman: "  " } }), "foreman")).toBeNull();
+  expect(parseSessionPin(JSON.stringify({ sessions: { foreman: 42 } }), "foreman")).toBeNull();
+  expect(parseSessionPin("{bad", "foreman")).toBeNull();
+});
+
+test("buildTmuxLaunchCommand: pinned session name wins over claude-<orch>", () => {
+  const cmd = buildTmuxLaunchCommand("foreman", "/p/foreman-oracle", "hi", "09-foreman");
+  expect(cmd.startsWith("tmux new-session -A -s '09-foreman' '")).toBe(true);
+  expect(cmd).not.toContain("claude-foreman");
+});
+
+test("buildTmuxLaunchCommand: blank pin falls back to claude-<orch>", () => {
+  const cmd = buildTmuxLaunchCommand("foreman", "/p/foreman-oracle", "hi", "  ");
+  expect(cmd.startsWith("tmux new-session -A -s 'claude-foreman' '")).toBe(true);
+});
 
 test("parseTeamRoster: valid roster with an orchestrator", () => {
   const raw = JSON.stringify({

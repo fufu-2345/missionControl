@@ -75,6 +75,21 @@ export function buildKickoffPrompt(
   ].join(" ");
 }
 
+/** Find an oracle's pinned tmux session name from maw config content
+ *  (`sessions` map in `~/.config/maw/maw.config.*.json`). The pin is what
+ *  `maw wake` resolves FIRST, so the button launching into the same name means
+ *  every entry point (button, wake, team bring) converges on ONE session and
+ *  the fleet registry never mints a conflicting `01-*` twin. */
+export function parseSessionPin(mawConfigJson: string, oracle: string): string | null {
+  try {
+    const data = JSON.parse(mawConfigJson) as { sessions?: Record<string, unknown> };
+    const pin = data?.sessions?.[oracle];
+    return typeof pin === "string" && pin.trim() ? pin.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Find an oracle's local repo path from `~/.maw/oracles.json` content. */
 export function parseOraclePath(oraclesJson: string, name: string): string | null {
   try {
@@ -91,9 +106,14 @@ export function parseOraclePath(oraclesJson: string, name: string): string | nul
   }
 }
 
-/** Command to launch the orchestrator INSIDE a tmux session (`claude-<orch>`),
- *  as a FRESH interactive claude in its own repo dir (loads its CLAUDE.md + ψ +
- *  global skills), with the kickoff as the first message.
+/** Command to launch the orchestrator INSIDE a tmux session, as a FRESH
+ *  interactive claude in its own repo dir (loads its CLAUDE.md + ψ + global
+ *  skills), with the kickoff as the first message.
+ *  Session name: the maw `sessions` pin when one exists (e.g. `09-foreman`) so
+ *  the button, `maw wake` and `maw team bring` all converge on ONE session —
+ *  a pin WITHOUT the `NN-` prefix would get auto-numbered by maw on cold
+ *  create (mints `01-…` fleet twins = the recurring CONFLICT). Fallback:
+ *  `claude-<orch>` for unpinned orchestrators.
  *  Why tmux (not a bare editor terminal): (1) closing the tab only DETACHES —
  *  the orchestrator survives; (2) its Bash subprocesses inherit $TMUX so
  *  `maw team bring` / `tmux send-keys` dispatch works (a bare terminal has no
@@ -105,9 +125,11 @@ export function buildTmuxLaunchCommand(
   orchestrator: string,
   repoPath: string,
   kickoff: string,
+  sessionName?: string,
 ): string {
+  const session = sessionName?.trim() || `claude-${orchestrator}`;
   const inner =
     `cd ${shSingleQuote(repoPath)} && ` +
     `claude --dangerously-skip-permissions ${shSingleQuote(kickoff)}`;
-  return `tmux new-session -A -s ${shSingleQuote(`claude-${orchestrator}`)} ${shSingleQuote(inner)}`;
+  return `tmux new-session -A -s ${shSingleQuote(session)} ${shSingleQuote(inner)}`;
 }
