@@ -2,7 +2,7 @@ import * as cp from "node:child_process";
 
 import * as vscode from "vscode";
 
-import { ApiError, BACKEND_DISABLED, SERVER_URL, api, notifyBackendDisabled } from "../api";
+import { ApiError, BACKEND_DISABLED, SERVER_URL, api } from "../api";
 import { isPortUp } from "../commands/mawServe";
 import {
   PROJECT_STATE_KEY,
@@ -18,6 +18,8 @@ import {
 } from "../commands/startOrchestrator";
 import type { OracleTeam } from "../commands/teams";
 import type { ResumableProject } from "../commands/orchestratorResume";
+import * as gitOps from "../commands/gitOps";
+import { parseGitButtonState, type GitButtonState } from "../commands/gitStatus";
 import { MONTHLY_CAP_KEY, computeUsage, localMonthKey, sumByPrefix } from "../usage";
 import {
   TMUX_FMT,
@@ -281,34 +283,6 @@ export function openDashboardPanel(
         }
         return;
       }
-      case "select_project": {
-        const pid = typeof msg.projectId === "string" ? msg.projectId : "";
-        setCurrentProjectId(pid || null);
-        await context.globalState.update(PROJECT_STATE_KEY, pid || null);
-        // Budget + memory_share are per-project → re-fetch for the new pid.
-        await Promise.all([pushBudget(panel, context), pushMemoryShare(panel)]);
-        return;
-      }
-      case "toggle_memory_share": {
-        const pid = getCurrentProjectId();
-        if (!pid) {
-          return;
-        }
-        try {
-          await api<{ enabled: boolean }>(
-            `/project/${encodeURIComponent(pid)}/memory_share`,
-            { method: "POST", body: JSON.stringify({ enabled: !!msg.enabled }) },
-          );
-        } catch {
-          // frontend-only build — backend disabled; swallow silently.
-        }
-        await pushMemoryShare(panel); // reflect server-of-truth
-        return;
-      }
-      case "new_project": {
-        await promptNewProject(panel, context);
-        return;
-      }
       case "orch_open": {
         startOrchWizard(panel, msg.mode === "continue" ? "continue" : "new");
         return;
@@ -320,6 +294,68 @@ export function openDashboardPanel(
       case "orch_back": {
         _orch = undefined;
         panel.webview.postMessage({ type: "orch_close" });
+        return;
+      }
+      case "git_refresh": {
+        await refreshOrchProjects(panel, true); // fetch → recompute ahead/behind
+        return;
+      }
+      case "git_auto": {
+        // Draft a commit message from the diff (claude -p, read-only). The
+        // webview fills its textarea with the result — human reviews + commits.
+        const p = typeof msg.path === "string" ? msg.path : "";
+        if (!p) return;
+        const message = await gitOps.autoCommitMessage(p);
+        panel.webview.postMessage({ type: "git_auto_result", path: p, message });
+        return;
+      }
+      case "git_commit": {
+        const p = typeof msg.path === "string" ? msg.path : "";
+        const message = typeof msg.message === "string" ? msg.message.trim() : "";
+        if (!p || !message) return;
+        const r = await gitOps.commitAll(p, message);
+        vscode.window[r.ok ? "showInformationMessage" : "showErrorMessage"](
+          r.ok
+            ? `Mission Control: commit สำเร็จ — ${p.split("/").pop()}`
+            : `Mission Control: commit ล้มเหลว — ${(r.stderr || r.stdout).split("\n")[0]}`,
+        );
+        await refreshOrchProjects(panel);
+        return;
+      }
+      case "git_push": {
+        const p = typeof msg.path === "string" ? msg.path : "";
+        if (!p) return;
+        const st = await gitOps.readGitStatus(p);
+        const r = await gitOps.pushRepo(p, st.hasUpstream);
+        vscode.window[r.ok ? "showInformationMessage" : "showErrorMessage"](
+          r.ok
+            ? `Mission Control: push สำเร็จ — ${p.split("/").pop()}`
+            : `Mission Control: push ล้มเหลว — ${(r.stderr || r.stdout).split("\n")[0]}`,
+        );
+        await refreshOrchProjects(panel);
+        return;
+      }
+      case "git_createpush": {
+        const p = typeof msg.path === "string" ? msg.path : "";
+        const repoName = typeof msg.repoName === "string" ? msg.repoName.trim() : "";
+        const isPrivate = msg.isPrivate !== false; // default private
+        if (!p || !repoName) return;
+        // External action → confirm before creating a real GitHub repo.
+        const pick = await vscode.window.showWarningMessage(
+          `สร้าง GitHub repo ${isPrivate ? "(private)" : "(public)"} ชื่อ '${repoName}' จาก ${p
+            .split("/")
+            .pop()} แล้ว push?`,
+          { modal: true },
+          "Create & Push",
+        );
+        if (pick !== "Create & Push") return;
+        const r = await gitOps.createAndPush(p, repoName, isPrivate);
+        vscode.window[r.ok ? "showInformationMessage" : "showErrorMessage"](
+          r.ok
+            ? `Mission Control: สร้าง+push '${repoName}' สำเร็จ`
+            : `Mission Control: create/push ล้มเหลว — ${(r.stderr || r.stdout).split("\n")[0]}`,
+        );
+        await refreshOrchProjects(panel);
         return;
       }
       case "close": {
@@ -348,7 +384,7 @@ function startOrchWizard(panel: vscode.WebviewPanel, mode: "new" | "continue") {
   } else {
     const projects = scanResumableProjects();
     _orch = { mode, step: "project", projects };
-    pushOrchProjectScreen(panel, projects);
+    void pushOrchProjectScreen(panel, projects);
   }
 }
 
@@ -367,22 +403,53 @@ export function requestOrchWizard(
   }
 }
 
-function pushOrchProjectScreen(panel: vscode.WebviewPanel, projects: ResumableProject[]) {
+// Git state per project for the resume list's action buttons. Computed in
+// parallel (a handful of fast local `git` calls each). `fetch` first refreshes
+// remotes so ahead/behind is accurate (the ⟳ Refresh button path).
+async function computeGitStates(
+  projects: ResumableProject[],
+  opts: { fetch?: boolean } = {},
+): Promise<Record<string, GitButtonState>> {
+  const out: Record<string, GitButtonState> = {};
+  await Promise.all(
+    projects.map(async (p) => {
+      if (opts.fetch) await gitOps.fetchRepo(p.path);
+      out[p.path] = parseGitButtonState(await gitOps.readGitStatus(p.path));
+    }),
+  );
+  return out;
+}
+
+async function pushOrchProjectScreen(
+  panel: vscode.WebviewPanel,
+  projects: ResumableProject[],
+  opts: { fetch?: boolean } = {},
+) {
+  const states = await computeGitStates(projects, opts);
   const items = projects.map((p) => ({
     value: p.path,
     label: p.name,
     sub:
       `${p.sprintDocs} sprint docs · ${p.openWorktrees} worktree` +
       (p.metaTeam ? ` · ทำล่าสุด: ${p.metaTeam}` : ""),
+    git: { path: p.path, ...states[p.path] },
   }));
   panel.webview.postMessage({
     type: "orch_screen",
+    screen: "resume", // marks this as the git-enabled project list
     title: "⏮ ทำต่อ — เลือก project ค้าง",
     subtitle: items.length
-      ? "เลือก project ที่จะ resume (scan ทุก repo)"
+      ? "เลือก project ที่จะ resume · ปุ่มขวา = git (Commit / Push / Create & Push)"
       : "ไม่พบงานค้าง — ต้องมี docs/sprint-*.md หรือ worktree agents/* เปิดอยู่",
     items,
   });
+}
+
+/** Recompute git states for the current resume list and re-render (after an
+ *  action changes state). No-op if the wizard isn't on the project step. */
+async function refreshOrchProjects(panel: vscode.WebviewPanel, fetch = false) {
+  if (_orch?.step !== "project" || !_orch.projects) return;
+  await pushOrchProjectScreen(panel, _orch.projects, { fetch });
 }
 
 function pushOrchTeamScreen(panel: vscode.WebviewPanel) {
@@ -617,30 +684,6 @@ async function pushSkillCount(panel: vscode.WebviewPanel): Promise<void> {
     panel.webview.postMessage({ type: "skill_count", total: n, enabled: n });
   } catch {
     panel.webview.postMessage({ type: "skill_count", total: 0, enabled: 0 });
-  }
-}
-
-async function promptNewProject(
-  panel: vscode.WebviewPanel,
-  context: vscode.ExtensionContext,
-): Promise<void> {
-  const name = await vscode.window.showInputBox({
-    title: "Mission Control — New Project",
-    prompt: "ตั้งชื่อโปรเจกต์ใหม่",
-    validateInput: (v) => (v.trim().length === 0 ? "name cannot be empty" : null),
-  });
-  if (!name) return;
-  try {
-    const project = await api<Project>("/project/new", {
-      method: "POST",
-      body: JSON.stringify({ name: name.trim() }),
-    });
-    setCurrentProjectId(project.id);
-    await context.globalState.update(PROJECT_STATE_KEY, project.id);
-    await pushProjects(panel);
-  } catch {
-    // frontend-only build — backend disabled; swallow silently.
-    notifyBackendDisabled();
   }
 }
 
@@ -900,22 +943,7 @@ function renderHtml(): string {
   </div>
 
   <div class="container">
-    <div class="group-label first">Active Project <span class="badge-dead">ใช้ไม่ได้</span></div>
-    <div class="card project-card dead">
-      <select id="projectSelect"></select>
-      <button class="icon-btn" type="button" onclick="newProject()">+ New project</button>
-      <div class="pid" id="projectPid"></div>
-      <div class="memshare disabled" id="memshare">
-        <label class="toggle" title="Share agent memory across projects">
-          <input type="checkbox" id="memshareInput" disabled onchange="toggleMemShare(this.checked)">
-          <span class="slider"></span>
-        </label>
-        <span class="label">Share memory cross-project</span>
-        <span class="hint" id="memshareHint">— recall lessons from all projects (default: isolated)</span>
-      </div>
-    </div>
-
-    <div class="group-label">Sessions</div>
+    <div class="group-label first">Sessions</div>
     <div class="card">
       <div id="sessionsList" class="sessions-empty">(loading…)</div>
     </div>
@@ -926,57 +954,21 @@ function renderHtml(): string {
         <div class="title">Open Claude</div>
         <div class="sub">เลือก project → เปิด Claude ใน tmux (ปิด tab ไม่ตาย)</div>
       </button>
-      <button class="tile" type="button" onclick="run('missioncontrol.terminal')">
-        <div class="title">Open Terminal</div>
-        <div class="sub">เปิด CLI (bash) ที่ soulbrew root — รัน maw/git</div>
-      </button>
-      <button class="tile primary" type="button" onclick="orchStart('new')">
-        <div class="title">▶ เริ่มใหม่ (Orchestrator)</div>
-        <div class="sub">เลือกทีมในจอ → ปลุก orchestrator + attach → build ใหม่ (ถาม requirement)</div>
-      </button>
-      <button class="tile" type="button" onclick="orchStart('continue')">
-        <div class="title">⏮ ทำต่อ (Orchestrator)</div>
-        <div class="sub">เลือก project ค้าง → เลือกทีม → resume จาก state เดิม (ไม่ถาม requirement ใหม่)</div>
-      </button>
-      <button class="tile" type="button" onclick="run('missioncontrol.status')">
-        <div class="title">View Status</div>
-        <div class="sub" id="statusSub">maw · oracle · git — เช็คสถานะ local</div>
-      </button>
       <button class="tile" type="button" onclick="run('missioncontrol.budget')">
         <div class="title">Budget</div>
         <div class="sub" id="budgetSub">$0.00 spent</div>
       </button>
     </div>
 
-    <div class="group-label">Sprint Control · disabled (needs backend)</div>
-    <div class="grid cols-2">
-      <button class="tile dead" type="button" onclick="run('missioncontrol.approve')">
-        <div class="title">Approve ideas <span class="badge-dead">ใช้ไม่ได้</span></div>
-        <div class="sub" id="approveSub">ปิดใช้งานใน frontend-only build</div>
-      </button>
-      <button class="tile dead" type="button" onclick="run('missioncontrol.pause')">
-        <div class="title">Pause / Resume <span class="badge-dead">ใช้ไม่ได้</span></div>
-        <div class="sub">ปิดใช้งานใน frontend-only build</div>
-      </button>
-    </div>
-
     <div class="group-label">Resources</div>
-    <div class="grid cols-4">
-      <button class="tile" type="button" onclick="run('missioncontrol.skills')">
-        <div class="title">Skills</div>
-        <div class="sub" id="skillsSub">view</div>
+    <div class="grid cols-2">
+      <button class="tile" type="button" onclick="run('missioncontrol.teams')">
+        <div class="title">Teams</div>
+        <div class="sub">list/แก้ทีม · เพิ่มทีม · role/model/สี ต่อ oracle</div>
       </button>
       <button class="tile" type="button" onclick="run('missioncontrol.config')">
         <div class="title">Config</div>
         <div class="sub">แก้ ~/.mission-control/config.json</div>
-      </button>
-      <button class="tile dead" type="button" onclick="run('missioncontrol.setup')">
-        <div class="title">Setup <span class="badge-dead">ใช้ไม่ได้</span></div>
-        <div class="sub">ปิดใช้งาน (frontend-only)</div>
-      </button>
-      <button class="tile dead" type="button" onclick="run('missioncontrol.reset')">
-        <div class="title">Reset <span class="badge-dead">ใช้ไม่ได้</span></div>
-        <div class="sub">ปิดใช้งาน (frontend-only)</div>
       </button>
     </div>
 
@@ -1084,12 +1076,6 @@ function renderHtml(): string {
     renderFeed();
   }
 
-  function setSelectedProject(pid) {
-    const sel = document.getElementById("projectSelect");
-    sel.value = pid || "";
-    document.getElementById("projectPid").textContent = pid ? "pid: " + pid : "";
-  }
-
   function renderSessions(sessions) {
     const root = document.getElementById("sessionsList");
     if (!sessions || !sessions.length) {
@@ -1121,25 +1107,56 @@ function renderHtml(): string {
     });
   }
 
-  function renderProjects(projects, current, error) {
-    const sel = document.getElementById("projectSelect");
-    const opts = ['<option value="">(active project)</option>']
-      .concat(projects.map((p) =>
-        '<option value="' + escapeHtml(p.id) + '">' + escapeHtml(p.name || p.id) + '</option>'
-      ));
-    if (error) {
-      sel.innerHTML = '<option value="">(backend offline)</option>' + opts.join("");
-    } else {
-      sel.innerHTML = opts.join("");
-    }
-    setSelectedProject(current);
-  }
-
   function run(command) { vscode.postMessage({ type: "run", command }); }
   function refresh() { vscode.postMessage({ type: "refresh" }); }
-  function newProject() { vscode.postMessage({ type: "new_project" }); }
   function orchStart(mode) { vscode.postMessage({ type: "orch_open", mode }); }
   function orchBack() { vscode.postMessage({ type: "orch_back" }); }
+
+  // Inline styles per git button kind (avoids touching the shared <style>).
+  var GIT_BTN_STYLE = {
+    commit: 'background:#c47f1a;color:#fff;',
+    push: 'background:#1f6feb;color:#fff;',
+    'create-push': 'background:#238636;color:#fff;',
+  };
+  function gitCellHtml(g) {
+    if (!g || g.kind === 'none') return '';
+    if (g.kind === 'uptodate')
+      return '<span class="git-uptodate" style="color:#7d8590;font-size:11px;">'
+        + escapeHtml(g.label) + '</span>';
+    return '<button class="git-act" type="button" data-kind="' + g.kind + '" style="'
+      + (GIT_BTN_STYLE[g.kind] || '') + 'border:none;border-radius:5px;padding:4px 10px;'
+      + 'font-size:11px;cursor:pointer;">' + escapeHtml(g.label) + '</button>';
+  }
+  function gitEditorHtml(g) {
+    if (g.kind === 'commit') {
+      return '<div class="git-editor" style="display:none;margin-top:6px;">'
+        + '<textarea class="git-msg" rows="2" placeholder="commit message…" '
+        + 'style="width:100%;box-sizing:border-box;font-size:12px;"></textarea>'
+        + '<div style="margin-top:4px;display:flex;gap:6px;">'
+        + '<button class="git-auto" type="button">✨ auto</button>'
+        + '<button class="git-commit-go" type="button">Commit</button>'
+        + '<button class="git-cancel" type="button">ยกเลิก</button>'
+        + '</div></div>';
+    }
+    if (g.kind === 'create-push') {
+      // regex-free basename: a /\/+$/ regex inside this template literal would
+      // evaluate to //+$/ (the \/ collapses to /), i.e. a line comment that
+      // crashes the whole client script — the "dashboard frozen" bug. Split
+      // instead: filter(Boolean) drops any trailing-slash empty segment.
+      var _seg = String(g.path || '').split('/').filter(Boolean);
+      var def = _seg[_seg.length - 1] || '';
+      return '<div class="git-editor" style="display:none;margin-top:6px;">'
+        + '<input class="git-reponame" value="' + escapeHtml(def) + '" '
+        + 'style="width:60%;box-sizing:border-box;font-size:12px;" />'
+        + '<label style="font-size:11px;margin-left:8px;">'
+        + '<input type="checkbox" class="git-private" checked /> private</label>'
+        + '<div style="margin-top:4px;display:flex;gap:6px;">'
+        + '<button class="git-create-go" type="button">Create & Push</button>'
+        + '<button class="git-cancel" type="button">ยกเลิก</button>'
+        + '</div></div>';
+    }
+    return '';
+  }
 
   function renderOrchScreen(m) {
     const scr = document.getElementById("orchScreen");
@@ -1147,56 +1164,103 @@ function renderHtml(): string {
     document.getElementById("orchSubtitle").textContent = m.subtitle || "";
     const list = document.getElementById("orchList");
     const items = m.items || [];
-    list.innerHTML = items.length
-      ? items.map((it) =>
-          '<button class="orch-item" type="button" data-value="' + escapeHtml(it.value) + '">'
-          + '<span class="oi-label">' + escapeHtml(it.label) + '</span>'
-          + (it.sub ? '<span class="oi-sub">' + escapeHtml(it.sub) + '</span>' : '')
-          + '</button>'
-        ).join('')
-      : '<div class="orch-empty">(ไม่มีรายการ)</div>';
+    const isResume = m.screen === "resume";
+    const refreshBtn = isResume
+      ? '<button class="git-refresh" type="button" style="align-self:flex-start;'
+        + 'margin-bottom:8px;font-size:11px;">⟳ Refresh (git fetch)</button>'
+      : '';
+    if (!items.length) {
+      list.innerHTML = refreshBtn + '<div class="orch-empty">(ไม่มีรายการ)</div>';
+    } else if (isResume) {
+      list.innerHTML = refreshBtn + items.map((it) =>
+        '<div class="orch-row" data-path="' + escapeHtml((it.git && it.git.path) || it.value) + '" '
+        + 'style="display:flex;flex-direction:column;">'
+        + '<div style="display:flex;align-items:center;gap:8px;">'
+        + '<button class="orch-item" type="button" data-value="' + escapeHtml(it.value) + '" '
+        + 'style="flex:1;">'
+        + '<span class="oi-label">' + escapeHtml(it.label) + '</span>'
+        + (it.sub ? '<span class="oi-sub">' + escapeHtml(it.sub) + '</span>' : '')
+        + '</button>'
+        + '<span class="git-cell">' + gitCellHtml(it.git) + '</span>'
+        + '</div>'
+        + gitEditorHtml(it.git)
+        + '</div>'
+      ).join('');
+    } else {
+      list.innerHTML = items.map((it) =>
+        '<button class="orch-item" type="button" data-value="' + escapeHtml(it.value) + '">'
+        + '<span class="oi-label">' + escapeHtml(it.label) + '</span>'
+        + (it.sub ? '<span class="oi-sub">' + escapeHtml(it.sub) + '</span>' : '')
+        + '</button>'
+      ).join('');
+    }
     list.querySelectorAll('.orch-item').forEach((btn) => {
       btn.addEventListener('click', () => {
         vscode.postMessage({ type: "orch_pick", value: btn.dataset.value });
       });
     });
+    const rb = list.querySelector('.git-refresh');
+    if (rb) rb.addEventListener('click', () => vscode.postMessage({ type: "git_refresh" }));
+    wireGitRows(list);
     scr.style.display = "flex";
+  }
+
+  function wireGitRows(list) {
+    list.querySelectorAll('.orch-row').forEach((row) => {
+      const path = row.dataset.path;
+      const editor = row.querySelector('.git-editor');
+      const act = row.querySelector('.git-act');
+      if (act) act.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const kind = act.dataset.kind;
+        if (kind === 'push') { vscode.postMessage({ type: "git_push", path }); return; }
+        if (editor) editor.style.display = editor.style.display === 'none' ? 'block' : 'none';
+      });
+      if (!editor) return;
+      const cancel = editor.querySelector('.git-cancel');
+      if (cancel) cancel.addEventListener('click', () => { editor.style.display = 'none'; });
+      const auto = editor.querySelector('.git-auto');
+      if (auto) auto.addEventListener('click', () => {
+        auto.textContent = '✨ …'; auto.disabled = true;
+        vscode.postMessage({ type: "git_auto", path });
+      });
+      const commitGo = editor.querySelector('.git-commit-go');
+      if (commitGo) commitGo.addEventListener('click', () => {
+        const msg = (editor.querySelector('.git-msg').value || '').trim();
+        if (!msg) return;
+        vscode.postMessage({ type: "git_commit", path, message: msg });
+        editor.style.display = 'none';
+      });
+      const createGo = editor.querySelector('.git-create-go');
+      if (createGo) createGo.addEventListener('click', () => {
+        const repoName = (editor.querySelector('.git-reponame').value || '').trim();
+        const isPrivate = editor.querySelector('.git-private').checked;
+        if (!repoName) return;
+        vscode.postMessage({ type: "git_createpush", path, repoName, isPrivate });
+        editor.style.display = 'none';
+      });
+    });
+  }
+
+  // claude -p drafted a commit message → drop it into the matching row's box.
+  function fillGitAuto(path, message) {
+    const list = document.getElementById("orchList");
+    const row = list && list.querySelector('.orch-row[data-path="' + (window.CSS && CSS.escape ? CSS.escape(path) : path) + '"]');
+    if (!row) return;
+    const auto = row.querySelector('.git-auto');
+    if (auto) { auto.textContent = '✨ auto'; auto.disabled = false; }
+    const box = row.querySelector('.git-msg');
+    const editor = row.querySelector('.git-editor');
+    if (editor) editor.style.display = 'block';
+    if (box && message) box.value = message;
   }
   function hideOrchScreen() {
     document.getElementById("orchScreen").style.display = "none";
-  }
-  function toggleMemShare(enabled) {
-    vscode.postMessage({ type: "toggle_memory_share", enabled });
   }
   function clearFeed() {
     feedRows.length = 0;
     renderFeed();
   }
-
-  function renderMemShare(m) {
-    const row = document.getElementById("memshare");
-    const input = document.getElementById("memshareInput");
-    const hint = document.getElementById("memshareHint");
-    if (!m.hasProject) {
-      row.className = "memshare disabled";
-      input.disabled = true;
-      input.checked = false;
-      hint.textContent = "— select a project to toggle";
-      return;
-    }
-    row.className = "memshare";
-    input.disabled = false;
-    input.checked = !!m.enabled;
-    hint.textContent = m.enabled
-      ? "ON — recall sees ALL projects' lessons"
-      : "OFF — recall isolated to this project (default)";
-  }
-
-  document.getElementById("projectSelect").addEventListener("change", (e) => {
-    const projectId = e.target.value || "";
-    vscode.postMessage({ type: "select_project", projectId });
-    document.getElementById("projectPid").textContent = projectId ? "pid: " + projectId : "";
-  });
 
   window.addEventListener("message", (event) => {
     const m = event.data;
@@ -1204,10 +1268,6 @@ function renderHtml(): string {
     if (m.type === "status") {
       document.getElementById("dot").className = "dot " + (m.online ? "on" : "off");
       document.getElementById("statusText").textContent = m.online ? "Running" : "Stopped";
-    } else if (m.type === "projects") {
-      renderProjects(m.projects || [], m.current, m.error);
-    } else if (m.type === "current_project") {
-      setSelectedProject(m.current);
     } else if (m.type === "budget") {
       const sub = document.getElementById("budgetSub");
       const spent = (m.spent_usd ?? 0).toFixed(2);
@@ -1215,15 +1275,15 @@ function renderHtml(): string {
       sub.textContent = "$" + spent + cap + (m.over_cap ? " (over)" : "");
     } else if (m.type === "skill_count") {
       const sub = document.getElementById("skillsSub");
-      sub.textContent = (m.enabled ?? 0) + " active / " + (m.total ?? 0) + " total";
-    } else if (m.type === "memory_share") {
-      renderMemShare(m);
+      if (sub) sub.textContent = (m.enabled ?? 0) + " active / " + (m.total ?? 0) + " total";
     } else if (m.type === "sessions") {
       renderSessions(m.sessions || []);
     } else if (m.type === "orch_screen") {
       renderOrchScreen(m);
     } else if (m.type === "orch_close") {
       hideOrchScreen();
+    } else if (m.type === "git_auto_result") {
+      fillGitAuto(m.path, m.message);
     } else if (m.type === "ws_event") {
       pushFeed(m.event, m.data, m.ts);
     }

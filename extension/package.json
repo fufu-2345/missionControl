@@ -69,10 +69,6 @@
         "title": "Mission Control: Approve"
       },
       {
-        "command": "missioncontrol.pause",
-        "title": "Mission Control: Pause"
-      },
-      {
         "command": "missioncontrol.budget",
         "title": "Mission Control: Budget"
       },
@@ -81,12 +77,12 @@
         "title": "Mission Control: Config"
       },
       {
-        "command": "missioncontrol.reset",
-        "title": "Mission Control: Reset"
-      },
-      {
         "command": "missioncontrol.skills",
         "title": "Mission Control: View Skills"
+      },
+      {
+        "command": "missioncontrol.teams",
+        "title": "Mission Control: Teams"
       },
       {
         "command": "missioncontrol.dashboard",

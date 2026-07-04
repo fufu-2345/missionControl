@@ -246,7 +246,32 @@ export function launchOrchestrator(opts: {
     }
   }
   const sessionName = readSessionPin(orch) ?? undefined;
-  const command = buildTmuxLaunchCommand(orch, repoPath, kickoff, sessionName);
+  const session = sessionName?.trim() || `claude-${orch}`;
+
+  // Is the orchestrator already awake? `tmux new-session -A` only runs its
+  // launch command when CREATING — on an existing session it just reattaches
+  // and DROPS the kickoff. That silently loses a resume kickoff (the "opened
+  // like it never did anything" bug). So when the session exists, deliver the
+  // kickoff into the LIVE pane with send-keys instead (same as how orches-drive
+  // dispatches to live workers — NOT `maw wake -p`, which spawns a twin).
+  let alive = false;
+  try {
+    cp.execFileSync("tmux", ["has-session", "-t", `=${session}`], { stdio: "ignore" });
+    alive = true;
+  } catch {
+    alive = false;
+  }
+  if (alive) {
+    try {
+      cp.execFileSync("tmux", ["send-keys", "-t", `=${session}`, kickoff, "Enter"]);
+    } catch {
+      /* best-effort — fall through to attach so the user still lands in it */
+    }
+  }
+  // Safe: session is a maw pin (NN-oracle) or claude-<safe-orch> — both /^[\w.-]+$/.
+  const command = alive
+    ? `tmux attach -t '=${session}'`
+    : buildTmuxLaunchCommand(orch, repoPath, kickoff, sessionName);
 
   if (_orchTerminal && _orchTerminal.exitStatus === undefined) {
     _orchTerminal.dispose(); // avoid stacking on repeated clicks

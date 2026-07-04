@@ -7,17 +7,17 @@ import { configCommand } from "./commands/config";
 import { dashboardCommand } from "./commands/dashboard";
 import { installCommand } from "./commands/install";
 import { mawToggleCommand } from "./commands/mawServe";
-import { pauseCommand } from "./commands/pause";
-import { resetCommand } from "./commands/reset";
 import { setupCommand } from "./commands/setup";
 import { skillsCommand } from "./commands/skills";
+import { teamsCommand } from "./commands/teamsPanel";
 import { startCommand } from "./commands/start";
 import { startOrchestratorCommand } from "./commands/startOrchestrator";
 import { statusCommand } from "./commands/status";
 import { terminalCommand } from "./commands/terminal";
 import { PROJECT_STATE_KEY, setCurrentProjectId } from "./projectState";
 import { registerStatusBar } from "./statusBar";
-import { pushDashboardEvent, requestOrchWizard } from "./webview/dashboard";
+import { pushDashboardEvent } from "./webview/dashboard";
+import { openOrchestratorPanel } from "./webview/orchestrator";
 import { registerSidebar } from "./webview/sidebar";
 import { openIdeasPanel, type Idea } from "./webview/ideas";
 import { openPRPanel, type PRInfo } from "./webview/pr";
@@ -37,21 +37,20 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("missioncontrol.start", () => startCommand(context)),
     vscode.commands.registerCommand("missioncontrol.status", () => statusCommand(context)),
     vscode.commands.registerCommand("missioncontrol.approve", () => approveCommand(context)),
-    vscode.commands.registerCommand("missioncontrol.pause", () => pauseCommand(context)),
     vscode.commands.registerCommand("missioncontrol.budget", () => budgetCommand(context)),
     vscode.commands.registerCommand("missioncontrol.config", () => configCommand(context)),
-    vscode.commands.registerCommand("missioncontrol.reset", () => resetCommand(context)),
     vscode.commands.registerCommand("missioncontrol.skills", () => skillsCommand(context)),
+    vscode.commands.registerCommand("missioncontrol.teams", () => teamsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.dashboard", () => dashboardCommand(context)),
     vscode.commands.registerCommand("missioncontrol.claude", () => claudeCommand(context)),
     vscode.commands.registerCommand("missioncontrol.mawToggle", () => mawToggleCommand(context)),
     vscode.commands.registerCommand("missioncontrol.terminal", () => terminalCommand(context)),
     vscode.commands.registerCommand("missioncontrol.startOrchestrator", () => startOrchestratorCommand(context)),
     vscode.commands.registerCommand("missioncontrol.orchestratorNew", () =>
-      requestOrchWizard(context, "new"),
+      openOrchestratorPanel("new"),
     ),
     vscode.commands.registerCommand("missioncontrol.orchestratorContinue", () =>
-      requestOrchWizard(context, "continue"),
+      openOrchestratorPanel("continue"),
     ),
   ];
   context.subscriptions.push(...registrations);
