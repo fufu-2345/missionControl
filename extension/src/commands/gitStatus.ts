@@ -8,7 +8,8 @@ export type GitButtonKind =
   | "push" // clean, local commits ahead of (or no) upstream → needs a push
   | "create-push" // clean, no remote at all → create GitHub repo + push
   | "uptodate" // clean, in sync with upstream → nothing to do
-  | "none"; // not a git repo / unknown
+  | "init" // not a git repo → offer `git init`
+  | "none"; // unknown
 
 export interface GitButtonState {
   kind: GitButtonKind;
@@ -39,7 +40,7 @@ export function countDirty(porcelain: string): number {
  *  a clean, non-ahead tree reads as up to date. */
 export function parseGitButtonState(s: GitRawStatus): GitButtonState {
   const base = { dirtyCount: 0, ahead: s.ahead || 0, behind: s.behind || 0 };
-  if (!s.isRepo) return { ...base, kind: "none", label: "—" };
+  if (!s.isRepo) return { ...base, kind: "init", label: "Git init" };
 
   const dirtyCount = countDirty(s.porcelain);
   if (dirtyCount > 0) {

@@ -73,10 +73,6 @@
         "title": "Mission Control: Budget"
       },
       {
-        "command": "missioncontrol.config",
-        "title": "Mission Control: Config"
-      },
-      {
         "command": "missioncontrol.skills",
         "title": "Mission Control: View Skills"
       },

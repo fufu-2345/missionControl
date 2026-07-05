@@ -8,19 +8,32 @@
  *  the established vocabulary — offered as a dropdown). */
 export const ROLE_OPTIONS = ["orchestrator", "member", "builder"] as const;
 
-/** Colors maw assigns to live members (tmux-ish palette). */
+/** Member colors — EXACTLY maw's AgentColor palette (maw-js
+ *  tmux/layout-manager.ts → AGENT_COLORS). This is the color maw paints the
+ *  member's tmux pane border and the ● dot in `maw team status`/`list`; it is
+ *  only visible while the team is live. Keep this list in sync with maw. */
 export const COLOR_OPTIONS = [
   "blue",
   "green",
-  "red",
   "yellow",
-  "magenta",
   "cyan",
+  "magenta",
+  "red",
   "white",
+  "orange",
 ] as const;
 
+/** Provider aliases for `claude --model` — each resolves to the LATEST version
+ *  of that tier, so they survive the provider renaming/bumping concrete model
+ *  IDs (that's the whole point of offering aliases instead of pinned versions).
+ *  teamsOps.availableModels() merges the real, currently-served model IDs on
+ *  top of these when an Anthropic API key is present in the environment. */
+export const MODEL_ALIASES = ["opus", "sonnet", "haiku"] as const;
+
 export const DEFAULT_ROLE = "member";
-export const DEFAULT_MODEL = "claude";
+// Blank model = let maw fall back to the engine default (claude engine →
+// "sonnet"); surfaced as the "(default · sonnet)" option in the dropdown.
+export const DEFAULT_MODEL = "sonnet";
 
 export interface TeamMember {
   oracle: string;

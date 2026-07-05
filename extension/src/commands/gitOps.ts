@@ -83,6 +83,12 @@ export function fetchRepo(dir: string): Promise<RunResult> {
   return git(dir, ["fetch", "--quiet"], FETCH_TIMEOUT);
 }
 
+/** Initialize a non-repo project dir as a git repo on `main`. Leaves files
+ *  untracked so the row becomes "Commit (N)" for the user to commit next. */
+export function gitInit(dir: string): Promise<RunResult> {
+  return git(dir, ["init", "-b", "main"]);
+}
+
 /** Stage everything + commit with the given message (arg array — no shell). */
 export async function commitAll(dir: string, message: string): Promise<RunResult> {
   const add = await git(dir, ["add", "-A"]);

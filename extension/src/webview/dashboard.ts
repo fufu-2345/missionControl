@@ -963,12 +963,8 @@ function renderHtml(): string {
     <div class="group-label">Resources</div>
     <div class="grid cols-2">
       <button class="tile" type="button" onclick="run('missioncontrol.teams')">
-        <div class="title">Teams</div>
+        <div class="title">Team Config</div>
         <div class="sub">list/แก้ทีม · เพิ่มทีม · role/model/สี ต่อ oracle</div>
-      </button>
-      <button class="tile" type="button" onclick="run('missioncontrol.config')">
-        <div class="title">Config</div>
-        <div class="sub">แก้ ~/.mission-control/config.json</div>
       </button>
     </div>
 

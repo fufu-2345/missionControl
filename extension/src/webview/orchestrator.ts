@@ -48,14 +48,13 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch = false) {
     type: "screen_projects",
     title: "⏮ ทำต่อ — เลือก project ค้าง",
     subtitle: projects.length
-      ? "เลข sprint = ทำไปแล้ว (เพิ่มต่อได้) · 🔨 = ยังมี worktree ค้าง (sprint ยังไม่ merge) · ปุ่มขวา = git"
+      ? "🔨 ค้าง = sprint ที่ทำไม่จบ (worktree ยังเปิด) · ไม่มี 🔨 = สะอาด · เลข = sprint ที่ทำเสร็จแล้ว · ปุ่มขวา = git"
       : "ไม่พบงานค้าง — ต้องมี docs/sprint-*.md หรือ worktree agents/* เปิดอยู่",
     items: projects.map((p) => ({
       path: p.path,
       name: p.name,
       sprints: p.sprintDocs,
       worktrees: p.openWorktrees,
-      metaTeam: p.metaTeam ?? "",
       git: { path: p.path, ...states[p.path] },
     })),
   });
@@ -64,12 +63,16 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch = false) {
 function pushTeamsScreen(panel: vscode.WebviewPanel) {
   const teams = listOrchestratorTeams();
   const def = _st?.project ? defaultTeamFor(_st.project, teams) : null;
+  // Last-used team floats to the top; the rest keep their existing order.
+  const ordered = def
+    ? [...teams.filter((t) => t.name === def), ...teams.filter((t) => t.name !== def)]
+    : teams;
   panel.webview.postMessage({
     type: "screen_teams",
     title: (_st?.mode === "continue" ? "⏮ ทำต่อ" : "▶ เริ่มใหม่") + " — เลือกทีม",
     subtitle: _st?.project ? `project: ${_st.project.name}` : "เลือก oracle-team",
     canBack: _st?.mode === "continue",
-    items: teams.map((t) => ({
+    items: ordered.map((t) => ({
       name: t.name,
       isDefault: t.name === def,
       sub: `${t.members.length} members · orchestrator: ${
@@ -181,6 +184,14 @@ export function openOrchestratorPanel(mode: "new" | "continue"): vscode.WebviewP
       case "git_refresh":
         await pushProjectsScreen(panel, true);
         return;
+      case "git_init": {
+        const p = typeof msg.path === "string" ? msg.path : "";
+        if (!p) return;
+        const r = await gitOps.gitInit(p);
+        notify(r.ok, `git init ${short(p)}`, r);
+        await pushProjectsScreen(panel);
+        return;
+      }
       case "git_auto": {
         const p = typeof msg.path === "string" ? msg.path : "";
         if (!p) return;
@@ -227,9 +238,6 @@ export function openOrchestratorPanel(mode: "new" | "continue"): vscode.WebviewP
         await pushProjectsScreen(panel);
         return;
       }
-      case "close":
-        panel.dispose();
-        return;
     }
   });
   return panel;
@@ -268,12 +276,21 @@ function renderShell(): string {
   .empty { opacity: 0.6; font-size: 13px; padding: 24px 0; }
   .card { display: flex; align-items: center; gap: 10px; padding: 12px 14px; margin-bottom: 8px;
     border-radius: 8px; background: var(--vscode-editor-inactiveSelectionBackground);
-    border: 1px solid var(--vscode-panel-border); }
+    border: 1px solid var(--vscode-panel-border); cursor: pointer; }
   .card .pick { flex: 1; display: flex; flex-direction: column; cursor: pointer; background: none;
     border: none; text-align: left; color: inherit; padding: 0; }
   .card:hover { background: var(--vscode-list-hoverBackground); }
   .card .cname { font-size: 13px; font-weight: 600; }
   .card .csub { font-size: 11px; opacity: 0.65; margin-top: 2px; }
+  /* team-picker cards are the main action here → bigger + button-like */
+  .teamcard { padding: 16px 18px; }
+  .teamcard .cname { font-size: 15px; }
+  .teamcard .csub { font-size: 12px; margin-top: 4px; }
+  .card.default { border-color: #3fb950; background: rgba(63,185,80,0.12); }
+  .card.default:hover { background: rgba(63,185,80,0.18); }
+  .card.default .cname { color: #56d364; }
+  .badge-last { font-size: 10px; font-weight: 700; color: #0d1117; background: #3fb950;
+    padding: 1px 8px; border-radius: 8px; margin-left: 8px; vertical-align: middle; }
   .chip { font-size: 10px; padding: 1px 7px; border-radius: 8px; margin-left: 8px;
     vertical-align: middle; font-weight: 600; }
   .chip.act { background: rgba(196,127,26,0.22); color: #e3a13a; }
@@ -282,7 +299,7 @@ function renderShell(): string {
   .git-editor textarea, .git-editor input { background: var(--vscode-input-background);
     color: var(--vscode-input-foreground); border: 1px solid var(--vscode-panel-border);
     border-radius: 4px; padding: 5px 7px; font-size: 12px; box-sizing: border-box;
-    font-family: var(--vscode-font-family); }
+    font-family: var(--vscode-font-family); cursor: auto; }
   .barrow { display: flex; gap: 6px; margin-top: 4px; }
 </style></head>
 <body>
@@ -293,7 +310,7 @@ function renderShell(): string {
   <div class="content" id="content"><div class="empty">Loading…</div></div>
 <script>
   const vscode = acquireVsCodeApi();
-  var COLOR = { commit:'#c47f1a', push:'#1f6feb', 'create-push':'#238636' };
+  var COLOR = { commit:'#c47f1a', push:'#1f6feb', 'create-push':'#238636', init:'#57606a' };
   function esc(s){ return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;")
     .replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
   function el(id){ return document.getElementById(id); }
@@ -301,26 +318,29 @@ function renderShell(): string {
 
   function actionsHtml(canBack){
     return (canBack ? '<button id="backBtn">← กลับ</button>' : '')
-      + '<button id="reloadBtn">Reload</button><button id="closeBtn">Close</button>';
+      + '<button id="reloadBtn">fetch</button>';
   }
   function wireActions(canBack){
     if (canBack){ var b=el("backBtn"); if(b) b.addEventListener('click',function(){post('back');}); }
     el("reloadBtn").addEventListener('click',function(){post('git_refresh');});
-    el("closeBtn").addEventListener('click',function(){post('close');});
   }
 
   // ── git button (project rows) ────────────────────────────────────────────
   function gitCell(g){
     if (!g || g.kind==='none') return '';
     if (g.kind==='uptodate') return '<span style="color:#7d8590;font-size:11px;">'+esc(g.label)+'</span>';
+    // commit / create-push open an inline form (message / repo name) — the caret
+    // signals that, so the orange button doesn't read as "commit right now".
+    var caret = (g.kind==='commit'||g.kind==='create-push') ? ' ▾' : '';
     return '<button class="git-act" data-kind="'+g.kind+'" style="background:'+(COLOR[g.kind]||'#555')
-      +';color:#fff;border:none;border-radius:5px;padding:4px 10px;font-size:11px;">'+esc(g.label)+'</button>';
+      +';color:#fff;border:none;border-radius:5px;padding:4px 10px;font-size:11px;">'+esc(g.label)+caret+'</button>';
   }
   function gitEditor(g){
     if (g.kind==='commit') return '<div class="git-editor" style="display:none">'
       +'<textarea class="git-msg" rows="2" style="width:100%" placeholder="commit message…"></textarea>'
       +'<div class="barrow"><button class="git-auto">✨ auto</button>'
-      +'<button class="git-go">Commit</button><button class="git-x">ยกเลิก</button></div></div>';
+      +'<button class="git-go" style="background:#238636;color:#fff;border:none;border-radius:5px;padding:4px 12px;font-weight:600;">✓ Commit</button>'
+      +'<button class="git-x">ยกเลิก</button></div></div>';
     if (g.kind==='create-push'){ var _p=String(g.path||'').split('/').filter(Boolean); var def=_p[_p.length-1]||'';
       return '<div class="git-editor" style="display:none">'
       +'<input class="git-repo" value="'+esc(def)+'" style="width:55%"> '
@@ -335,11 +355,14 @@ function renderShell(): string {
     var items = m.items||[];
     el("content").innerHTML = items.length ? items.map(function(it){
       var wt = it.worktrees||0, sp = it.sprints||0;
-      var chip = wt > 0
-        ? '<span class="chip act">🔨 ค้าง '+wt+'</span>'
-        : '<span class="chip idle">💤 ไม่มีงานค้าง</span>';
-      var sub = sp+' sprint'+(sp>0?' (ทำต่อได้)':'')
-        + (it.metaTeam ? ' · ทำล่าสุด: '+esc(it.metaTeam) : '');
+      // Only flag projects that actually have unfinished work (open worktrees).
+      // A clean project shows NO chip — no news is good news. The subtitle still
+      // tells how many sprints are already done (docs/sprint-*.md count).
+      var chip = wt > 0 ? '<span class="chip act">🔨 ค้าง '+wt+' sprint</span>' : '';
+      // "ทำล่าสุด: team" is shown on the team-picker screen instead (the ⭐ badge
+      // floats that team to the top there), where it is actionable — so the card
+      // stays clean with just the sprint count.
+      var sub = 'ทำไปแล้ว '+sp+' sprint';
       return '<div class="card" data-path="'+esc(it.path)+'">'
         +'<div style="flex:1"><button class="pick"><span class="cname">'+esc(it.name)+chip+'</span>'
         +'<span class="csub">'+sub+'</span></button>'+gitEditor(it.git)+'</div>'
@@ -347,15 +370,24 @@ function renderShell(): string {
     }).join('') : '<div class="empty">'+esc(m.subtitle)+'</div>';
     el("content").querySelectorAll('.card').forEach(function(card){
       var path=card.dataset.path;
-      card.querySelector('.pick').addEventListener('click',function(){post('pick_project',{path:path});});
+      // Whole row selects the project — except clicks on the git button or its
+      // inline form (those do their own thing).
+      card.addEventListener('click',function(e){
+        if (e.target.closest('.git-act') || e.target.closest('.git-editor')) return;
+        post('pick_project',{path:path});
+      });
       wireGit(card, path);
     });
   }
   function wireGit(card, path){
     var ed=card.querySelector('.git-editor'), act=card.querySelector('.git-act');
     if(act) act.addEventListener('click',function(e){ e.stopPropagation();
-      if(act.dataset.kind==='push'){ post('git_push',{path:path}); return; }
-      if(ed) ed.style.display = ed.style.display==='none'?'block':'none'; });
+      var k=act.dataset.kind;
+      if(k==='push'){ post('git_push',{path:path}); return; }
+      if(k==='init'){ post('git_init',{path:path}); return; }
+      // commit / create-push: OPEN the form (never toggle-closed). Re-clicking the
+      // orange button used to collapse it → looked like "nothing happened / stuck".
+      if(ed){ ed.style.display='block'; var mb=ed.querySelector('.git-msg'); if(mb) mb.focus(); } });
     if(!ed) return;
     var x=ed.querySelector('.git-x'); if(x) x.addEventListener('click',function(){ed.style.display='none';});
     var au=ed.querySelector('.git-auto'); if(au) au.addEventListener('click',function(){au.textContent='✨ …';au.disabled=true;post('git_auto',{path:path});});
@@ -377,12 +409,12 @@ function renderShell(): string {
     el("actions").innerHTML=actionsHtml(m.canBack); wireActions(m.canBack);
     var items=m.items||[];
     el("content").innerHTML = items.length ? items.map(function(it){
-      return '<div class="card" data-name="'+esc(it.name)+'"><button class="pick">'
-        +'<span class="cname">'+esc(it.name)+(it.isDefault?'  ⭐ (ทำล่าสุด)':'')+'</span>'
+      return '<div class="card teamcard'+(it.isDefault?' default':'')+'" data-name="'+esc(it.name)+'"><button class="pick">'
+        +'<span class="cname">'+esc(it.name)+(it.isDefault?'<span class="badge-last">⭐ ทำล่าสุด</span>':'')+'</span>'
         +'<span class="csub">'+esc(it.sub)+'</span></button></div>';
     }).join('') : '<div class="empty">ยังไม่มีทีม — สร้างในหน้า Teams ก่อน</div>';
     el("content").querySelectorAll('.card').forEach(function(c){
-      c.querySelector('.pick').addEventListener('click',function(){post('pick_team',{name:c.dataset.name});});});
+      c.addEventListener('click',function(){post('pick_team',{name:c.dataset.name});});});
   }
   function renderOrch(m){
     el("title").textContent=m.title; el("subtitle").textContent=m.subtitle;
@@ -392,7 +424,7 @@ function renderShell(): string {
         +'<span class="cname">'+esc(it.name)+'</span><span class="csub">orchestrator</span></button></div>';
     }).join('');
     el("content").querySelectorAll('.card').forEach(function(c){
-      c.querySelector('.pick').addEventListener('click',function(){post('pick_orch',{name:c.dataset.name});});});
+      c.addEventListener('click',function(){post('pick_orch',{name:c.dataset.name});});});
   }
 
   window.addEventListener("message",function(e){

@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 
 import {
+  availableModels,
   createTeam,
   deleteTeam,
   listTeamSummaries,
@@ -36,10 +37,17 @@ function pushList(panel: vscode.WebviewPanel) {
   panel.webview.postMessage({ type: "team_list", teams: listTeamSummaries() });
 }
 
-function pushDetail(panel: vscode.WebviewPanel, name: string) {
+async function pushDetail(panel: vscode.WebviewPanel, name: string) {
   const team = readTeamDetailSync(name);
   const candidates = oracleCandidates(team.members.map((m) => m.oracle));
-  panel.webview.postMessage({ type: "team_detail", team, candidates, ...OPTIONS });
+  const modelOptions = await availableModels();
+  panel.webview.postMessage({
+    type: "team_detail",
+    team,
+    candidates,
+    ...OPTIONS,
+    modelOptions,
+  });
 }
 
 /** Coerce a webview-sent member list into clean TeamMember[]. */
@@ -47,7 +55,12 @@ function sanitizeMembers(raw: unknown): TeamMember[] {
   if (!Array.isArray(raw)) return [];
   const out: TeamMember[] = [];
   for (const m of raw) {
-    const oracle = typeof m?.oracle === "string" ? m.oracle.trim() : "";
+    // Normalize to the oracle STEM: `maw bud <stem>` makes repo <stem>-oracle,
+    // so a typed "fusion-oracle" would become "fusion-oracle-oracle". Strip it.
+    const oracle = (typeof m?.oracle === "string" ? m.oracle.trim() : "").replace(
+      /-oracle$/,
+      "",
+    );
     if (!oracle) continue;
     out.push({
       oracle,
@@ -66,7 +79,7 @@ export function openTeamsPanel(_projectId: string | null = null): vscode.Webview
   }
   const panel = vscode.window.createWebviewPanel(
     "missioncontrol.teams",
-    "Mission Control — Teams",
+    "Mission Control — Team Config",
     vscode.ViewColumn.One,
     { enableScripts: true, retainContextWhenHidden: true },
   );
@@ -85,15 +98,18 @@ export function openTeamsPanel(_projectId: string | null = null): vscode.Webview
         pushList(panel);
         return;
       case "open_team":
-        if (typeof msg.name === "string") pushDetail(panel, msg.name);
+        if (typeof msg.name === "string") void pushDetail(panel, msg.name);
         return;
-      case "new_team":
+      case "new_team": {
+        const modelOptions = await availableModels();
         panel.webview.postMessage({
           type: "team_new",
           candidates: oracleCandidates([]),
           ...OPTIONS,
+          modelOptions,
         });
         return;
+      }
       case "save_team": {
         const name = typeof msg.name === "string" ? msg.name : "";
         if (!isSafeTeamName(name)) return;
@@ -105,7 +121,7 @@ export function openTeamsPanel(_projectId: string | null = null): vscode.Webview
             ? `Teams: บันทึก '${name}' แล้ว`
             : `Teams: บันทึก '${name}' มีปัญหา — ${r.errors.join(" · ")}`,
         );
-        pushDetail(panel, name);
+        await pushDetail(panel, name);
         return;
       }
       case "create_team": {
@@ -129,7 +145,7 @@ export function openTeamsPanel(_projectId: string | null = null): vscode.Webview
             : `Teams: สร้าง '${name}' มีปัญหา — ${r.errors.join(" · ")}`,
         );
         pushList(panel);
-        pushDetail(panel, name); // jump straight into the new team
+        await pushDetail(panel, name); // jump straight into the new team
         return;
       }
       case "delete_team": {
@@ -205,8 +221,9 @@ function renderShell(): string {
     letter-spacing: .06em; opacity: .55; padding: 4px 6px; font-weight: 600; }
   table.members td { padding: 4px 6px; border-top: 1px solid var(--vscode-panel-border); }
   table.members .oracle-name { font-size: 12px; font-weight: 600; }
+  table.members input.oracle-new { width: 100%; min-width: 130px; }
   table.members select.role { min-width: 120px; }
-  table.members input.model { width: 110px; }
+  table.members select.model { min-width: 120px; }
   table.members select.color { width: 92px; }
   .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px;
     vertical-align: middle; }
@@ -223,9 +240,9 @@ function renderShell(): string {
 <script>
   const vscode = acquireVsCodeApi();
   let VIEW = "list";
-  let OPT = { roleOptions: [], colorOptions: [], defaultRole: "member", defaultModel: "claude" };
+  let OPT = { roleOptions: [], colorOptions: [], modelOptions: [], defaultRole: "member", defaultModel: "sonnet" };
   const COLOR_HEX = { blue:'#4ea1ff', green:'#3fb950', red:'#f85149', yellow:'#e3b341',
-    magenta:'#d2a8ff', cyan:'#39c5cf', white:'#e6edf3' };
+    magenta:'#d2a8ff', cyan:'#39c5cf', white:'#e6edf3', orange:'#f0883e' };
 
   function esc(s){ return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;")
     .replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
@@ -240,6 +257,13 @@ function renderShell(): string {
     var opts = '<option value=""'+(!sel?' selected':'')+'>—</option>'
       + OPT.colorOptions.map(c => '<option value="'+esc(c)+'"'+(c===sel?' selected':'')+'>'+esc(c)+'</option>').join('');
     return '<select class="color">'+opts+'</select>';
+  }
+  function modelSelect(sel){
+    var opts = (OPT.modelOptions || []).slice();
+    if (sel && opts.indexOf(sel) < 0) opts.unshift(sel); // keep a stored value not in the list
+    var blank = '<option value=""'+(!sel?' selected':'')+'>(default · '+esc(OPT.defaultModel||'')+')</option>';
+    var body = opts.map(function(v){ return '<option value="'+esc(v)+'"'+(v===sel?' selected':'')+'>'+esc(v)+'</option>'; }).join('');
+    return '<select class="model">'+blank+body+'</select>';
   }
   function swatch(c){ return c ? '<span class="sw" style="background:'+(COLOR_HEX[c]||'#8b949e')+'"></span>' : ''; }
 
@@ -266,12 +290,12 @@ function renderShell(): string {
   // ── Member table (shared by detail + create) ────────────────────────────────
   function memberRowHtml(m, editableOracle, candidates){
     var nameCell = editableOracle
-      ? '<select class="oracle-pick">'+optionList(candidates||[], m.oracle)+'</select>'
+      ? '<input type="text" class="oracle-new" list="oracle-suggest" placeholder="ชื่อ oracle ใหม่" value="'+esc(m.oracle||'')+'">'
       : '<span class="oracle-name">'+esc(m.oracle)+'</span>';
     return '<tr>'
       + '<td>'+nameCell+'</td>'
       + '<td>'+roleSelect(m.role)+'</td>'
-      + '<td><input type="text" class="model" placeholder="'+esc(OPT.defaultModel)+'" value="'+esc(m.model||'')+'"></td>'
+      + '<td>'+modelSelect(m.model||'')+'</td>'
       + '<td>'+swatch(m.color)+colorSelect(m.color)+'</td>'
       + '<td><button class="x" title="ลบ">✕</button></td>'
       + '</tr>';
@@ -279,9 +303,9 @@ function renderShell(): string {
   function readMembers(tbody){
     var out = [];
     tbody.querySelectorAll('tr').forEach(function(tr){
-      var pick = tr.querySelector('.oracle-pick');
+      var newInput = tr.querySelector('.oracle-new');
       var nameSpan = tr.querySelector('.oracle-name');
-      var oracle = pick ? pick.value : (nameSpan ? nameSpan.textContent : '');
+      var oracle = newInput ? newInput.value.trim() : (nameSpan ? nameSpan.textContent : '');
       if (!oracle) return;
       out.push({
         oracle: oracle,
@@ -299,20 +323,27 @@ function renderShell(): string {
     });
     var addBtn = root.querySelector('.add-member');
     if (addBtn) addBtn.addEventListener('click', function(){
-      if (!candidates || !candidates.length){ return; }
-      var tr = document.createElement('tbody');
-      tr.innerHTML = memberRowHtml({ oracle: candidates[0], role: OPT.defaultRole }, true, candidates);
-      var row = tr.firstElementChild;
+      // Always addable — a blank row where you TYPE a new (or existing) oracle
+      // name; brand-new names get scaffolded into a real oracle on Save.
+      var holder = document.createElement('tbody');
+      holder.innerHTML = memberRowHtml({ oracle: '', role: OPT.defaultRole }, true, candidates);
+      var row = holder.firstElementChild;
       tbody.appendChild(row);
       row.querySelector('.x').addEventListener('click', function(){ row.remove(); });
+      var inp = row.querySelector('.oracle-new'); if (inp) inp.focus();
     });
   }
   function memberTableHtml(members, editableOracle, candidates){
+    // Shared suggestions: existing oracle names autocomplete in the text input,
+    // but you can also just type a brand-new name to create one.
+    var dl = '<datalist id="oracle-suggest">'
+      + (candidates||[]).map(function(c){ return '<option value="'+esc(c)+'">'; }).join('')
+      + '</datalist>';
     return '<table class="members"><thead><tr>'
       + '<th>oracle</th><th>role</th><th>model</th><th>color</th><th></th>'
       + '</tr></thead><tbody>'
       + members.map(function(m){ return memberRowHtml(m, editableOracle, candidates); }).join('')
-      + '</tbody></table>'
+      + '</tbody></table>' + dl
       + '<div class="barrow"><button class="add-member">＋ Add member</button></div>';
   }
 
@@ -320,7 +351,7 @@ function renderShell(): string {
   function renderDetail(m){
     VIEW = "detail";
     OPT = { roleOptions: m.roleOptions, colorOptions: m.colorOptions,
-      defaultRole: m.defaultRole, defaultModel: m.defaultModel };
+      modelOptions: m.modelOptions || [], defaultRole: m.defaultRole, defaultModel: m.defaultModel };
     var t = m.team;
     el("title").innerHTML = 'Team · '+esc(t.name);
     el("topActions").innerHTML =
@@ -335,9 +366,7 @@ function renderShell(): string {
       + '</div>'
       + '<label>สมาชิก ('+t.members.length+')</label>'
       + memberTableHtml(t.members, false, m.candidates)
-      + '<div class="barrow"><button class="primary" id="saveTeam">Save</button></div>'
-      + '<div class="note">role อัปเดตผ่าน maw · model/สี เป็น run-config (มีผลตอนทีม up) · '
-      + 'เพิ่ม member เลือกได้จาก oracle ที่มีอยู่ ('+(m.candidates||[]).length+' ตัว)</div>';
+      + '<div class="barrow"><button class="primary" id="saveTeam">Save</button></div>';
     var content = el("content");
     wireMemberTable(content, m.candidates);
     el("delTeam").addEventListener('click', function(){ post('delete_team', { name: t.name }); });
@@ -354,7 +383,7 @@ function renderShell(): string {
   function renderNew(m){
     VIEW = "new";
     OPT = { roleOptions: m.roleOptions, colorOptions: m.colorOptions,
-      defaultRole: m.defaultRole, defaultModel: m.defaultModel };
+      modelOptions: m.modelOptions || [], defaultRole: m.defaultRole, defaultModel: m.defaultModel };
     el("title").innerHTML = 'New Team';
     el("topActions").innerHTML =
       '<button onclick="post(\\'reload\\')">← Teams</button>'
@@ -368,9 +397,7 @@ function renderShell(): string {
       + '</div>'
       + '<label>สมาชิก</label>'
       + memberTableHtml([], true, m.candidates)
-      + '<div class="barrow"><button class="primary" id="createTeam">Create</button></div>'
-      + '<div class="note">สมาชิกเลือกจาก oracle ที่มีอยู่ ('+(m.candidates||[]).length+' ตัว) · '
-      + 'สร้างทีมเปล่าได้ (ไม่ต้องมีสมาชิกก็ Create ได้)</div>';
+      + '<div class="barrow"><button class="primary" id="createTeam">Create</button></div>';
     var content = el("content");
     wireMemberTable(content, m.candidates);
     el("createTeam").addEventListener('click', function(){

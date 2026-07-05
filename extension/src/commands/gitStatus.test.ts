@@ -51,6 +51,8 @@ test("clean + behind only (no ahead) still reads up to date (pull out of scope)"
   expect(parseGitButtonState({ ...clean, behind: 2 }).kind).toBe("uptodate");
 });
 
-test("not a repo → none", () => {
-  expect(parseGitButtonState({ ...clean, isRepo: false }).kind).toBe("none");
+test("not a repo → init (offer git init)", () => {
+  const r = parseGitButtonState({ ...clean, isRepo: false });
+  expect(r.kind).toBe("init");
+  expect(r.label).toBe("Git init");
 });

@@ -3,7 +3,6 @@ import * as vscode from "vscode";
 import { approveCommand } from "./commands/approve";
 import { budgetCommand } from "./commands/budget";
 import { claudeCommand } from "./commands/claude";
-import { configCommand } from "./commands/config";
 import { dashboardCommand } from "./commands/dashboard";
 import { installCommand } from "./commands/install";
 import { mawToggleCommand } from "./commands/mawServe";
@@ -38,7 +37,6 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("missioncontrol.status", () => statusCommand(context)),
     vscode.commands.registerCommand("missioncontrol.approve", () => approveCommand(context)),
     vscode.commands.registerCommand("missioncontrol.budget", () => budgetCommand(context)),
-    vscode.commands.registerCommand("missioncontrol.config", () => configCommand(context)),
     vscode.commands.registerCommand("missioncontrol.skills", () => skillsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.teams", () => teamsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.dashboard", () => dashboardCommand(context)),
