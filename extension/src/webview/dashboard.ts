@@ -936,10 +936,6 @@ function renderHtml(): string {
       <span class="zap">⚡</span>
       <h1>Mission Control</h1>
     </div>
-    <div class="actions">
-      <span class="pill" id="statusPill"><span class="dot" id="dot"></span><span id="statusText">checking…</span></span>
-      <button class="icon-btn" type="button" onclick="refresh()">Refresh</button>
-    </div>
   </div>
 
   <div class="container">
@@ -965,6 +961,10 @@ function renderHtml(): string {
       <button class="tile" type="button" onclick="run('missioncontrol.teams')">
         <div class="title">Team Config</div>
         <div class="sub">list/แก้ทีม · เพิ่มทีม · role/model/สี ต่อ oracle</div>
+      </button>
+      <button class="tile" type="button" onclick="run('missioncontrol.accounts')">
+        <div class="title">Accounts</div>
+        <div class="sub">สลับ subscription login หลาย provider · usage หมดสลับได้</div>
       </button>
     </div>
 
@@ -1262,8 +1262,12 @@ function renderHtml(): string {
     const m = event.data;
     if (!m || typeof m.type !== "string") return;
     if (m.type === "status") {
-      document.getElementById("dot").className = "dot " + (m.online ? "on" : "off");
-      document.getElementById("statusText").textContent = m.online ? "Running" : "Stopped";
+      // The status pill was removed (it read "Stopped" forever with no backend).
+      // Guard the elements so the still-firing status poll is a harmless no-op.
+      const dot = document.getElementById("dot");
+      if (dot) dot.className = "dot " + (m.online ? "on" : "off");
+      const st = document.getElementById("statusText");
+      if (st) st.textContent = m.online ? "Running" : "Stopped";
     } else if (m.type === "budget") {
       const sub = document.getElementById("budgetSub");
       const spent = (m.spent_usd ?? 0).toFixed(2);

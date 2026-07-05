@@ -5,10 +5,35 @@ import {
   defaultTeamForProject,
   isResumable,
   parseOrchesMeta,
+  parsePlan,
   type ResumableProject,
   serializeOrchesMeta,
   sortResumable,
 } from "./orchestratorResume";
+
+test("parsePlan: counts total + done from checkbox lines", () => {
+  const raw = [
+    "# แผน build — demo",
+    "",
+    "- [x] Sprint 1 — engine",
+    "- [X] Sprint 2 — api",
+    "- [ ] Sprint 3 — ui",
+    "* [ ] Sprint 4 — polish", // asterisk bullet also counts
+    "- not a checkbox line",
+  ].join("\n");
+  expect(parsePlan(raw)).toEqual({ total: 4, done: 2 });
+});
+
+test("parsePlan: no checkbox lines → null", () => {
+  expect(parsePlan("# แผน\n\nไม่มี checkbox เลย")).toBeNull();
+  expect(parsePlan("")).toBeNull();
+});
+
+test("isResumable: a plan with unchecked sprints alone makes it resumable", () => {
+  expect(isResumable({ sprintDocs: 0, openWorktrees: 0, plannedTotal: 3, plannedDone: 1 })).toBe(true);
+  // fully-done plan, nothing else pending → not resumable
+  expect(isResumable({ sprintDocs: 0, openWorktrees: 0, plannedTotal: 3, plannedDone: 3 })).toBe(false);
+});
 
 test("parseOrchesMeta: valid", () => {
   expect(parseOrchesMeta('{"team":"brew","lastRun":123}')).toEqual({

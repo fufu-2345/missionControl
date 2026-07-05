@@ -19,6 +19,7 @@ import {
   defaultTeamForProject,
   isResumable,
   parseOrchesMeta,
+  parsePlan,
   type ResumableProject,
   serializeOrchesMeta,
   sortResumable,
@@ -141,6 +142,15 @@ function readMeta(dir: string) {
   }
 }
 
+/** Read the planned/done sprint counts from docs/plan.md (null if no plan). */
+function readPlan(dir: string): { total: number; done: number } | null {
+  try {
+    return parsePlan(fs.readFileSync(path.join(dir, "docs", "plan.md"), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
 /** Scan every repo under the owner root (projects/* + tool repos) for leftover
  *  work — a project is resumable if it has docs/sprint-*.md OR an open agents/*
  *  worktree. NOT filtered by team (user picks the team after). Sorted so the
@@ -178,13 +188,17 @@ export function scanResumableProjects(): ResumableProject[] {
   for (const p of candidates) {
     const sprintDocs = countSprintDocs(p);
     const openWorktrees = countOpenAgentWorktrees(p);
-    if (!isResumable({ sprintDocs, openWorktrees })) continue;
+    const plan = readPlan(p);
+    if (!isResumable({ sprintDocs, openWorktrees, plannedTotal: plan?.total, plannedDone: plan?.done }))
+      continue;
     const meta = readMeta(p);
     out.push({
       name: path.basename(p),
       path: p,
       sprintDocs,
       openWorktrees,
+      plannedTotal: plan?.total,
+      plannedDone: plan?.done,
       metaTeam: meta?.team,
       lastRun: meta?.lastRun,
     });

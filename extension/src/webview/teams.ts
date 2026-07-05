@@ -240,7 +240,7 @@ function renderShell(): string {
 <script>
   const vscode = acquireVsCodeApi();
   let VIEW = "list";
-  let OPT = { roleOptions: [], colorOptions: [], modelOptions: [], defaultRole: "member", defaultModel: "sonnet" };
+  let OPT = { roleOptions: [], colorOptions: [], modelOptions: [], defaultRole: "member", defaultModel: "claude-sonnet-5" };
   const COLOR_HEX = { blue:'#4ea1ff', green:'#3fb950', red:'#f85149', yellow:'#e3b341',
     magenta:'#d2a8ff', cyan:'#39c5cf', white:'#e6edf3', orange:'#f0883e' };
 
@@ -259,11 +259,13 @@ function renderShell(): string {
     return '<select class="color">'+opts+'</select>';
   }
   function modelSelect(sel){
+    var def = OPT.defaultModel || 'claude-sonnet-5';
+    if (!sel || sel === 'claude') sel = def; // no model, or the bare engine name "claude" maw writes → default to sonnet-5
+    var strip = function(v){ return String(v).replace(/^claude-/, ''); }; // display without the provider prefix; value keeps the full id
     var opts = (OPT.modelOptions || []).slice();
-    if (sel && opts.indexOf(sel) < 0) opts.unshift(sel); // keep a stored value not in the list
-    var blank = '<option value=""'+(!sel?' selected':'')+'>(default · '+esc(OPT.defaultModel||'')+')</option>';
-    var body = opts.map(function(v){ return '<option value="'+esc(v)+'"'+(v===sel?' selected':'')+'>'+esc(v)+'</option>'; }).join('');
-    return '<select class="model">'+blank+body+'</select>';
+    if (opts.indexOf(sel) < 0) opts.unshift(sel); // keep a stored/default value not already in the list
+    var body = opts.map(function(v){ return '<option value="'+esc(v)+'"'+(v===sel?' selected':'')+'>'+esc(strip(v))+'</option>'; }).join('');
+    return '<select class="model">'+body+'</select>';
   }
   function swatch(c){ return c ? '<span class="sw" style="background:'+(COLOR_HEX[c]||'#8b949e')+'"></span>' : ''; }
 

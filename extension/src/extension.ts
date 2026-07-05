@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 
+import { accountsCommand } from "./commands/accountsPanel";
 import { approveCommand } from "./commands/approve";
 import { budgetCommand } from "./commands/budget";
 import { claudeCommand } from "./commands/claude";
@@ -39,6 +40,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("missioncontrol.budget", () => budgetCommand(context)),
     vscode.commands.registerCommand("missioncontrol.skills", () => skillsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.teams", () => teamsCommand(context)),
+    vscode.commands.registerCommand("missioncontrol.accounts", () => accountsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.dashboard", () => dashboardCommand(context)),
     vscode.commands.registerCommand("missioncontrol.claude", () => claudeCommand(context)),
     vscode.commands.registerCommand("missioncontrol.mawToggle", () => mawToggleCommand(context)),

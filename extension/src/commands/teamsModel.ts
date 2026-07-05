@@ -23,17 +23,24 @@ export const COLOR_OPTIONS = [
   "orange",
 ] as const;
 
-/** Provider aliases for `claude --model` — each resolves to the LATEST version
- *  of that tier, so they survive the provider renaming/bumping concrete model
- *  IDs (that's the whole point of offering aliases instead of pinned versions).
- *  teamsOps.availableModels() merges the real, currently-served model IDs on
+/** Model options for `claude --model` — pinned, versioned Claude model IDs so the
+ *  dropdown shows an explicit version rather than a bare "opus"/"claude". Trade-off
+ *  vs bare aliases (opus/sonnet/haiku, which auto-track the latest tier): these pin
+ *  to a specific version and must be hand-bumped when a newer model ships.
+ *  teamsOps.availableModels() still merges the real, currently-served model IDs on
  *  top of these when an Anthropic API key is present in the environment. */
-export const MODEL_ALIASES = ["opus", "sonnet", "haiku"] as const;
+export const MODEL_ALIASES = [
+  "claude-opus-4-8",
+  "claude-opus-4-7",
+  "claude-sonnet-5",
+  "claude-haiku-4-5",
+] as const;
 
 export const DEFAULT_ROLE = "member";
-// Blank model = let maw fall back to the engine default (claude engine →
-// "sonnet"); surfaced as the "(default · sonnet)" option in the dropdown.
-export const DEFAULT_MODEL = "sonnet";
+// The model a member defaults to when none is stored (or when maw wrote the bare
+// engine name "claude" into the model field). Pinned to a versioned id so the
+// dropdown pre-selects a concrete version and maw launches `claude --model claude-sonnet-5`.
+export const DEFAULT_MODEL = "claude-sonnet-5";
 
 export interface TeamMember {
   oracle: string;

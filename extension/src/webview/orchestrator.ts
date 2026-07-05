@@ -48,13 +48,15 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch = false) {
     type: "screen_projects",
     title: "⏮ ทำต่อ — เลือก project ค้าง",
     subtitle: projects.length
-      ? "🔨 ค้าง = sprint ที่ทำไม่จบ (worktree ยังเปิด) · ไม่มี 🔨 = สะอาด · เลข = sprint ที่ทำเสร็จแล้ว · ปุ่มขวา = git"
-      : "ไม่พบงานค้าง — ต้องมี docs/sprint-*.md หรือ worktree agents/* เปิดอยู่",
+      ? "📋 เหลือ = sprint ที่วางแผนไว้ (docs/plan.md) ยังไม่ทำ · 🔨 ค้าง = sprint ทำไม่จบ (worktree เปิด) · ปุ่มขวา = git"
+      : "ไม่พบงานค้าง — ต้องมี docs/plan.md, docs/sprint-*.md หรือ worktree agents/* เปิดอยู่",
     items: projects.map((p) => ({
       path: p.path,
       name: p.name,
       sprints: p.sprintDocs,
       worktrees: p.openWorktrees,
+      plannedTotal: p.plannedTotal,
+      plannedDone: p.plannedDone,
       git: { path: p.path, ...states[p.path] },
     })),
   });
@@ -295,6 +297,7 @@ function renderShell(): string {
     vertical-align: middle; font-weight: 600; }
   .chip.act { background: rgba(196,127,26,0.22); color: #e3a13a; }
   .chip.idle { background: rgba(125,133,144,0.18); color: #9aa4af; }
+  .chip.plan { background: rgba(56,139,253,0.20); color: #6cb0ff; }
   .git-editor { margin-top: 6px; }
   .git-editor textarea, .git-editor input { background: var(--vscode-input-background);
     color: var(--vscode-input-foreground); border: 1px solid var(--vscode-panel-border);
@@ -355,16 +358,25 @@ function renderShell(): string {
     var items = m.items||[];
     el("content").innerHTML = items.length ? items.map(function(it){
       var wt = it.worktrees||0, sp = it.sprints||0;
-      // Only flag projects that actually have unfinished work (open worktrees).
-      // A clean project shows NO chip — no news is good news. The subtitle still
-      // tells how many sprints are already done (docs/sprint-*.md count).
+      var pt = it.plannedTotal||0, pd = it.plannedDone||0;
+      // 🔨 = an interrupted sprint (open worktree). Separate from the plan: a
+      // project can be clean (no worktree) yet still have planned sprints left.
       var chip = wt > 0 ? '<span class="chip act">🔨 ค้าง '+wt+' sprint</span>' : '';
-      // "ทำล่าสุด: team" is shown on the team-picker screen instead (the ⭐ badge
-      // floats that team to the top there), where it is actionable — so the card
-      // stays clean with just the sprint count.
-      var sub = 'ทำไปแล้ว '+sp+' sprint';
+      // When docs/plan.md exists we know the FULL plan → show real progress
+      // "did X of N, Y remaining" + a 📋 chip for the remaining planned sprints
+      // (this is the fix for "asked for 3 sprints, only 1 ran, looked like a bug"
+      // — the plan is now persisted, not lost when the build paused at a
+      // checkpoint). No plan.md → fall back to the sprint-doc count.
+      var sub, planChip = '';
+      if (pt > 0) {
+        var rem = pt - pd; if (rem < 0) rem = 0;
+        sub = 'ทำ '+pd+'/'+pt+' sprint' + (rem > 0 ? ' · เหลือ '+rem : ' · ครบแล้ว');
+        if (rem > 0) planChip = '<span class="chip plan">📋 เหลือ '+rem+'</span>';
+      } else {
+        sub = 'ทำไปแล้ว '+sp+' sprint';
+      }
       return '<div class="card" data-path="'+esc(it.path)+'">'
-        +'<div style="flex:1"><button class="pick"><span class="cname">'+esc(it.name)+chip+'</span>'
+        +'<div style="flex:1"><button class="pick"><span class="cname">'+esc(it.name)+planChip+chip+'</span>'
         +'<span class="csub">'+sub+'</span></button>'+gitEditor(it.git)+'</div>'
         +'<span class="git-cell">'+gitCell(it.git)+'</span></div>';
     }).join('') : '<div class="empty">'+esc(m.subtitle)+'</div>';

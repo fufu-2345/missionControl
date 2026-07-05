@@ -17,8 +17,27 @@ export interface ResumableProject {
   path: string; // absolute repo path
   sprintDocs: number; // count of docs/sprint-*.md
   openWorktrees: number; // count of `agents/*` git worktrees still open
+  plannedTotal?: number; // total sprints declared in docs/plan.md (if any)
+  plannedDone?: number; // sprints checked off in docs/plan.md
   metaTeam?: string; // team from .orches-meta.json (default pick)
   lastRun?: number; // lastRun from .orches-meta.json (sort key)
+}
+
+/** Parse `docs/plan.md` — the checklist the orchestrator writes at plan-time and
+ *  checks off per finished sprint (`- [x] Sprint 1 — …` / `- [ ] Sprint 2 — …`).
+ *  Returns {total, done} from the checkbox lines, or null if there are none.
+ *  This is what lets the dashboard show "did 1 of 3, 2 remaining" — a plan the
+ *  build no longer silently loses when it pauses at a sprint checkpoint. */
+export function parsePlan(raw: string): { total: number; done: number } | null {
+  let total = 0;
+  let done = 0;
+  for (const line of raw.split(/\r?\n/)) {
+    const m = /^\s*[-*]\s*\[( |x|X)\]/.exec(line);
+    if (!m) continue;
+    total++;
+    if (m[1] !== " ") done++;
+  }
+  return total > 0 ? { total, done } : null;
 }
 
 /** Parse `.orches-meta.json`. Tolerant: bad JSON / wrong shape → null. */
@@ -42,10 +61,16 @@ export function serializeOrchesMeta(team: string, lastRun: number): string {
   return JSON.stringify({ team, lastRun }, null, 2) + "\n";
 }
 
-/** A candidate dir is resumable when it has prior sprint output OR still has an
- *  open agents/* worktree — i.e. there's real leftover work to continue. */
-export function isResumable(info: { sprintDocs: number; openWorktrees: number }): boolean {
-  return info.sprintDocs > 0 || info.openWorktrees > 0;
+/** A candidate dir is resumable when it has prior sprint output, an open agents/*
+ *  worktree, OR a plan with sprints still unchecked — i.e. real leftover work. */
+export function isResumable(info: {
+  sprintDocs: number;
+  openWorktrees: number;
+  plannedTotal?: number;
+  plannedDone?: number;
+}): boolean {
+  const pendingPlan = (info.plannedTotal ?? 0) > (info.plannedDone ?? 0);
+  return info.sprintDocs > 0 || info.openWorktrees > 0 || pendingPlan;
 }
 
 /** Default team for the picker: the meta's team, but only if it's a real team
