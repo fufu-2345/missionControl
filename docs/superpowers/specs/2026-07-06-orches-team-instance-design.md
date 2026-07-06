@@ -99,7 +99,7 @@ _2026-07-06 · design spec · scope: orches-skills (orches + orches-drive SKILL.
 - ✅ label `<project> / <team>` dashboard + tmux status bar (`@orches_label`) — missionControl 87ca172/4e2a132/5c26321, orches-drive d09cdd8 (RESUME Step 0)
 - ✅ ตัด worker-twin เดิม — orches-drive 88d0182
 - ✅/⏳ **spec นี้** + แก้ orches-drive Step 3.5 เป็น instance-ladder + memory-กติกา + แก้ orches bootstrap เป็น launch-เดี่ยว (ดู commit ล่าสุดของ orches-skills — ถ้ายังไม่มี = ทำตาม B, C, A ข้างบน)
-- ⛔ extension (ข้อ D) — รอ project-star land
+- ✅ **extension (ข้อ D) — ทำแล้ว 2026-07-06 (แต่ยัง uncommitted โดยเจตนา)**: `launchOrchestrator` (startOrchestrator.ts) ตัด modal ทิ้ง · resume ที่ project live → `attachToProject()` return เลย · base session ไม่ว่าง → instance session `base-N` (ไม่ถาม) · `twinKickoffNote`/doc-comment เปลี่ยนคำ twin→instance + กติกา memory · **ไม่แตะ startOrchestrator.ts commit** เพราะไฟล์นี้มี project-star ของ user ค้าง → part D นั่งรวมใน working tree ให้ user commit พร้อม project-star ผ่านปุ่ม (หรือ surgical-split ถ้าต้องการ) · compile ผ่านทั้ง tree · **หมายเหตุ:** `inject` เหลือเป็น dead branch (always false) ไม่ error — ลบทีหลังได้ตอน project-star land · **skip @orches_label-at-launch** (launch เป็น async ใน terminal → set จะ race; skill Step 0 ของ orchestrator set ให้เชื่อถือได้ทุก path อยู่แล้ว)
 - 🔭 ไม่บังคับ/ทีหลัง: ตั้งชื่อ session ดิบตาม project (`orches-<project>`) แทน `NN-<orch>-K` — ทำได้เพราะ `--session` สร้างชื่อ verbatim แต่ต้องเช็คทุกจุดที่ resolve session จาก pin ก่อน
 
 ## วิธี verify (สำหรับคนทำต่อ)
