@@ -417,11 +417,11 @@ Expected: `tsc -p ./` จบโดยไม่มี error
 
 ```bash
 # หา session ทดสอบ (หรือใช้ session ที่มีอยู่) แล้ว set label ปลอม
-tmux set -t "=09-foreman" @orches_label "scientific-calculator / brew"
+tmux set -t "09-foreman" @orches_label "scientific-calculator / brew"
 ```
 Reload extension (Developer: Reload Window / รันใหม่) → เปิด dashboard → row `09-foreman` ต้องโชว์หัวข้อ **`scientific-calculator / brew`** และ subtitle ขึ้นต้นด้วย `09-foreman ·` · คลิก row = attach เข้า `09-foreman` (ชื่อจริง) ได้ปกติ
 ```bash
-tmux set -u -t "=09-foreman" @orches_label   # ลบ label
+tmux set -u -t "09-foreman" @orches_label   # ลบ label
 ```
 Reload → row กลับไปโชว์ `09-foreman` (fallback)
 
@@ -456,7 +456,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 SELF="$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null || tmux display-message -p '#{session_name}')"
 PROJ="$(cd '<project>' && pwd)"
 TEAM="$(python3 -c "import json;print(json.load(open('$PROJ/.orches-meta.json')).get('team',''))" 2>/dev/null)"
-tmux set -t "=$SELF" @orches_label "$(basename "$PROJ")${TEAM:+ / $TEAM}"
+tmux set -t "$SELF" @orches_label "$(basename "$PROJ")${TEAM:+ / $TEAM}"
 ```
 > ตั้ง tmux user-option (ไม่ใช่ rename session — attach/maw ไม่พัง) · dashboard + tmux status bar อ่าน `@orches_label` ตัวนี้ → เห็นเป็น `<project> / <team>` · TEAM ว่าง = โชว์แค่ project
 ````
@@ -469,7 +469,7 @@ tmux new-session -d -s wtest -c /home/chillox-intern/Desktop/soulbrew/github.com
 SELF=wtest
 PROJ="$(cd /home/chillox-intern/Desktop/soulbrew/github.com/fufu-2345/projects/scientific-calculator && pwd)"
 TEAM="$(python3 -c "import json;print(json.load(open('$PROJ/.orches-meta.json')).get('team',''))" 2>/dev/null)"
-tmux set -t "=$SELF" @orches_label "$(basename "$PROJ")${TEAM:+ / $TEAM}"
+tmux set -t "$SELF" @orches_label "$(basename "$PROJ")${TEAM:+ / $TEAM}"
 tmux show -t "=$SELF" -v @orches_label   # ต้องได้: scientific-calculator / brew
 tmux kill-session -t "=wtest"
 ```
@@ -510,11 +510,11 @@ set -g status-left "#[bg=colour110,fg=colour236,bold] #{?@orches_label,#{@orches
 ```bash
 tmux source-file ~/.tmux.conf
 tmux new-session -d -s wtest2
-tmux set -t "=wtest2" @orches_label "scientific-calculator / brew"
+tmux set -t "wtest2" @orches_label "scientific-calculator / brew"
 tmux display-message -p -t "=wtest2" '#{S:#{?@orches_label,#{@orches_label},#S}}' 2>/dev/null || \
   echo "check status bar of wtest2 shows: scientific-calculator / brew"
 # ไม่มี label → fallback ชื่อ session:
-tmux set -u -t "=wtest2" @orches_label
+tmux set -u -t "wtest2" @orches_label
 echo "check status bar of wtest2 now shows: wtest2"
 tmux kill-session -t "=wtest2"
 ```
