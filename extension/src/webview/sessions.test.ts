@@ -14,10 +14,12 @@ import {
 test("parseTmuxSessions parses tab-separated session lines (with orches label col)", () => {
   const raw =
     "carbon\t2\t1\tclaude\t\t/home/u/bob\n" +
-    "soulbrew\t1\t0\tbash\tsci-calc / brew\t/home/u/sb";
+    "soulbrew\t1\t0\tbash\tsci-calc / brew\t/home/u/sb\n" +
+    "twin\t1\t2\tclaude\t\t/home/u/tw"; // 2 clients attached (session_attached is a COUNT)
   expect(parseTmuxSessions(raw)).toEqual([
     { name: "carbon", windows: 2, attached: true, cmd: "claude", cwd: "/home/u/bob" },
     { name: "soulbrew", windows: 1, attached: false, cmd: "bash", orchesLabel: "sci-calc / brew", cwd: "/home/u/sb" },
+    { name: "twin", windows: 1, attached: true, cmd: "claude", cwd: "/home/u/tw" },
   ]);
 });
 

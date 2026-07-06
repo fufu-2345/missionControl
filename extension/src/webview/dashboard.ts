@@ -226,6 +226,23 @@ export function openDashboardPanel(
           return;
         }
 
+        // Also reveal an orchestrator tab already attached to this session
+        // (opened by the "⏮ ทำต่อ" button / launchOrchestrator, which tracks its
+        // terminals in a separate map). Match its naming: `orchestrator: <orch>`
+        // for a base session `NN-<orch>`, or `… · <session>` for a twin. This
+        // focuses the existing tab instead of spawning a duplicate `tmux attach`
+        // (a 2nd client would also flip the session dot green→grey).
+        const orchStem = name.replace(/^\d+-/, "");
+        const orchTerm = vscode.window.terminals.find(
+          (t) =>
+            t.exitStatus === undefined &&
+            (t.name === `orchestrator: ${orchStem}` || t.name.endsWith(` · ${name}`)),
+        );
+        if (orchTerm) {
+          orchTerm.show(false);
+          return;
+        }
+
         const term = vscode.window.createTerminal({
           name: "tmux: " + name,
           location: vscode.TerminalLocation.Editor,

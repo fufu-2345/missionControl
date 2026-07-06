@@ -32,7 +32,9 @@ export function parseTmuxSessions(raw: string): TmuxSession[] {
     out.push({
       name,
       windows: Number.parseInt(parts[1], 10) || 0,
-      attached: parts[2] === "1",
+      // session_attached is a COUNT of clients (0, 1, 2, …) — attached when > 0.
+      // (=== "1" was wrong: a 2nd client, e.g. dashboard + orchestrator tab, made it "2".)
+      attached: !!parts[2] && parts[2] !== "0",
       cmd: parts[3] ?? "",
       orchesLabel: parts[4] || undefined,
       cwd: parts.slice(5).join("\t"),
