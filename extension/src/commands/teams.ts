@@ -95,7 +95,7 @@ export function buildResumeKickoff(
     `Workers ที่ dispatch ได้: ${w}.`,
     `รัน skill /orches-drive แบบ RESUME กับ project ที่ค้างอยู่: "${projectName}" (absolute path: ${projectPath}).`,
     `อย่าถาม build requirement ใหม่ — แทนที่ด้วย: อ่าน state เดิมก่อน` +
-      ` (docs/sprint-*.md, git log --oneline, git worktree list, .orches-notes.md ใน worktree agents/* ที่ยังเปิด) →` +
+      ` (docs/*sprint-*.md — ชื่อใหม่ <project>-sprint-N.md หรือชื่อเก่า sprint-N.md, git log --oneline, git worktree list, .orches-notes.md ใน worktree agents/* ที่ยังเปิด) →` +
       ` สรุปให้ user ฟังสั้นๆ ว่าทำถึง sprint ไหน ค้างอะไร → เสนอ sprint ถัดไป → รอ user สั่งไปต่อ.`,
     `จากนั้นวน /orches-drive ปกติ: แจกงาน worker → poll .orches-done → verify → git merge เข้า main → capture memory. อย่า dispatch งานให้ตัวเอง.`,
     `อย่ารัน /orches (bootstrap — คุณผ่านมาแล้ว).`,

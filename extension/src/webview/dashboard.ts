@@ -440,7 +440,7 @@ async function pushOrchProjectScreen(
     title: "⏮ ทำต่อ — เลือก project ค้าง",
     subtitle: items.length
       ? "เลือก project ที่จะ resume · ปุ่มขวา = git (Commit / Push / Create & Push)"
-      : "ไม่พบงานค้าง — ต้องมี docs/sprint-*.md หรือ worktree agents/* เปิดอยู่",
+      : "ไม่พบงานค้าง — ต้องมี docs/*sprint-*.md หรือ worktree agents/* เปิดอยู่",
     items,
   });
 }

@@ -52,7 +52,7 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch = false) {
     title: "⏮ ทำต่อ — เลือก project ค้าง",
     subtitle: projects.length
       ? "⠋ กำลังทำ = worker run อยู่ตอนนี้ · 🔨 ค้าง = sprint ที่ยังไม่เสร็จ (จากแผน หรือ worktree ที่เปิดค้าง) · 'ทำ X/N' = เสร็จกี่ sprint · ปุ่มขวา = git"
-      : "ไม่พบงานค้าง — ต้องมี docs/plan.md, docs/sprint-*.md หรือ worktree agents/* เปิดอยู่",
+      : "ไม่พบงานค้าง — ต้องมี docs/plan.md, docs/*sprint-*.md หรือ worktree agents/* เปิดอยู่",
     items: projects.map((p) => ({
       path: p.path,
       name: p.name,

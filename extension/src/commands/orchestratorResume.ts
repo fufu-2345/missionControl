@@ -16,7 +16,7 @@ export interface OrchesMeta {
 export interface ResumableProject {
   name: string; // display name (basename of path)
   path: string; // absolute repo path
-  sprintDocs: number; // count of docs/sprint-*.md
+  sprintDocs: number; // count of docs/*sprint-*.md (new <project>-sprint-N.md or legacy sprint-N.md)
   openWorktrees: number; // count of `agents/*` git worktrees still open
   plannedTotal?: number; // total sprints declared in docs/plan.md (if any)
   plannedDone?: number; // sprints checked off in docs/plan.md

@@ -117,7 +117,7 @@ function countSprintDocs(dir: string): number {
   try {
     return fs
       .readdirSync(path.join(dir, "docs"))
-      .filter((f) => /^sprint-.*\.md$/.test(f)).length;
+      .filter((f) => /^(?:.+-)?sprint-\d+.*\.md$/.test(f)).length;
   } catch {
     return 0;
   }
@@ -153,7 +153,8 @@ function readPlan(dir: string): { total: number; done: number } | null {
 }
 
 /** Scan every repo under the owner root (projects/* + tool repos) for leftover
- *  work — a project is resumable if it has docs/sprint-*.md OR an open agents/*
+ *  work — a project is resumable if it has docs/*sprint-*.md (new <project>-sprint-N.md
+ *  or legacy sprint-N.md naming) OR an open agents/*
  *  worktree. NOT filtered by team (user picks the team after). Sorted so the
  *  most-recently-driven is first. */
 export function scanResumableProjects(): ResumableProject[] {
