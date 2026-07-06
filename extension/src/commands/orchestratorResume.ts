@@ -9,6 +9,7 @@
 export interface OrchesMeta {
   team?: string;
   lastRun?: number; // epoch ms of the last drive
+  session?: string; // tmux session that drove it last (twin-aware attach)
 }
 
 /** A project the "⏮ ทำต่อ" screen can offer to resume. */
@@ -21,6 +22,7 @@ export interface ResumableProject {
   plannedDone?: number; // sprints checked off in docs/plan.md
   metaTeam?: string; // team from .orches-meta.json (default pick)
   lastRun?: number; // lastRun from .orches-meta.json (sort key)
+  doing?: boolean; // a worker worktree of this project has a LIVE tmux pane right now
 }
 
 /** Parse `docs/plan.md` — the checklist the orchestrator writes at plan-time and
@@ -49,16 +51,21 @@ export function parseOrchesMeta(raw: string): OrchesMeta | null {
     return null;
   }
   if (!data || typeof data !== "object") return null;
-  const d = data as { team?: unknown; lastRun?: unknown };
+  const d = data as { team?: unknown; lastRun?: unknown; session?: unknown };
   const meta: OrchesMeta = {};
   if (typeof d.team === "string" && d.team.trim()) meta.team = d.team.trim();
   if (typeof d.lastRun === "number" && Number.isFinite(d.lastRun)) meta.lastRun = d.lastRun;
+  if (typeof d.session === "string" && d.session.trim()) meta.session = d.session.trim();
   return meta;
 }
 
-/** Serialize `.orches-meta.json` (written when a drive starts/resumes). */
-export function serializeOrchesMeta(team: string, lastRun: number): string {
-  return JSON.stringify({ team, lastRun }, null, 2) + "\n";
+/** Serialize `.orches-meta.json` (written when a drive starts/resumes).
+ *  `session` records WHICH tmux session drove it (base or twin) so a later
+ *  attach lands in the right one; omitted when unknown. */
+export function serializeOrchesMeta(team: string, lastRun: number, session?: string): string {
+  const meta: OrchesMeta = { team, lastRun };
+  if (session && session.trim()) meta.session = session.trim();
+  return JSON.stringify(meta, null, 2) + "\n";
 }
 
 /** A candidate dir is resumable when it has prior sprint output, an open agents/*
@@ -71,6 +78,16 @@ export function isResumable(info: {
 }): boolean {
   const pendingPlan = (info.plannedTotal ?? 0) > (info.plannedDone ?? 0);
   return info.sprintDocs > 0 || info.openWorktrees > 0 || pendingPlan;
+}
+
+/** True when a live tmux pane's cwd sits inside this project's `agents/*`
+ *  worktrees — i.e. a worker is actively grinding a sprint RIGHT NOW ("doing",
+ *  the third status, distinct from a merely open-but-idle worktree = "ค้าง").
+ *  Pure: the caller supplies the live pane cwds (from `tmux list-panes`), so this
+ *  stays unit-testable with no tmux/child_process dependency. */
+export function isProjectLive(projectPath: string, livePanePaths: string[]): boolean {
+  const agents = projectPath.replace(/\/+$/, "") + "/agents";
+  return livePanePaths.some((p) => p === agents || p.startsWith(agents + "/"));
 }
 
 /** Default team for the picker: the meta's team, but only if it's a real team

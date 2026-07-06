@@ -501,7 +501,7 @@ function handleOrchPick(panel: vscode.WebviewPanel, value: string) {
     }
     _orch.team = team;
     if (team.orchestrators.length === 1) {
-      doOrchLaunch(panel, team.orchestrators[0]);
+      void doOrchLaunch(panel, team.orchestrators[0]);
     } else {
       _orch.step = "orch";
       pushOrchOrchestratorScreen(panel, team);
@@ -509,20 +509,21 @@ function handleOrchPick(panel: vscode.WebviewPanel, value: string) {
     return;
   }
   if (_orch.step === "orch") {
-    doOrchLaunch(panel, value);
+    void doOrchLaunch(panel, value);
   }
 }
 
-function doOrchLaunch(panel: vscode.WebviewPanel, orch: string) {
+async function doOrchLaunch(panel: vscode.WebviewPanel, orch: string) {
   if (!_orch?.team) return;
   const team = _orch.team;
   const project = _orch.project;
   const mode: "new" | "resume" = _orch.mode === "continue" ? "resume" : "new";
-  const err = launchOrchestrator({ orch, team, mode, project });
+  const r = await launchOrchestrator({ orch, team, mode, project });
+  if (r.cancelled) return; // user backed out of the twin/inject choice — keep the wizard
   _orch = undefined;
   panel.webview.postMessage({ type: "orch_close" });
-  if (err) {
-    vscode.window.showErrorMessage(`Mission Control: ${err}`);
+  if (r.error) {
+    vscode.window.showErrorMessage(`Mission Control: ${r.error}`);
     return;
   }
   vscode.window.showInformationMessage(

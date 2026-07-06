@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import { buildResumeKickoff } from "./teams";
 import {
   defaultTeamForProject,
+  isProjectLive,
   isResumable,
   parseOrchesMeta,
   parsePlan,
@@ -59,6 +60,22 @@ test("isResumable: sprint docs OR open worktrees", () => {
   expect(isResumable({ sprintDocs: 0, openWorktrees: 0 })).toBe(false);
   expect(isResumable({ sprintDocs: 2, openWorktrees: 0 })).toBe(true);
   expect(isResumable({ sprintDocs: 0, openWorktrees: 1 })).toBe(true);
+});
+
+test("isProjectLive: true only when a live pane sits inside <project>/agents/*", () => {
+  const proj = "/home/u/projects/rpn";
+  // a worker worktree pane → doing
+  expect(isProjectLive(proj, ["/home/u/projects/rpn/agents/bob"])).toBe(true);
+  // deeper cwd inside the worktree still counts
+  expect(isProjectLive(proj, ["/home/u/projects/rpn/agents/jack/src"])).toBe(true);
+  // trailing slash on the project path is tolerated
+  expect(isProjectLive(proj + "/", ["/home/u/projects/rpn/agents/bob"])).toBe(true);
+  // the project root itself (or its docs) is NOT a live worker → not doing
+  expect(isProjectLive(proj, ["/home/u/projects/rpn", "/home/u/projects/rpn/docs"])).toBe(false);
+  // a DIFFERENT project's worktree must not leak in (prefix-collision guard)
+  expect(isProjectLive(proj, ["/home/u/projects/rpn-v2/agents/bob"])).toBe(false);
+  // no panes at all → not doing
+  expect(isProjectLive(proj, [])).toBe(false);
 });
 
 test("defaultTeamForProject: only when team exists in the list", () => {

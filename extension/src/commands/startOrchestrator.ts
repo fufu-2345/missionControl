@@ -17,6 +17,7 @@ import {
 } from "./teams";
 import {
   defaultTeamForProject,
+  isProjectLive,
   isResumable,
   parseOrchesMeta,
   parsePlan,
@@ -206,6 +207,29 @@ export function scanResumableProjects(): ResumableProject[] {
   return sortResumable(out);
 }
 
+/** Live tmux pane cwds across every session (empty if tmux is absent/errors).
+ *  One cheap `tmux list-panes` — no LLM, no tokens. */
+function listLiveAgentPanePaths(): string[] {
+  try {
+    return cp
+      .execFileSync("tmux", ["list-panes", "-a", "-F", "#{pane_current_path}"], { timeout: 1500 })
+      .toString()
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/** Refresh each project's `doing` flag from the CURRENT tmux pane set. Cheap
+ *  (one `tmux list-panes`), so the "⠋ กำลังทำ" indicator re-evaluates on every
+ *  screen refresh without re-walking the filesystem. Mutates in place. */
+export function annotateLiveState(projects: ResumableProject[]): void {
+  const live = listLiveAgentPanePaths();
+  for (const p of projects) p.doing = isProjectLive(p.path, live);
+}
+
 /** Default team for a resumable project (whoever drove it last), given the
  *  currently-pickable teams. null → user picks with no default. */
 export function defaultTeamFor(project: ResumableProject, teams: OracleTeam[]): string | null {
@@ -215,22 +239,117 @@ export function defaultTeamFor(project: ResumableProject, teams: OracleTeam[]): 
   );
 }
 
-// Reuse one editor terminal across clicks (fresh attach each start).
-let _orchTerminal: vscode.Terminal | undefined;
+// One editor terminal PER orchestrator (keyed by oracle name), so launching a
+// second orchestrator never closes the first — many can run side by side. Only
+// re-launching the SAME orch reuses/refreshes its own tab.
+const _orchTerminals = new Map<string, vscode.Terminal>();
+
+/** Run a command in an editor terminal once shell integration is ready (or after
+ *  a short fallback) so long-running tmux-attach commands survive. */
+function runInTerminal(term: vscode.Terminal, command: string): void {
+  let done = false;
+  const go = () => {
+    if (done || term.exitStatus !== undefined) return;
+    done = true;
+    if (term.shellIntegration) term.shellIntegration.executeCommand(command);
+    else term.sendText(command);
+  };
+  if (term.shellIntegration) {
+    go();
+  } else {
+    const sub = vscode.window.onDidChangeTerminalShellIntegration((e) => {
+      if (e.terminal === term) {
+        sub.dispose();
+        go();
+      }
+    });
+    setTimeout(() => {
+      sub.dispose();
+      go();
+    }, 2500);
+  }
+}
+
+/** If `project` is already being driven by a live orchestrator (its team's
+ *  orchestrator tmux session is up), open/reveal THAT session's terminal —
+ *  ATTACH ONLY, no new kickoff, no re-dispatch — and return true. Returns false
+ *  when nothing live is found → caller runs the normal team → orchestrator →
+ *  launch flow. This is what makes clicking a "doing" project re-enter its
+ *  running session instead of spawning a conflicting one on top. */
+export function attachToProject(project: ResumableProject): boolean {
+  const meta = readMeta(project.path);
+  if (!meta?.team) return false;
+  const team = readTeams().find((t) => t.name === meta.team);
+  const orch = team?.orchestrators[0];
+  if (!orch || !isSafeOracleName(orch)) return false;
+  // Prefer the exact session stamped when this project was driven (twin-aware);
+  // fall back to the pin / default. Attach to the first one actually alive.
+  const candidates = [
+    ...(meta.session ? [meta.session] : []),
+    readSessionPin(orch)?.trim() || `claude-${orch}`,
+  ];
+  const session = candidates.find((s) => /^[\w.-]+$/.test(s) && tmuxHasSession(s));
+  if (!session) return false; // nothing awake → let the caller launch fresh
+  const prev = _orchTerminals.get(session);
+  if (prev && prev.exitStatus === undefined) {
+    prev.show(false); // already have its tab open → just reveal it
+    return true;
+  }
+  const term = vscode.window.createTerminal({
+    name: `orchestrator: ${orch}`,
+    location: vscode.TerminalLocation.Editor,
+  });
+  _orchTerminals.set(session, term);
+  term.show(false);
+  runInTerminal(term, `tmux attach -t '=${session}'`);
+  return true;
+}
+
+function tmuxHasSession(session: string): boolean {
+  try {
+    cp.execFileSync("tmux", ["has-session", "-t", `=${session}`], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** First free twin session name: base-2, base-3, … (base itself is taken). */
+function nextTwinSession(base: string): string {
+  for (let i = 2; i <= 9; i++) {
+    if (!tmuxHasSession(`${base}-${i}`)) return `${base}-${i}`;
+  }
+  return `${base}-${Date.now() % 1000}`; // 9 twins already?! — just don't collide
+}
+
+/** Extra kickoff block for a twin session — same oracle, second brain-thread.
+ *  ψ + the oracle DB are ONE shared store per oracle, so the twin must tag its
+ *  captures (provenance) and append-not-overwrite shared files; worker clashes
+ *  are guarded by orches-drive but the twin is told to yield, not steal. */
+function twinKickoffNote(session: string, base: string, orch: string): string {
+  return (
+    `\n\n[โหมด twin] คุณคือ session เสริม '${session}' ของ ${orch} — session หลัก '${base}' กำลังทำงานอื่นอยู่ งานนี้แยกขาดจากกัน:\n` +
+    `- ψ/DB ของ ${orch} เป็นก้อนเดียวแชร์กัน → แท็กทุก memory capture (oracle_learn / oracle_trace / /rrr) ด้วย "[${session}]" ใน summary เพื่อไม่ปนกับ session หลัก\n` +
+    `- ไฟล์ ψ ที่แชร์ (เช่น ψ/inbox/pending-rrr.md) → append เท่านั้น ห้ามเขียนทับทั้งไฟล์\n` +
+    `- ก่อน dispatch: worker ที่ session หลักใช้อยู่ = อย่าแย่ง (guard เดิมจะเตือน) → เลือก worker ที่ว่าง หรือรายงาน user`
+  );
+}
 
 /** Wake + attach the orchestrator with the right kickoff (fresh build vs
  *  resume). Shared by the command palette flow and the dashboard screens.
- *  On resume it also stamps `.orches-meta.json` so next time the team picker
- *  defaults to this team. Returns an error string (null = ok). */
-export function launchOrchestrator(opts: {
+ *  If the orchestrator is ALREADY awake, asks the user: open a SECOND tmux
+ *  session (twin — same oracle, separate job) or inject into the live one.
+ *  On resume it also stamps `.orches-meta.json` (team + session) so the team
+ *  picker defaults and attach-on-doing find the right session next time. */
+export async function launchOrchestrator(opts: {
   orch: string;
   team: OracleTeam;
   mode: "new" | "resume";
   project?: ResumableProject;
-}): string | null {
+}): Promise<{ error?: string; cancelled?: boolean }> {
   const { orch, team, mode, project } = opts;
-  if (!isSafeOracleName(orch)) return `ชื่อ orchestrator ไม่ปลอดภัย: ${orch}`;
-  if (mode === "resume" && !project) return "resume แต่ไม่มี project";
+  if (!isSafeOracleName(orch)) return { error: `ชื่อ orchestrator ไม่ปลอดภัย: ${orch}` };
+  if (mode === "resume" && !project) return { error: "resume แต่ไม่มี project" };
 
   let repoPath: string | null = null;
   try {
@@ -239,85 +358,86 @@ export function launchOrchestrator(opts: {
     repoPath = null;
   }
   if (!repoPath) {
-    return `หา repo ของ '${orch}' ไม่เจอใน ~/.maw/oracles.json — ลองรัน \`maw oracle scan\` ก่อน`;
+    return {
+      error: `หา repo ของ '${orch}' ไม่เจอใน ~/.maw/oracles.json — ลองรัน \`maw oracle scan\` ก่อน`,
+    };
   }
 
   const workers = team.members
     .filter((m) => m.role !== "orchestrator")
     .map((m) => m.oracle);
-  const kickoff =
+  let kickoff =
     mode === "resume" && project
       ? buildResumeKickoff(project.name, project.path, team.name, orch, workers)
       : buildKickoffPrompt(team.name, orch, workers);
+
+  const baseSession = readSessionPin(orch)?.trim() || `claude-${orch}`;
+  let session = baseSession;
+  let inject = false; // deliver kickoff into the live pane instead of creating
+
+  if (tmuxHasSession(baseSession)) {
+    // Same oracle can't think two jobs in one conversation. Ask: twin session
+    // (separate job, same team config — nothing to re-create) or same session.
+    const TWIN = "เปิด session ใหม่ (งานแยก)";
+    const SAME = "ส่งเข้า session เดิม";
+    const pick = await vscode.window.showWarningMessage(
+      `'${orch}' ตื่นอยู่แล้ว (session '${baseSession}') — งานนี้จะให้ทำที่ไหน?`,
+      {
+        modal: true,
+        detail:
+          "session ใหม่ = ทีม/oracle เดิม แต่แยกบทสนทนา ทำ 2 งานคู่กันได้ (ระวัง: bob/jack/john มีตัวเดียว ถ้า 2 งานต้องใช้ worker ตัวเดียวกันพร้อมกัน งานหลังต้องรอ) · " +
+          "session เดิม = ส่ง kickoff ต่อท้ายบทสนทนาที่กำลังทำอยู่",
+      },
+      TWIN,
+      SAME,
+    );
+    if (pick === TWIN) {
+      session = nextTwinSession(baseSession);
+      kickoff += twinKickoffNote(session, baseSession, orch);
+    } else if (pick === SAME) {
+      inject = true;
+    } else {
+      return { cancelled: true };
+    }
+  }
+
   if (mode === "resume" && project) {
     try {
       fs.writeFileSync(
         path.join(project.path, ".orches-meta.json"),
-        serializeOrchesMeta(team.name, Date.now()),
+        serializeOrchesMeta(team.name, Date.now(), session),
       );
     } catch {
       /* marker is best-effort */
     }
   }
-  const sessionName = readSessionPin(orch) ?? undefined;
-  const session = sessionName?.trim() || `claude-${orch}`;
 
-  // Is the orchestrator already awake? `tmux new-session -A` only runs its
-  // launch command when CREATING — on an existing session it just reattaches
-  // and DROPS the kickoff. That silently loses a resume kickoff (the "opened
-  // like it never did anything" bug). So when the session exists, deliver the
-  // kickoff into the LIVE pane with send-keys instead (same as how orches-drive
-  // dispatches to live workers — NOT `maw wake -p`, which spawns a twin).
-  let alive = false;
-  try {
-    cp.execFileSync("tmux", ["has-session", "-t", `=${session}`], { stdio: "ignore" });
-    alive = true;
-  } catch {
-    alive = false;
-  }
-  if (alive) {
+  if (inject) {
+    // `tmux new-session -A` on an existing session drops its command — deliver
+    // the kickoff into the LIVE pane instead (send-keys; NOT `maw wake -p`
+    // which spawns an uncontrolled twin).
     try {
       cp.execFileSync("tmux", ["send-keys", "-t", `=${session}`, kickoff, "Enter"]);
     } catch {
-      /* best-effort — fall through to attach so the user still lands in it */
+      /* best-effort — still attach so the user lands in the session */
     }
   }
-  // Safe: session is a maw pin (NN-oracle) or claude-<safe-orch> — both /^[\w.-]+$/.
-  const command = alive
+  // Safe: session = maw pin (NN-oracle) / claude-<safe-orch> (+ "-N" twin suffix).
+  const command = inject
     ? `tmux attach -t '=${session}'`
-    : buildTmuxLaunchCommand(orch, repoPath, kickoff, sessionName);
+    : buildTmuxLaunchCommand(orch, repoPath, kickoff, session);
 
-  if (_orchTerminal && _orchTerminal.exitStatus === undefined) {
-    _orchTerminal.dispose(); // avoid stacking on repeated clicks
-  }
+  // One editor tab per SESSION (twin gets its own) — never touch other tabs.
+  const prevTerm = _orchTerminals.get(session);
+  if (prevTerm && prevTerm.exitStatus === undefined) prevTerm.dispose();
   const term = vscode.window.createTerminal({
-    name: `orchestrator: ${orch}`,
+    name: `orchestrator: ${orch}${session === baseSession ? "" : ` · ${session}`}`,
     location: vscode.TerminalLocation.Editor,
   });
-  _orchTerminal = term;
+  _orchTerminals.set(session, term);
   term.show(false);
-  let launched = false;
-  const launch = () => {
-    if (launched || term.exitStatus !== undefined) return;
-    launched = true;
-    if (term.shellIntegration) term.shellIntegration.executeCommand(command);
-    else term.sendText(command);
-  };
-  if (term.shellIntegration) {
-    launch();
-  } else {
-    const sub = vscode.window.onDidChangeTerminalShellIntegration((e) => {
-      if (e.terminal === term) {
-        sub.dispose();
-        launch();
-      }
-    });
-    setTimeout(() => {
-      sub.dispose();
-      launch();
-    }, 2500);
-  }
-  return null;
+  runInTerminal(term, command);
+  return {};
 }
 
 export async function startOrchestratorCommand(_context: vscode.ExtensionContext) {
@@ -363,9 +483,10 @@ export async function startOrchestratorCommand(_context: vscode.ExtensionContext
 
   // 3) wake + attach (fresh build kickoff). Resume flow goes through the
   //    dashboard screens (launchOrchestrator with mode:"resume").
-  const err = launchOrchestrator({ orch, team, mode: "new" });
-  if (err) {
-    vscode.window.showErrorMessage(`Mission Control: ${err}`);
+  const r = await launchOrchestrator({ orch, team, mode: "new" });
+  if (r.cancelled) return;
+  if (r.error) {
+    vscode.window.showErrorMessage(`Mission Control: ${r.error}`);
     return;
   }
   vscode.window.showInformationMessage(

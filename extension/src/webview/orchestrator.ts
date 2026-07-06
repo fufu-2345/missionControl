@@ -3,6 +3,8 @@ import * as vscode from "vscode";
 import * as gitOps from "../commands/gitOps";
 import { parseGitButtonState, type GitButtonState } from "../commands/gitStatus";
 import {
+  annotateLiveState,
+  attachToProject,
   defaultTeamFor,
   launchOrchestrator,
   listOrchestratorTeams,
@@ -43,12 +45,13 @@ async function computeGitStates(
 
 async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch = false) {
   const projects = _st?.projects ?? [];
+  annotateLiveState(projects); // refresh the live "doing" flag each render (cheap: one tmux call)
   const states = await computeGitStates(projects, fetch);
   panel.webview.postMessage({
     type: "screen_projects",
     title: "⏮ ทำต่อ — เลือก project ค้าง",
     subtitle: projects.length
-      ? "📋 เหลือ = sprint ที่วางแผนไว้ (docs/plan.md) ยังไม่ทำ · 🔨 ค้าง = sprint ทำไม่จบ (worktree เปิด) · ปุ่มขวา = git"
+      ? "⠋ กำลังทำ = worker run อยู่ตอนนี้ · 🔨 ค้าง = sprint ที่ยังไม่เสร็จ (จากแผน หรือ worktree ที่เปิดค้าง) · 'ทำ X/N' = เสร็จกี่ sprint · ปุ่มขวา = git"
       : "ไม่พบงานค้าง — ต้องมี docs/plan.md, docs/sprint-*.md หรือ worktree agents/* เปิดอยู่",
     items: projects.map((p) => ({
       path: p.path,
@@ -57,6 +60,7 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch = false) {
       worktrees: p.openWorktrees,
       plannedTotal: p.plannedTotal,
       plannedDone: p.plannedDone,
+      doing: p.doing,
       git: { path: p.path, ...states[p.path] },
     })),
   });
@@ -106,22 +110,23 @@ function pickTeam(panel: vscode.WebviewPanel, name: string) {
     return;
   }
   if (team.orchestrators.length === 1) {
-    doLaunch(panel, team.orchestrators[0]);
+    void doLaunch(panel, team.orchestrators[0]);
   } else {
     pushOrchScreen(panel, team);
   }
 }
 
-function doLaunch(panel: vscode.WebviewPanel, orch: string) {
+async function doLaunch(panel: vscode.WebviewPanel, orch: string) {
   if (!_st?.team) return;
-  const err = launchOrchestrator({
+  const r = await launchOrchestrator({
     orch,
     team: _st.team,
     mode: _st.mode === "continue" ? "resume" : "new",
     project: _st.project,
   });
-  if (err) {
-    vscode.window.showErrorMessage(`Orchestrator: ${err}`);
+  if (r.cancelled) return; // user backed out of the twin/inject choice — keep the wizard
+  if (r.error) {
+    vscode.window.showErrorMessage(`Orchestrator: ${r.error}`);
     return;
   }
   vscode.window.showInformationMessage(
@@ -166,6 +171,16 @@ export function openOrchestratorPanel(mode: "new" | "continue"): vscode.WebviewP
         const p = _st.projects.find((x) => x.path === msg.path);
         if (!p) return;
         _st.project = p;
+        // Already being worked on (a live orchestrator session) → ATTACH to it
+        // instead of spawning a new session on top. Falls through to the team
+        // picker when nothing live is found to attach to.
+        if (p.doing && attachToProject(p)) {
+          vscode.window.showInformationMessage(
+            `Orchestrator: attach เข้า session ที่กำลังทำ '${p.name}' (ไม่สร้างใหม่)`,
+          );
+          panel.dispose();
+          return;
+        }
         pushTeamsScreen(panel);
         return;
       }
@@ -173,7 +188,7 @@ export function openOrchestratorPanel(mode: "new" | "continue"): vscode.WebviewP
         if (typeof msg.name === "string") pickTeam(panel, msg.name);
         return;
       case "pick_orch":
-        if (typeof msg.name === "string") doLaunch(panel, msg.name);
+        if (typeof msg.name === "string") void doLaunch(panel, msg.name);
         return;
       case "back":
         // teams → back to projects (continue mode only)
@@ -297,7 +312,11 @@ function renderShell(): string {
     vertical-align: middle; font-weight: 600; }
   .chip.act { background: rgba(196,127,26,0.22); color: #e3a13a; }
   .chip.idle { background: rgba(125,133,144,0.18); color: #9aa4af; }
-  .chip.plan { background: rgba(56,139,253,0.20); color: #6cb0ff; }
+  /* "doing" = a worker is grinding right now → green + a live text spinner */
+  .chip.doing { background: rgba(63,185,80,0.18); color: #56d364;
+    display: inline-flex; align-items: center; gap: 4px; }
+  .chip.doing .spin { font-family: var(--vscode-editor-font-family, monospace);
+    font-weight: 700; width: 1ch; display: inline-block; text-align: center; }
   .git-editor { margin-top: 6px; }
   .git-editor textarea, .git-editor input { background: var(--vscode-input-background);
     color: var(--vscode-input-foreground); border: 1px solid var(--vscode-panel-border);
@@ -318,6 +337,13 @@ function renderShell(): string {
     .replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
   function el(id){ return document.getElementById(id); }
   function post(t,x){ vscode.postMessage(Object.assign({type:t}, x||{})); }
+
+  // Text-animate the "doing" spinner(s): one shared ticker cycles a braille glyph
+  // through every .spin on screen (re-queried each tick so it survives re-render).
+  var _SPIN="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".split(""), _sp=0;
+  setInterval(function(){ _sp=(_sp+1)%_SPIN.length; var f=_SPIN[_sp];
+    var ns=document.querySelectorAll('.spin'); for(var i=0;i<ns.length;i++) ns[i].textContent=f;
+  }, 90);
 
   function actionsHtml(canBack){
     return (canBack ? '<button id="backBtn">← กลับ</button>' : '')
@@ -359,24 +385,20 @@ function renderShell(): string {
     el("content").innerHTML = items.length ? items.map(function(it){
       var wt = it.worktrees||0, sp = it.sprints||0;
       var pt = it.plannedTotal||0, pd = it.plannedDone||0;
-      // 🔨 = an interrupted sprint (open worktree). Separate from the plan: a
-      // project can be clean (no worktree) yet still have planned sprints left.
-      var chip = wt > 0 ? '<span class="chip act">🔨 ค้าง '+wt+' sprint</span>' : '';
-      // When docs/plan.md exists we know the FULL plan → show real progress
-      // "did X of N, Y remaining" + a 📋 chip for the remaining planned sprints
-      // (this is the fix for "asked for 3 sprints, only 1 ran, looked like a bug"
-      // — the plan is now persisted, not lost when the build paused at a
-      // checkpoint). No plan.md → fall back to the sprint-doc count.
-      var sub, planChip = '';
-      if (pt > 0) {
-        var rem = pt - pd; if (rem < 0) rem = 0;
-        sub = 'ทำ '+pd+'/'+pt+' sprint' + (rem > 0 ? ' · เหลือ '+rem : ' · ครบแล้ว');
-        if (rem > 0) planChip = '<span class="chip plan">📋 เหลือ '+rem+'</span>';
-      } else {
-        sub = 'ทำไปแล้ว '+sp+' sprint';
-      }
+      // "ค้าง" = sprint ที่ยังไม่เสร็จ (งานค้างทั้งหมด) — ONE number. plan.md exists →
+      // count from the plan (total - done); no plan → fall back to open agents/*
+      // worktrees. A planned-but-not-started sprint IS pending work too (just with
+      // 0 done), so it folds into "ค้าง" — no separate "เหลือ" chip.
+      var pending = pt > 0 ? (pt - pd) : wt; if (pending < 0) pending = 0;
+      // "doing" wins: a worker worktree is LIVE right now → animated green
+      // spinner. Else pending>0 → static 🔨 ค้าง. Else nothing (clean/done).
+      var chip = it.doing
+        ? '<span class="chip doing"><span class="spin">⠋</span> กำลังทำ</span>'
+        : (pending > 0 ? '<span class="chip act">🔨 ค้าง '+pending+' sprint</span>' : '');
+      // Progress line: with a plan show "did X of N"; else the sprint-doc count.
+      var sub = pt > 0 ? 'ทำ '+pd+'/'+pt+' sprint' : 'ทำไปแล้ว '+sp+' sprint';
       return '<div class="card" data-path="'+esc(it.path)+'">'
-        +'<div style="flex:1"><button class="pick"><span class="cname">'+esc(it.name)+planChip+chip+'</span>'
+        +'<div style="flex:1"><button class="pick"><span class="cname">'+esc(it.name)+chip+'</span>'
         +'<span class="csub">'+sub+'</span></button>'+gitEditor(it.git)+'</div>'
         +'<span class="git-cell">'+gitCell(it.git)+'</span></div>';
     }).join('') : '<div class="empty">'+esc(m.subtitle)+'</div>';
