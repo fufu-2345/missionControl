@@ -1,12 +1,23 @@
 import { test, expect } from "bun:test";
 
-import { buildAttachCommand, isSafeSessionName, parseTmuxSessions } from "./sessions";
+import {
+  buildAttachCommand,
+  isSafeSessionName,
+  parseTmuxSessions,
+  parseOraclesJson,
+  projectFromPaths,
+  loneOracleName,
+  teamOfOracle,
+  computeSessionLabel,
+} from "./sessions";
 
-test("parseTmuxSessions parses tab-separated session lines", () => {
-  const raw = "carbon\t2\t1\tclaude\t/home/u/bob\n" + "soulbrew\t1\t0\tbash\t/home/u/sb";
+test("parseTmuxSessions parses tab-separated session lines (with orches label col)", () => {
+  const raw =
+    "carbon\t2\t1\tclaude\t\t/home/u/bob\n" +
+    "soulbrew\t1\t0\tbash\tsci-calc / brew\t/home/u/sb";
   expect(parseTmuxSessions(raw)).toEqual([
     { name: "carbon", windows: 2, attached: true, cmd: "claude", cwd: "/home/u/bob" },
-    { name: "soulbrew", windows: 1, attached: false, cmd: "bash", cwd: "/home/u/sb" },
+    { name: "soulbrew", windows: 1, attached: false, cmd: "bash", orchesLabel: "sci-calc / brew", cwd: "/home/u/sb" },
   ]);
 });
 
@@ -29,4 +40,52 @@ test("buildAttachCommand single-quotes the name with exact-match prefix", () => 
   // "=" forces exact target matching — plain names prefix-match in tmux, which
   // can attach/kill a different session once the exact one is gone.
   expect(buildAttachCommand("carbon")).toBe("tmux attach -t '=carbon'");
+});
+
+test("parseOraclesJson returns oracle names, tolerant of junk", () => {
+  expect(parseOraclesJson('{"oracles":[{"name":"bob"},{"name":"foreman"},{"x":1}]}')).toEqual(["bob", "foreman"]);
+  expect(parseOraclesJson("not json")).toEqual([]);
+  expect(parseOraclesJson("{}")).toEqual([]);
+});
+
+test("projectFromPaths finds a projects/<name> dir from any pane cwd", () => {
+  expect(projectFromPaths(["/x/foreman-oracle", "/x/projects/scientific-calculator/agents/frontend"]))
+    .toEqual({ name: "scientific-calculator", path: "/x/projects/scientific-calculator" });
+  expect(projectFromPaths(["/x/projects/rpn"])).toEqual({ name: "rpn", path: "/x/projects/rpn" });
+  expect(projectFromPaths(["/home/u/foreman-oracle"])).toBeNull();
+  expect(projectFromPaths([])).toBeNull();
+});
+
+test("loneOracleName: single window whose name resolves to a known oracle", () => {
+  const oracles = ["bob", "foreman"];
+  expect(loneOracleName({ name: "05-bob", windows: 1, attached: false, cmd: "claude", cwd: "" }, oracles)).toBe("bob");
+  expect(loneOracleName({ name: "claude-bob", windows: 1, attached: false, cmd: "claude", cwd: "" }, oracles)).toBe("bob");
+  // multi-window → not a lone oracle
+  expect(loneOracleName({ name: "05-bob", windows: 3, attached: false, cmd: "claude", cwd: "" }, oracles)).toBeNull();
+  // unknown stem → null
+  expect(loneOracleName({ name: "claude-soulbrew", windows: 1, attached: false, cmd: "bash", cwd: "" }, oracles)).toBeNull();
+});
+
+test("teamOfOracle picks first team by name containing the oracle", () => {
+  const teams = [
+    { name: "carbon", members: [{ oracle: "bob", role: "member" }], orchestrators: [] },
+    { name: "brew", members: [{ oracle: "bob", role: "member" }], orchestrators: [] },
+    { name: "orch-dev", members: [{ oracle: "foreman", role: "orchestrator" }], orchestrators: ["foreman"] },
+  ];
+  expect(teamOfOracle("bob", teams)).toBe("brew"); // alphabetical: brew < carbon
+  expect(teamOfOracle("mike", teams)).toBeNull();
+});
+
+test("computeSessionLabel priority: orchesLabel > project > loneOracle > rawName", () => {
+  // rule 1
+  expect(computeSessionLabel({ orchesLabel: "sci-calc / brew", rawName: "09-foreman" })).toBe("sci-calc / brew");
+  expect(computeSessionLabel({ orchesLabel: "  ", project: { name: "p" }, rawName: "r" })).toBe("p"); // blank label ignored
+  // rule 2
+  expect(computeSessionLabel({ project: { name: "rpn", team: "brew" }, rawName: "09-foreman" })).toBe("rpn / brew");
+  expect(computeSessionLabel({ project: { name: "rpn" }, rawName: "09-foreman" })).toBe("rpn"); // no team
+  // rule 3
+  expect(computeSessionLabel({ loneOracle: { oracle: "bob", team: "brew" }, rawName: "05-bob" })).toBe("brew / bob");
+  expect(computeSessionLabel({ loneOracle: { oracle: "bob" }, rawName: "05-bob" })).toBe("bob"); // no team
+  // rule 4
+  expect(computeSessionLabel({ rawName: "claude-soulbrew" })).toBe("claude-soulbrew");
 });
