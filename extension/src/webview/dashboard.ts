@@ -1,4 +1,7 @@
 import * as cp from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { homedir } from "node:os";
 
 import * as vscode from "vscode";
 
@@ -16,8 +19,8 @@ import {
   listOrchestratorTeams,
   scanResumableProjects,
 } from "../commands/startOrchestrator";
-import type { OracleTeam } from "../commands/teams";
-import type { ResumableProject } from "../commands/orchestratorResume";
+import { parseTeamRoster, type OracleTeam } from "../commands/teams";
+import { parseOrchesMeta, type ResumableProject } from "../commands/orchestratorResume";
 import * as gitOps from "../commands/gitOps";
 import { parseGitButtonState, type GitButtonState } from "../commands/gitStatus";
 import { MONTHLY_CAP_KEY, computeUsage, localMonthKey, sumByPrefix } from "../usage";
@@ -27,6 +30,11 @@ import {
   buildAttachCommand,
   isSafeSessionName,
   parseTmuxSessions,
+  parseOraclesJson,
+  projectFromPaths,
+  loneOracleName,
+  teamOfOracle,
+  computeSessionLabel,
 } from "./sessions";
 import { listSkills } from "./skills";
 
@@ -39,8 +47,7 @@ type Project = {
 
 // Singleton — only one Mission Control dashboard makes sense at a time.
 // Cleared on onDidDispose so the next openDashboardPanel call creates a
-// fresh one. Module-level so pushDashboardEvent (called from ws.on in
-// extension.ts) can reach it without threading the reference through.
+// fresh one.
 let _panel: vscode.WebviewPanel | undefined;
 let _unsubProjectChange: (() => void) | undefined;
 let _statusPollTimer: NodeJS.Timeout | undefined;
@@ -76,8 +83,7 @@ let _pendingOrchMode: "new" | "continue" | undefined;
  *
  * Sidebar is now a slim nav with status + project name + "Open Dashboard"
  * + a few links. The dashboard owns project picker, workflow actions,
- * sprint control, resources, and a live Recent Activity feed driven by
- * WS events mirrored via `pushDashboardEvent`.
+ * sprint control, and resources.
  *
  * `projectId` is the active project at open time; the dashboard updates
  * it via `setCurrentProjectId` when the user changes the dropdown, which
@@ -533,19 +539,6 @@ async function doOrchLaunch(panel: vscode.WebviewPanel, orch: string) {
   );
 }
 
-/**
- * Mirror a WS event into the dashboard's Recent Activity feed.
- * No-op when the dashboard isn't open — keeps the sidebar's status-bar
- * toasts + auto-opened panels working independently.
- */
-export function pushDashboardEvent(event: string, data: unknown): void {
-  _panel?.webview.postMessage({
-    type: "ws_event",
-    event,
-    data,
-    ts: Date.now(),
-  });
-}
 
 function listTmuxSessions(): Promise<TmuxSession[]> {
   return new Promise((resolve) => {
@@ -556,9 +549,87 @@ function listTmuxSessions(): Promise<TmuxSession[]> {
   });
 }
 
+/** Group every pane's cwd by tmux session (one tmux call) — used by the
+ *  session-label cwd-scan fallback so an orchestrator+workers session can be
+ *  labelled by the project a worker pane is building. */
+function listPanePathsBySession(): Promise<Record<string, string[]>> {
+  return new Promise((resolve) => {
+    cp.execFile(
+      "tmux",
+      ["list-panes", "-a", "-F", "#{session_name}\t#{pane_current_path}"],
+      { timeout: 700 },
+      (err, stdout) => {
+        const map: Record<string, string[]> = {};
+        if (err) return resolve(map);
+        for (const line of stdout.toString().split(/\r?\n/)) {
+          const i = line.indexOf("\t");
+          if (i < 0) continue;
+          (map[line.slice(0, i)] ||= []).push(line.slice(i + 1));
+        }
+        resolve(map);
+      },
+    );
+  });
+}
+
+/** Oracle names from ~/.maw/oracles.json (best-effort → []). */
+function readKnownOracles(): string[] {
+  try {
+    return parseOraclesJson(fs.readFileSync(path.join(homedir(), ".maw", "oracles.json"), "utf8"));
+  } catch {
+    return [];
+  }
+}
+
+/** All team rosters from every ~/.maw/teams/<name>/oracle-members.json (best-effort → []). */
+function readTeamRosters(): OracleTeam[] {
+  const dir = path.join(homedir(), ".maw", "teams");
+  const out: OracleTeam[] = [];
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return out;
+  }
+  for (const name of names) {
+    try {
+      const raw = fs.readFileSync(path.join(dir, name, "oracle-members.json"), "utf8");
+      const t = parseTeamRoster(name, raw);
+      if (t) out.push(t);
+    } catch {
+      /* team has no oracle-members.json — skip */
+    }
+  }
+  return out;
+}
+
+/** team from <project>/.orches-meta.json (best-effort → undefined). */
+function readProjectTeam(projectPath: string): string | undefined {
+  try {
+    const raw = fs.readFileSync(path.join(projectPath, ".orches-meta.json"), "utf8");
+    return parseOrchesMeta(raw)?.team || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function pushSessions(panel: vscode.WebviewPanel): Promise<void> {
   const sessions = await listTmuxSessions();
   _lastSessionNames = new Set(sessions.map((s) => s.name));
+  const panePaths = await listPanePathsBySession();
+  const oracles = readKnownOracles();
+  const teams = readTeamRosters();
+  for (const s of sessions) {
+    const paths = panePaths[s.name] ?? (s.cwd ? [s.cwd] : []);
+    const proj = projectFromPaths(paths);
+    const lone = proj ? null : loneOracleName(s, oracles);
+    s.label = computeSessionLabel({
+      orchesLabel: s.orchesLabel,
+      project: proj ? { name: proj.name, team: readProjectTeam(proj.path) } : undefined,
+      loneOracle: lone ? { oracle: lone, team: teamOfOracle(lone, teams) ?? undefined } : undefined,
+      rawName: s.name,
+    });
+  }
   panel.webview.postMessage({ type: "sessions", sessions });
 }
 
@@ -859,39 +930,7 @@ function renderHtml(): string {
     cursor: not-allowed;
   }
   .dead .title { color: var(--vscode-errorForeground, #f85149); }
-  .badge-dead {
-    display: inline-block;
-    font-size: 9px;
-    font-weight: 700;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--vscode-errorForeground, #f85149);
-    border: 1px solid var(--vscode-errorForeground, #f85149);
-    border-radius: 3px;
-    padding: 0 5px;
-    margin-left: 6px;
-    vertical-align: middle;
-  }
   .btn-row { display: flex; gap: 6px; }
-  .feed {
-    background: var(--vscode-textCodeBlock-background, rgba(0,0,0,.2));
-    border-radius: 6px;
-    padding: 10px 12px;
-    max-height: 280px;
-    overflow-y: auto;
-    font-family: var(--vscode-editor-font-family);
-    font-size: 12px;
-    line-height: 1.5;
-  }
-  .feed .row { display: flex; gap: 10px; padding: 2px 0; }
-  .feed .ts { opacity: 0.55; min-width: 64px; }
-  .feed .ev {
-    min-width: 160px;
-    color: var(--vscode-textLink-foreground);
-  }
-  .feed .payload { opacity: 0.85; flex: 1; word-break: break-word; }
-  .feed .empty { opacity: 0.55; }
-  .feed-header { display: flex; align-items: center; justify-content: space-between; }
   .error-chip {
     color: var(--vscode-errorForeground, #f85149);
     font-size: 11px;
@@ -968,14 +1007,6 @@ function renderHtml(): string {
         <div class="sub">สลับ subscription login หลาย provider · usage หมดสลับได้</div>
       </button>
     </div>
-
-    <div class="group-label feed-header">
-      <span>Recent Activity <span class="badge-dead">ไม่มี live events</span></span>
-      <button class="icon-btn" type="button" onclick="clearFeed()">Clear</button>
-    </div>
-    <div class="feed" id="feed">
-      <div class="empty">(ไม่มี live events — ต้องมี backend/WebSocket)</div>
-    </div>
   </div>
 
   <div id="orchScreen" class="orch-screen">
@@ -991,8 +1022,6 @@ function renderHtml(): string {
 
 <script>
   const vscode = acquireVsCodeApi();
-  const FEED_CAP = 50;
-  const feedRows = [];
 
   function escapeHtml(s) {
     return String(s ?? "")
@@ -1001,78 +1030,6 @@ function renderHtml(): string {
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;");
   }
-  function fmtTime(ts) {
-    const d = new Date(ts);
-    const pad = (n) => String(n).padStart(2, "0");
-    return pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
-  }
-  function fmtPayload(event, data) {
-    if (!data || typeof data !== "object") return String(data ?? "");
-    try {
-      // Trim noisy events to a 1-line summary.
-      if (event === "agent_progress") {
-        return (data.agent ?? "?") + " — " + (data.status ?? "");
-      }
-      if (event === "sprint_a_heartbeat" || event === "build_heartbeat") {
-        const elapsed = Math.floor(data.elapsed_s ?? 0);
-        const mins = Math.floor(elapsed / 60);
-        const secs = elapsed % 60;
-        return (data.agent ?? data.title ?? data.task_id ?? "?") + " — " + mins + ":" + String(secs).padStart(2, "0");
-      }
-      if (event === "ideas_ready") {
-        return (data.ideas?.length ?? 0) + " ideas";
-      }
-      if (event === "pr_ready") {
-        return (data.title ?? data.task_id ?? "?") + " — " + (data.verdict?.verdict ?? "?");
-      }
-      if (event === "sprint_done") {
-        return "type=" + (data.type ?? "?") + ", prs=" + (data.prs?.length ?? 0);
-      }
-      if (event === "budget_exceeded") {
-        return "$" + (data.spent_usd?.toFixed?.(4) ?? "?") + " / $" + (data.cap_usd?.toFixed?.(2) ?? "?");
-      }
-      // Default: small JSON snippet.
-      const s = JSON.stringify(data);
-      return s.length > 180 ? s.slice(0, 180) + "…" : s;
-    } catch {
-      return "";
-    }
-  }
-  function renderFeed() {
-    const root = document.getElementById("feed");
-    if (!feedRows.length) {
-      root.innerHTML = '<div class="empty">(ไม่มี live events — ต้องมี backend/WebSocket)</div>';
-      return;
-    }
-    root.innerHTML = feedRows.map((r) =>
-      '<div class="row">'
-      + '<span class="ts">' + escapeHtml(fmtTime(r.ts)) + '</span>'
-      + '<span class="ev">' + escapeHtml(r.event) + '</span>'
-      + '<span class="payload">' + escapeHtml(fmtPayload(r.event, r.data)) + '</span>'
-      + '</div>'
-    ).join('');
-    // Keep scroll pinned to the top (newest is row 0).
-    root.scrollTop = 0;
-  }
-  function pushFeed(event, data, ts) {
-    // Collapse consecutive same-event heartbeats from the same agent — replace top row in place.
-    if (feedRows.length > 0) {
-      const top = feedRows[0];
-      const sameHeartbeat =
-        (event === "sprint_a_heartbeat" || event === "build_heartbeat" || event === "agent_progress") &&
-        top.event === event &&
-        ((data && top.data && (data.agent ?? data.task_id) === (top.data.agent ?? top.data.task_id)));
-      if (sameHeartbeat) {
-        feedRows[0] = { event, data, ts };
-        renderFeed();
-        return;
-      }
-    }
-    feedRows.unshift({ event, data, ts });
-    if (feedRows.length > FEED_CAP) feedRows.length = FEED_CAP;
-    renderFeed();
-  }
-
   function renderSessions(sessions) {
     const root = document.getElementById("sessionsList");
     if (!sessions || !sessions.length) {
@@ -1085,8 +1042,8 @@ function renderHtml(): string {
       '<div class="session-row" data-name="' + escapeHtml(s.name) + '">'
       + '<span class="sdot ' + (s.attached ? 'on' : '') + '"></span>'
       + '<span class="smeta">'
-      + '<span class="sname">' + escapeHtml(s.name) + '</span>'
-      + '<span class="ssub">' + escapeHtml(s.windows + ' win · ' + s.cmd + '  ' + s.cwd) + '</span>'
+      + '<span class="sname">' + escapeHtml(s.label || s.name) + '</span>'
+      + '<span class="ssub">' + escapeHtml((s.label && s.label !== s.name ? s.name + ' · ' : '') + s.windows + ' win · ' + s.cmd + '  ' + s.cwd) + '</span>'
       + '</span>'
       + '<button class="session-kill" title="Kill session" data-kill="' + escapeHtml(s.name) + '">✕</button>'
       + '</div>'
@@ -1254,10 +1211,6 @@ function renderHtml(): string {
   function hideOrchScreen() {
     document.getElementById("orchScreen").style.display = "none";
   }
-  function clearFeed() {
-    feedRows.length = 0;
-    renderFeed();
-  }
 
   window.addEventListener("message", (event) => {
     const m = event.data;
@@ -1285,8 +1238,6 @@ function renderHtml(): string {
       hideOrchScreen();
     } else if (m.type === "git_auto_result") {
       fillGitAuto(m.path, m.message);
-    } else if (m.type === "ws_event") {
-      pushFeed(m.event, m.data, m.ts);
     }
   });
 
