@@ -31,7 +31,7 @@ _2026-07-06 · design spec · scope: missionControl extension + orches-drive ski
 
 ตัวที่ "รู้" ว่า (session, project, team) คู่กันยังไง = ตัวที่ launch/ขับ run นั้น → ให้มันบันทึก label แบบ authoritative ลง tmux user-option ของ session ตัวเอง แล้ว **ทั้งสอง surface อ่านตัวเดียวกัน**
 
-- **เขียน:** `tmux set -t "<session>" @orches_label "<project>-<team>"`
+- **เขียน:** `tmux set -t "<session>" @orches_label "<project> / <team>"`
   - **extension** (`launchOrchestrator`) ตอน launch orchestrator ให้ project หนึ่ง (มี project + team อยู่แล้ว) — ครอบเคสปุ่ม/bootstrap
   - **/orches-drive** ตอนเริ่ม run (Step ~4.0 หลัง resolve `$PROJ` + team) — ครอบเคสเริ่มจาก terminal + refresh ให้ตรงถ้า project เปลี่ยน
 - **อ่าน:**
@@ -68,7 +68,7 @@ tmux set -t "=$SELF" @orches_label "$(basename "$PROJ")${TEAM:+ / $TEAM}"
 (team จาก `.orches-meta.json` ที่มีอยู่ หรือจาก launch context)
 
 ### 2. missionControl extension
-- **`commands/startOrchestrator.ts` `launchOrchestrator`:** หลังสร้าง/หา session → `tmux set -t "=<session>" @orches_label "<project>-<team>"` (มี project+team ในมืออยู่แล้ว)
+- **`commands/startOrchestrator.ts` `launchOrchestrator`:** หลังสร้าง/หา session → `tmux set -t "=<session>" @orches_label "<project> / <team>"` (มี project+team ในมืออยู่แล้ว)
 - **`webview/sessions.ts`:** เพิ่ม pure `computeSessionLabel(session, ctx)` (ไม่ import vscode → unit-test `bun test` ตามแพทเทิร์นไฟล์นี้) · `ctx = { orchesLabel, panePaths, projectMetas, teamRosters, knownOracles }` · เพิ่ม field `orchesLabel?` + `label?` ใน interface `TmuxSession`
 - **`webview/dashboard.ts`:**
   - `TMUX_FMT` เพิ่ม `\t#{@orches_label}` → parse เข้า `orchesLabel`
