@@ -13,18 +13,17 @@ import {
 import { partitionStarred, toggleStar, type ResumableProject } from "../commands/orchestratorResume";
 import type { OracleTeam } from "../commands/teams";
 
-// Dedicated editor-tab panel for the "▶ เริ่มใหม่ / ⏮ ทำต่อ" orchestrator flow —
-// its OWN webview (not a dashboard overlay), mirroring teams.ts. Wizard steps:
-//   continue: project → team → orchestrator → launch (resume)
-//   new:                team → orchestrator → launch
-// The project step carries the per-repo git buttons (Commit/Push/Create&Push).
-// One panel per mode is enough; reopening reveals + resets to step 1.
+// Single "Projects" webview panel (its OWN editor tab, mirroring teams.ts) — the
+// one entry point for both continuing a project and starting a new build:
+//   resume: pick a project → team → orchestrator → launch (mode resume)
+//   new:    "+ เริ่มโปรเจคใหม่" (no project) → team → orchestrator → launch (mode new)
+// The distinction is purely whether a project was picked (_st.project). The
+// project rows carry the per-repo git buttons (Commit/Push/Create&Push).
 let _panel: vscode.WebviewPanel | undefined;
 
 interface WizState {
-  mode: "new" | "continue";
   projects: ResumableProject[];
-  project?: ResumableProject;
+  project?: ResumableProject; // set → resume that project; unset → fresh build
   team?: OracleTeam;
   askMode?: boolean; // "โหมดถาม" toggle — grilling interview + scrutinize plan review
 }
@@ -90,11 +89,11 @@ function pushTeamsScreen(panel: vscode.WebviewPanel) {
     : teams;
   panel.webview.postMessage({
     type: "screen_teams",
-    title: (_st?.mode === "continue" ? "⏮ ทำต่อ" : "▶ เริ่มใหม่") + " — เลือกทีม",
+    title: (_st?.project ? "⏮ ทำต่อ" : "▶ เริ่มใหม่") + " — เลือกทีม",
     subtitle: _st?.project ? `project: ${_st.project.name}` : "เลือก oracle-team",
-    canBack: _st?.mode === "continue",
-    // โหมดถาม toggle เฉพาะ "เริ่มใหม่" — resume ยังไม่รองรับ (รอหน้า setting)
-    askable: _st?.mode === "new",
+    canBack: true, // มาจากหน้า Projects เสมอ → กลับได้ตลอด
+    // โหมดถาม toggle เฉพาะ build ใหม่ (ยังไม่ได้เลือก project) — resume ยังไม่รองรับ
+    askable: !_st?.project,
     items: ordered.map((t) => ({
       name: t.name,
       isDefault: t.name === def,
@@ -110,7 +109,7 @@ function pushOrchScreen(panel: vscode.WebviewPanel, team: OracleTeam) {
     type: "screen_orch",
     title: `${team.name} — เลือก orchestrator`,
     subtitle: "ทีมนี้มี orchestrator หลายตัว",
-    askable: _st?.mode === "new",
+    askable: !_st?.project,
     items: team.orchestrators.map((o) => ({ name: o })),
   });
 }
@@ -140,7 +139,8 @@ async function doLaunch(panel: vscode.WebviewPanel, orch: string, askMode = fals
   const r = await launchOrchestrator({
     orch,
     team: _st.team,
-    mode: _st.mode === "continue" ? "resume" : "new",
+    // project picked → resume it; none → fresh build
+    mode: _st.project ? "resume" : "new",
     project: _st.project,
     askMode,
   });
@@ -157,23 +157,18 @@ async function doLaunch(panel: vscode.WebviewPanel, orch: string, askMode = fals
   panel.dispose();
 }
 
-export function openOrchestratorPanel(
-  mode: "new" | "continue",
-  context: vscode.ExtensionContext,
-): vscode.WebviewPanel {
+export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.WebviewPanel {
   _ctx = context;
-  _st = { mode, projects: mode === "continue" ? scanResumableProjects() : [] };
+  _st = { projects: scanResumableProjects() };
   if (_panel) {
-    _panel.title = titleFor(mode);
+    _panel.title = titleFor();
     _panel.reveal();
-    // reset to step 1 for the freshly-chosen mode
-    if (mode === "continue") void pushProjectsScreen(_panel);
-    else pushTeamsScreen(_panel);
+    void pushProjectsScreen(_panel); // always land on the Projects list
     return _panel;
   }
   const panel = vscode.window.createWebviewPanel(
     "missioncontrol.orchestrator",
-    titleFor(mode),
+    titleFor(),
     vscode.ViewColumn.One,
     { enableScripts: true, retainContextWhenHidden: true },
   );
@@ -188,8 +183,14 @@ export function openOrchestratorPanel(
     if (!msg || typeof msg.type !== "string" || !_st) return;
     switch (msg.type) {
       case "ready":
-        if (_st.mode === "continue") await pushProjectsScreen(panel);
-        else pushTeamsScreen(panel);
+        await pushProjectsScreen(panel);
+        return;
+      case "start_new":
+        // "+ เริ่มโปรเจคใหม่" ในหน้า Projects → flow เริ่มใหม่เดิม: เลือกทีม → launch
+        // แบบไม่มี project (mode "new"). ใช้ team-picker ตัวเดียวกับ resume.
+        _st.project = undefined;
+        _st.team = undefined;
+        pushTeamsScreen(panel);
         return;
       case "pick_project": {
         const p = _st.projects.find((x) => x.path === msg.path);
@@ -231,12 +232,10 @@ export function openOrchestratorPanel(
           );
         return;
       case "back":
-        // teams → back to projects (continue mode only)
-        if (_st.mode === "continue") {
-          _st.project = undefined;
-          _st.team = undefined;
-          await pushProjectsScreen(panel);
-        }
+        // teams → back to the Projects list (single entry point → always available)
+        _st.project = undefined;
+        _st.team = undefined;
+        await pushProjectsScreen(panel);
         return;
       case "git_refresh":
         await pushProjectsScreen(panel, true);
@@ -330,8 +329,8 @@ export function openOrchestratorPanel(
   return panel;
 }
 
-function titleFor(mode: "new" | "continue"): string {
-  return mode === "continue" ? "Orchestrator — ⏮ ทำต่อ" : "Orchestrator — ▶ เริ่มใหม่";
+function titleFor(): string {
+  return "Orchestrator — Projects";
 }
 function short(p: string): string {
   return p.split("/").pop() || p;
@@ -442,16 +441,19 @@ function renderShell(): string {
     var ns=document.querySelectorAll('.spin'); for(var i=0;i<ns.length;i++) ns[i].textContent=f;
   }, 90);
 
-  function actionsHtml(canBack, showFetch, askable){
-    // fetch = git-refresh of the PROJECTS screen only. On teams/orch it navigated
-    // to a (possibly empty) projects screen with no back button — a dead end.
-    // askBtn only in "เริ่มใหม่" (askable) — resume ยังไม่รองรับโหมดถาม (รอหน้า setting).
+  function actionsHtml(canBack, showFetch, askable, showNew){
+    // showNew = the "+ เริ่มโปรเจคใหม่" button (Projects screen only) → runs the
+    // same team→orchestrator→launch flow with no project = a fresh build.
+    // fetch = git-refresh of the PROJECTS screen only (dead-end elsewhere).
+    // askBtn only for a new build (askable) — resume ยังไม่รองรับโหมดถาม.
     return (canBack ? '<button id="backBtn">← กลับ</button>' : '')
+      + (showNew ? '<button id="newProjBtn" style="background:#238636;color:#fff;border-color:#238636;font-weight:600;">+ เริ่มโปรเจคใหม่</button>' : '')
       + (askable ? '<button id="askBtn" title="เปิด = สัมภาษณ์ requirement ละเอียด (grilling) + รีวิวแผนก่อนลงมือ (scrutinize)" style="'+askBtnStyle()+'">'+askBtnLabel()+'</button>' : '')
       + (showFetch ? '<button id="reloadBtn">fetch</button>' : '');
   }
   function wireActions(canBack){
     if (canBack){ var b=el("backBtn"); if(b) b.addEventListener('click',function(){post('back');}); }
+    var nb=el("newProjBtn"); if(nb) nb.addEventListener('click',function(){post('start_new');});
     var ab=el("askBtn"); if(ab) ab.addEventListener('click',function(){
       askMode=!askMode; ab.textContent=askBtnLabel(); ab.style.cssText=askBtnStyle(); });
     var rb=el("reloadBtn"); if(rb) rb.addEventListener('click',function(){post('git_refresh');});
@@ -487,8 +489,8 @@ function renderShell(): string {
 
   function renderProjects(m){
     el("title").textContent = m.title; el("subtitle").textContent = m.subtitle;
-    askMode=false; // "ทำต่อ" (projects) ไม่มีโหมดถาม → กันค่าค้างจากรอบ new
-    el("actions").innerHTML = actionsHtml(false, true, false); wireActions(false);
+    askMode=false; // Projects list เอง ไม่มีโหมดถาม (ยกไปหน้าเลือกทีมตอนเริ่มใหม่)
+    el("actions").innerHTML = actionsHtml(false, true, false, true); wireActions(false);
     var items = m.items||[];
     el("content").innerHTML = items.length ? items.map(function(it){
       var wt = it.worktrees||0, sp = it.sprints||0;

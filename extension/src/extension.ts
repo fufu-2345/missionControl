@@ -45,11 +45,8 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("missioncontrol.mawToggle", () => mawToggleCommand(context)),
     vscode.commands.registerCommand("missioncontrol.terminal", () => terminalCommand(context)),
     vscode.commands.registerCommand("missioncontrol.startOrchestrator", () => startOrchestratorCommand(context)),
-    vscode.commands.registerCommand("missioncontrol.orchestratorNew", () =>
-      openOrchestratorPanel("new", context),
-    ),
     vscode.commands.registerCommand("missioncontrol.orchestratorContinue", () =>
-      openOrchestratorPanel("continue", context),
+      openOrchestratorPanel(context),
     ),
   ];
   context.subscriptions.push(...registrations);
