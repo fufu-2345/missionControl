@@ -19,6 +19,7 @@ import {
   normalizeOracle,
   type TeamMember,
 } from "../commands/teamsModel";
+import { teamUp } from "../commands/teamUp";
 
 // Editor-area panel for browsing + editing maw oracle-teams. Mirrors skills.ts:
 // singleton _panel, renderShell HTML, postMessage list/detail, a message switch.
@@ -128,6 +129,29 @@ export function openTeamsPanel(_projectId: string | null = null): vscode.Webview
             : `Teams: บันทึก '${name}' มีปัญหา — ${r.errors.join(" · ")}`,
         );
         await pushDetail(panel, name);
+        return;
+      }
+      case "team_up": {
+        const name = typeof msg.name === "string" ? msg.name : "";
+        if (!isSafeTeamName(name)) {
+          vscode.window.showErrorMessage(`Teams: ชื่อทีมไม่ถูกต้อง: '${name}'`);
+          panel.webview.postMessage({ type: "op_done" });
+          return;
+        }
+        const r = teamUp(name);
+        if (r.error) {
+          vscode.window.showErrorMessage(`Teams: team up '${name}' — ${r.error}`);
+        } else if (r.minted) {
+          vscode.window.showInformationMessage(
+            `Teams: '${name}' มี session อยู่แล้ว → เปิด instance ใหม่ '${r.session}' (attach ใน terminal)`,
+          );
+        } else {
+          vscode.window.showInformationMessage(
+            `Teams: team up '${name}' → session '${r.session}' (attach ใน terminal)`,
+          );
+        }
+        // Opening a terminal returns immediately — release the button.
+        panel.webview.postMessage({ type: "op_done" });
         return;
       }
       case "create_team": {
@@ -459,7 +483,9 @@ export function renderShell(): string {
     el("content").innerHTML =
       '<div class="hdr-config">'
       + '<div class="row"><h2>'+esc(t.name)+'</h2>'
-      + '<button class="danger" id="delTeam">🗑 Delete team</button></div>'
+      + '<div style="display:flex;gap:6px">'
+      + '<button class="primary" id="teamUp" title="maw team up — ปลุกทีมนี้เข้า tmux session แล้ว attach (ถ้ามี session อยู่แล้วเปิด instance ใหม่ -N)">▶ Team up</button>'
+      + '<button class="danger" id="delTeam">🗑 Delete team</button></div></div>'
       + '<label>คำอธิบายทีม</label>'
       + '<textarea id="teamDesc" rows="2">'+esc(t.description||'')+'</textarea>'
       + '</div>'
@@ -470,6 +496,10 @@ export function renderShell(): string {
     var content = el("content");
     wireMemberTable(content, m.candidates);
     el("delTeam").addEventListener('click', function(){ post('delete_team', { name: t.name }); });
+    el("teamUp").addEventListener('click', function(){
+      if (busy(this)) return;
+      post('team_up', { name: t.name });
+    });
     el("saveTeam").addEventListener('click', function(){
       if (busy(this)) return;
       post('save_team', {

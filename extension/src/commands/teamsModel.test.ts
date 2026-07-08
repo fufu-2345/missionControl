@@ -11,6 +11,7 @@ import {
   normalizeOracle,
   reconcileToolMembers,
   removeArgs,
+  syncCharterMembers,
   type TeamMember,
 } from "./teamsModel";
 
@@ -164,4 +165,75 @@ test("findDuplicateOracleNames: ignores empty/blank rows, case-sensitive, sorts 
   expect(findDuplicateOracleNames(["", "  ", "a"])).toEqual([]); // blanks never a dup
   expect(findDuplicateOracleNames(["Bob", "bob"])).toEqual([]); // case-sensitive, like the fs registry
   expect(findDuplicateOracleNames(["b", "b", "a", "a"])).toEqual(["a", "b"]); // multiple groups, sorted
+});
+
+test("syncCharterMembers: replaces members, preserves session/project/description", () => {
+  const existing = [
+    "name: brew",
+    "description: Brew team — the crew",
+    "session: brew",
+    "project: fufu-2345/missionControl",
+    "members:",
+    "  - role: bob",
+    "  - role: jack",
+    "  - role: john",
+  ].join("\n");
+  const out = syncCharterMembers(existing, "brew", ["foreman", "bob", "jack", "john", "mike"]);
+  expect(out).toBe(
+    [
+      "name: brew",
+      "description: Brew team — the crew",
+      "session: brew",
+      "project: fufu-2345/missionControl",
+      "members:",
+      "  - role: foreman",
+      "  - role: bob",
+      "  - role: jack",
+      "  - role: john",
+      "  - role: mike",
+      "",
+    ].join("\n"),
+  );
+});
+
+test("syncCharterMembers: no charter yet → minimal charter keyed on team name", () => {
+  expect(syncCharterMembers(null, "alpha", ["neo", "trin"])).toBe(
+    "name: alpha\nsession: alpha\nmembers:\n  - role: neo\n  - role: trin\n",
+  );
+  expect(syncCharterMembers("", "alpha", ["neo"])).toBe(
+    "name: alpha\nsession: alpha\nmembers:\n  - role: neo\n",
+  );
+});
+
+test("syncCharterMembers: charter without a members block → append one", () => {
+  expect(syncCharterMembers("name: t\nsession: t", "t", ["a"])).toBe(
+    "name: t\nsession: t\nmembers:\n  - role: a\n",
+  );
+});
+
+test("syncCharterMembers: preserves top-level keys that follow the members block", () => {
+  const existing = "name: t\nmembers:\n  - role: old\nengines:\n  claude: claude\n";
+  const out = syncCharterMembers(existing, "t", ["a", "b"]);
+  expect(out).toBe("name: t\nmembers:\n  - role: a\n  - role: b\nengines:\n  claude: claude\n");
+});
+
+test("mergeTeamStores: skips maw live-worker entries (team up pollution)", () => {
+  // maw team up writes live tmux windows into the SAME config.json (tmuxPaneId /
+  // backendType). These are NOT roster members and must never surface — else the
+  // panel shows phantom "team"/"missioncontrol-bob" rows and a Save scaffolds them.
+  const merged = mergeTeamStores(
+    [
+      { oracle: "foreman", role: "orchestrator" },
+      { oracle: "bob", role: "member" },
+    ],
+    [
+      { name: "team", tmuxPaneId: "%0", backendType: "tmux", model: "claude", color: "blue" },
+      { name: "missioncontrol-bob", tmuxPaneId: "%1", backendType: "tmux", color: "green" },
+      { name: "bob", model: "claude-opus-4-8", color: "cyan" }, // genuine decoration — kept
+    ],
+  );
+  expect(merged).toEqual([
+    { oracle: "foreman", role: "orchestrator", model: undefined, color: undefined },
+    { oracle: "bob", role: "member", model: "claude-opus-4-8", color: "cyan" }, // decorated, not from the live %1 entry
+  ]);
 });

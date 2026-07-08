@@ -1,0 +1,84 @@
+// Pure (vscode-free) logic for the "Team up" bootstrap, split out so it is unit
+// testable under bun:test. The vscode-facing shell lives in teamUp.ts.
+
+/** The `session:` value from a charter yaml (null if the file has none). Matches
+ *  how `maw team up` resolves its default session (charter.session). */
+export function parseCharterSession(yaml: string): string | null {
+  const m = yaml.match(/^\s*session:\s*([^\s#]+)/m);
+  return m ? m[1] : null;
+}
+
+/** Resolve which session to team up into. Base free → use it. Base already live
+ *  → mint the first free `base-N` (N=2..9) so this is a fresh instance, not a
+ *  reconcile into the running one. Same walk as startOrchestrator.nextTwinSession. */
+export function resolveInstanceSession(
+  base: string,
+  has: (session: string) => boolean,
+  now: () => number = Date.now,
+): { session: string; minted: boolean } {
+  if (!has(base)) return { session: base, minted: false };
+  for (let i = 2; i <= 9; i++) {
+    if (!has(`${base}-${i}`)) return { session: `${base}-${i}`, minted: true };
+  }
+  return { session: `${base}-${now() % 1000}`, minted: true }; // 9 instances?! — just don't collide
+}
+
+/** Shell command: ensure the target tmux session (and thus a tmux server)
+ *  exists, wake the team into it, then attach the user.
+ *
+ *  The `new-session -A -d` bootstrap is essential: `maw team up` lists panes as a
+ *  precondition and HARD-FAILS with "no server running" on a cold VM (no live
+ *  tmux) — which is exactly what happens after a reboot / snapshot. `-A` makes it
+ *  idempotent (no-op if the session is already live, e.g. a warm server), `-d`
+ *  keeps it detached. team up then adds each member as its own WINDOW of this
+ *  session, named `<repo-stem>-<oracle>` (e.g. `missioncontrol-bob`).
+ *
+ *  Two cleanups keep the tmux status bar short and readable:
+ *   - each member window is renamed to just the bare oracle (`${w#*-}` strips the
+ *     `<repo-stem>-` prefix). SAFE for maw: classifyMember matches a window whose
+ *     name equals a member candidate, and the bare oracle IS a candidate — so
+ *     `maw team status/send/enter` still resolve these panes, and per-agent git
+ *     worktree isolation is untouched (only the display name changes).
+ *   - the `_boot` bootstrap window is KILLED once members exist (`; kill-window`),
+ *     so it doesn't linger as a phantom member. The session survives on its
+ *     member windows.
+ *  On a failed up the rename/kill are skipped and attach still drops the user on
+ *  the `_boot` shell with the error in scrollback.
+ *
+ *  `--force` + `--only` per member is what makes the button reliable:
+ *   - `--force` stops team up RESUMING a member whose pane lingers from a prior
+ *     run (it would send `claude … --continue` and, on the default engine, hit the
+ *     unconfigured `default-resume`).
+ *   - waking ONE member per invocation (`--only`) serializes the launches. Plain
+ *     `maw team up` fans every member out through `Promise.all`, and those
+ *     concurrent tmux `send-keys` race — keystrokes cross panes and concatenate
+ *     (→ `--dangerously-skip-permissionsclaude` / `--continueclaude`, "unknown
+ *     option", member never boots). Sequential `--only` waking is deterministic:
+ *     each member's claude is up before the next is launched.
+ *  Live members of an ALREADY-up team aren't clobbered — the caller mints a new
+ *  `-N` session for those. `members` is the roster (bare oracle names); empty →
+ *  fall back to a single plain up (charter decides who wakes).
+ *  team/session/members are validated (isSafeTeamName / SAFE_SESSION) and cwd is a
+ *  fixed local path before this. */
+export function buildTeamUpCommand(
+  team: string,
+  session: string,
+  cwd: string,
+  members: string[],
+): string {
+  const up = members.length
+    ? members
+        .map((m) => `maw team up '${team}' --session '${session}' --force --only '${m}'`)
+        .join(" ; ")
+    : `maw team up '${team}' --session '${session}' --force`;
+  return (
+    `tmux new-session -A -d -s '${session}' -n _boot -c '${cwd}' && { ` +
+    `${up} ; ` +
+    `for w in $(tmux list-windows -t '=${session}' -F '#{window_name}'); do ` +
+    `tmux rename-window -t "=${session}:$w" "\${w#*-}" 2>/dev/null ; done ; ` +
+    `tmux kill-window -t '=${session}:_boot' 2>/dev/null ; ` +
+    `tmux attach -t '=${session}' ; }`
+  );
+}
+
+export const SAFE_SESSION = /^[\w.-]+$/;

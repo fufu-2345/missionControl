@@ -14,6 +14,7 @@ import {
   MODEL_ALIASES,
   reconcileToolMembers,
   removeArgs,
+  syncCharterMembers,
   type TeamDetail,
   type TeamMember,
   type ToolMember,
@@ -27,6 +28,11 @@ import {
 
 const MAW_TEAMS_DIR = path.join(os.homedir(), ".maw", "teams");
 const TOOL_TEAMS_DIR = path.join(os.homedir(), ".claude", "teams");
+// The team CHARTER yaml `maw team up` reads (resolveCharterPath →
+// <root>/.maw/teams/<t>.yaml, with root = the soulbrew tree we run maw from).
+// Kept in sync with the UI roster on every save so `team up` spawns the same
+// members the panel shows — NOT ~/.maw/teams (the oracle-registry store).
+const CHARTER_DIR = path.join(os.homedir(), "Desktop", "soulbrew", ".maw", "teams");
 const ORACLES_JSON = path.join(os.homedir(), ".maw", "oracles.json");
 const MAW_TIMEOUT = 15000;
 const BUD_TIMEOUT = 90000; // scaffolding an oracle (repo + ψ vault) is slower
@@ -221,6 +227,27 @@ function writeToolConfig(
   fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n");
 }
 
+/** Rewrite the team's charter yaml so `maw team up` spawns the SAME roster the
+ *  UI shows. Without this the charter (bob/jack/john) drifts from the registry
+ *  the UI edits (foreman/bob/jack/john/mike) and team up under-spawns. Preserves
+ *  the charter's session/project/etc.; best-effort (push, don't throw). */
+function syncCharter(team: string, members: TeamMember[], errors: string[]): void {
+  const file = path.join(CHARTER_DIR, `${team}.yaml`);
+  try {
+    let existing: string | null = null;
+    try {
+      existing = fs.readFileSync(file, "utf8");
+    } catch {
+      /* no charter yet — a minimal one is generated */
+    }
+    const yaml = syncCharterMembers(existing, team, members.map((m) => m.oracle));
+    fs.mkdirSync(CHARTER_DIR, { recursive: true });
+    fs.writeFileSync(file, yaml);
+  } catch (e) {
+    errors.push(`charter sync: ${String(e)}`);
+  }
+}
+
 export interface SaveResult {
   ok: boolean;
   errors: string[];
@@ -263,6 +290,8 @@ export async function saveTeam(
   } catch (e) {
     errors.push(`config write: ${String(e)}`);
   }
+  // Keep the yaml charter (what `maw team up` reads) matching the saved roster.
+  syncCharter(name, edited, errors);
   return { ok: errors.length === 0, errors };
 }
 
@@ -283,6 +312,8 @@ export async function createTeam(
       errors.push(`config write: ${String(e)}`);
     }
   }
+  // Seed the yaml charter so `maw team up <team>` works immediately after create.
+  syncCharter(name, members, errors);
   return { ok: errors.length === 0, errors };
 }
 

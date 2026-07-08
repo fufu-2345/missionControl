@@ -96,17 +96,31 @@ export function findDuplicateOracleNames(names: string[]): string[] {
   return [...dupes].sort((a, b) => a.localeCompare(b));
 }
 
+/** A tool-store entry that is actually a LIVE tmux worker maw registered while a
+ *  team was up (`maw team up` writes these into the SAME config.json the panel
+ *  uses for model/color) — NOT a roster member. Identified by the live-session
+ *  fields maw stamps (tmuxPaneId / backendType). Its `name` is the tmux WINDOW
+ *  identity (e.g. `missioncontrol-bob`, or a bootstrap `team` window), not an
+ *  oracle name, so surfacing it as a member is wrong — and a Save would then try
+ *  to scaffold a bogus oracle from it. These are filtered out of the roster. */
+function isLiveWorkerEntry(t: ToolMember): boolean {
+  return t.tmuxPaneId !== undefined || t.backendType !== undefined;
+}
+
 /** Merge the oracle store (roles, primary source of membership) with the tool
  *  store (per-member model/color run-config) into the panel's member list. The
  *  oracle store drives roles; tool config decorates with model/color. Members
  *  present in ONLY the tool store (the two stores can diverge — e.g. after
  *  repeated create/delete cycles) are appended too, so a divergence is visible
- *  and reconcilable in the panel rather than silently hidden. */
+ *  and reconcilable in the panel rather than silently hidden — EXCEPT maw's
+ *  live-worker entries (isLiveWorkerEntry), which are live tmux windows, not
+ *  members, and must never appear in or decorate the roster. */
 export function mergeTeamStores(
   oracleMembers: { oracle: string; role?: string }[],
-  toolMembers: { name: string; model?: string; color?: string }[],
+  toolMembers: ToolMember[],
 ): TeamMember[] {
-  const byName = new Map(toolMembers.map((m) => [m.name, m]));
+  const decor = toolMembers.filter((m) => !isLiveWorkerEntry(m));
+  const byName = new Map(decor.map((m) => [m.name, m]));
   const seen = new Set<string>();
   const out: TeamMember[] = [];
   for (const m of oracleMembers) {
@@ -119,7 +133,7 @@ export function mergeTeamStores(
       color: tool?.color,
     });
   }
-  for (const t of toolMembers) {
+  for (const t of decor) {
     if (seen.has(t.name)) continue;
     out.push({ oracle: t.name, role: DEFAULT_ROLE, model: t.model, color: t.color });
   }
@@ -151,6 +165,46 @@ export function reconcileToolMembers(
     if (m.color !== undefined) entry.color = m.color;
   }
   return out;
+}
+
+// ── Charter sync: keep `maw team up`'s yaml roster == the UI roster ───────────
+
+/** Rewrite a maw team CHARTER yaml (<root>/.maw/teams/<t>.yaml) so its `members:`
+ *  block matches the UI roster. This is the fix for the two sources of truth
+ *  drifting: the UI edits the oracle registry (oracle-members.json), but
+ *  `maw team up` reads ONLY the yaml charter — so members invited after the
+ *  charter was written (e.g. mike, foreman) never spawn until the charter is
+ *  synced.
+ *
+ *  Preserves EVERY other line of an existing charter — crucially `session:`
+ *  (the tmux session team up targets) and `project:` (where member worktrees
+ *  land); only the members block is replaced. A brand-new team (no charter yet)
+ *  gets a minimal one keyed on the team name. Charter members are written as
+ *  `- role: <oracle>`: maw's charter format uses the `role` field as the member
+ *  identity (→ tmux window `<repo>-<oracle>`), matching the existing brew.yaml. */
+export function syncCharterMembers(
+  existing: string | null,
+  team: string,
+  oracles: string[],
+): string {
+  const block = ["members:", ...oracles.map((o) => `  - role: ${o}`)].join("\n");
+
+  if (!existing || !existing.trim()) {
+    return `name: ${team}\nsession: ${team}\n${block}\n`;
+  }
+
+  const lines = existing.replace(/\n+$/, "").split("\n");
+  const membersIdx = lines.findIndex((l) => /^members:/.test(l));
+  if (membersIdx < 0) {
+    return `${lines.join("\n")}\n${block}\n`; // no members block yet → append
+  }
+  // Keep everything before `members:`; drop the old block (its line + all
+  // following blank/indented lines); keep any later top-level keys.
+  const head = lines.slice(0, membersIdx);
+  let i = membersIdx + 1;
+  while (i < lines.length && (lines[i].trim() === "" || /^\s/.test(lines[i]))) i++;
+  const tail = lines.slice(i);
+  return [...head, block, ...tail].join("\n").replace(/\n*$/, "\n");
 }
 
 // ── maw CLI arg builders (return arg arrays for execFile — no shell) ──────────
