@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import {
   buildKickoffPrompt,
+  buildResumeKickoff,
   buildTmuxLaunchCommand,
   isSafeOracleName,
   parseOraclePath,
@@ -146,4 +147,25 @@ test("buildKickoffPrompt: names team/orchestrator/workers + runs drive not boots
 
 test("buildKickoffPrompt: no workers → hint text", () => {
   expect(buildKickoffPrompt("orch-dev", "foreman", [])).toContain("ยังไม่มี worker");
+});
+
+test("buildKickoffPrompt: askMode off (default) → no โหมดถาม trigger", () => {
+  const p = buildKickoffPrompt("carbon", "foreman", ["bob"]);
+  expect(p).not.toContain("โหมดถาม");
+  expect(p).not.toContain("grilling");
+});
+
+test("buildKickoffPrompt: askMode on → appends grilling + scrutinize trigger", () => {
+  const p = buildKickoffPrompt("carbon", "foreman", ["bob"], true);
+  expect(p).toContain("โหมดถาม"); // the word /orches-drive scans for
+  expect(p).toContain("grilling");
+  expect(p).toContain("scrutinize");
+});
+
+test("buildResumeKickoff: askMode on → appends the trigger; off → not", () => {
+  const on = buildResumeKickoff("rpn", "/p/rpn", "carbon", "foreman", ["bob"], true);
+  expect(on).toContain("โหมดถาม");
+  expect(on).toContain("scrutinize");
+  const off = buildResumeKickoff("rpn", "/p/rpn", "carbon", "foreman", ["bob"]);
+  expect(off).not.toContain("โหมดถาม");
 });

@@ -45,3 +45,6 @@ todo.md
 # maw team worktrees (embedded git repos) + local oracle vault
 agents/
 ψ/
+
+# orchestrator resume marker (machine-local, changes every run)
+.orches-meta.json

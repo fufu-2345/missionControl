@@ -6,6 +6,8 @@
 export type GitButtonKind =
   | "commit" // working tree dirty → needs a commit
   | "push" // clean, local commits ahead of (or no) upstream → needs a push
+  | "pull" // clean, strictly behind upstream (ahead==0) → safe fast-forward pull
+  | "diverged" // clean, behind AND ahead → manual reconcile (info only, no auto-action)
   | "create-push" // clean, no remote at all → create GitHub repo + push
   | "uptodate" // clean, in sync with upstream → nothing to do
   | "init" // not a git repo → offer `git init`
@@ -35,9 +37,12 @@ export function countDirty(porcelain: string): number {
 }
 
 /** Decide the one action button for a project from its raw git facts.
- *  Precedence: dirty (commit) > no-remote (create-push) > ahead / no-upstream
- *  (push) > in-sync (up to date). "behind" is out of scope (no pull button):
- *  a clean, non-ahead tree reads as up to date. */
+ *  Precedence: dirty (commit) > no-remote (create-push) > no-upstream (push) >
+ *  diverged (info) > ahead (push) > behind (pull) > in-sync (up to date).
+ *  The Pull button appears ONLY on a clean, strictly-behind tree — the exact
+ *  case `git pull --ff-only` advances safely. When local AND remote both moved
+ *  (diverged) we show an info chip, never an auto-merge, so ff-only can't fail
+ *  on a button press. */
 export function parseGitButtonState(s: GitRawStatus): GitButtonState {
   const base = { dirtyCount: 0, ahead: s.ahead || 0, behind: s.behind || 0 };
   if (!s.isRepo) return { ...base, kind: "init", label: "Git init" };
@@ -49,6 +54,11 @@ export function parseGitButtonState(s: GitRawStatus): GitButtonState {
   // Clean working tree from here on.
   if (!s.hasRemote) return { ...base, kind: "create-push", label: "Create & Push" };
   if (!s.hasUpstream) return { ...base, kind: "push", label: "Push" };
+  // Has an upstream + clean tree — reconcile against it.
+  if (s.behind > 0 && s.ahead > 0) {
+    return { ...base, kind: "diverged", label: `⚠ diverged ${s.behind}↓ ${s.ahead}↑` };
+  }
   if (s.ahead > 0) return { ...base, kind: "push", label: `Push (${s.ahead})` };
+  if (s.behind > 0) return { ...base, kind: "pull", label: `Pull (${s.behind})` };
   return { ...base, kind: "uptodate", label: "✓ up to date" };
 }

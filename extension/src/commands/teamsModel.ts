@@ -49,6 +49,15 @@ export interface TeamMember {
   color?: string; // run-config (tool store)
 }
 
+/** A tool-store member record — the shape of an entry in
+ *  ~/.claude/teams/<t>/config.json → members[]. Unknown keys are preserved. */
+export interface ToolMember {
+  name: string;
+  model?: string;
+  color?: string;
+  [k: string]: unknown;
+}
+
 export interface TeamDetail {
   name: string;
   description: string;
@@ -61,23 +70,87 @@ export function isSafeTeamName(name: string): boolean {
   return /^[A-Za-z0-9._-]+$/.test(name);
 }
 
-/** Merge the oracle store (roles, source of truth for membership) with the tool
+/** Canonical oracle name: trim, then strip ONE trailing `-oracle` — the exact
+ *  normalization the save path applies (a typed "fusion-oracle" becomes the
+ *  oracle stem "fusion", since `maw bud fusion` makes the repo fusion-oracle).
+ *  Shared so the panel's duplicate check compares the SAME forms that would
+ *  actually collide on Save. Mirror any change into the webview's inline copy. */
+export function normalizeOracle(name: string): string {
+  const s = (name ?? "").trim();
+  return s.endsWith("-oracle") ? s.slice(0, -"-oracle".length) : s;
+}
+
+/** Normalized oracle names that appear 2+ times in the roster, sorted. Blank
+ *  rows are ignored (never a duplicate). Case-sensitive — the fleet registry and
+ *  filesystem treat "Bob" and "bob" as distinct oracles. Drives the panel's
+ *  "duplicate member" guard so Save can be blocked before it reaches maw. */
+export function findDuplicateOracleNames(names: string[]): string[] {
+  const seen = new Set<string>();
+  const dupes = new Set<string>();
+  for (const raw of names) {
+    const key = normalizeOracle(raw);
+    if (!key) continue;
+    if (seen.has(key)) dupes.add(key);
+    seen.add(key);
+  }
+  return [...dupes].sort((a, b) => a.localeCompare(b));
+}
+
+/** Merge the oracle store (roles, primary source of membership) with the tool
  *  store (per-member model/color run-config) into the panel's member list. The
- *  oracle store drives which members exist; tool config only decorates. */
+ *  oracle store drives roles; tool config decorates with model/color. Members
+ *  present in ONLY the tool store (the two stores can diverge — e.g. after
+ *  repeated create/delete cycles) are appended too, so a divergence is visible
+ *  and reconcilable in the panel rather than silently hidden. */
 export function mergeTeamStores(
   oracleMembers: { oracle: string; role?: string }[],
   toolMembers: { name: string; model?: string; color?: string }[],
 ): TeamMember[] {
   const byName = new Map(toolMembers.map((m) => [m.name, m]));
-  return oracleMembers.map((m) => {
+  const seen = new Set<string>();
+  const out: TeamMember[] = [];
+  for (const m of oracleMembers) {
+    seen.add(m.oracle);
     const tool = byName.get(m.oracle);
-    return {
+    out.push({
       oracle: m.oracle,
       role: (m.role && m.role.trim()) || DEFAULT_ROLE,
       model: tool?.model,
       color: tool?.color,
-    };
-  });
+    });
+  }
+  for (const t of toolMembers) {
+    if (seen.has(t.name)) continue;
+    out.push({ oracle: t.name, role: DEFAULT_ROLE, model: t.model, color: t.color });
+  }
+  return out;
+}
+
+/** Reconcile a tool-store member list against a save: DROP the `remove` names
+ *  first, then upsert model/color for each `upsert` member (append if absent).
+ *  Returns a NEW array — never mutates the input. Pure; teamsOps.writeToolConfig
+ *  owns the fs read/write.
+ *
+ *  The drop step is the fix for members reappearing after delete: Save clears the
+ *  maw oracle store via `oracle-remove`, but the tool store must be pruned in the
+ *  same pass — otherwise mergeTeamStores re-appends the tool-only leftover and the
+ *  "deleted" member bounces back on the next detail read. */
+export function reconcileToolMembers(
+  existing: ToolMember[],
+  opts: { upsert?: TeamMember[]; remove?: string[] },
+): ToolMember[] {
+  const drop = new Set(opts.remove ?? []);
+  const out: ToolMember[] = existing.filter((m) => !drop.has(m.name)).map((m) => ({ ...m }));
+  for (const m of opts.upsert ?? []) {
+    let entry = out.find((x) => x.name === m.oracle);
+    if (!entry) {
+      entry = { name: m.oracle };
+      out.push(entry);
+    }
+    if (m.model !== undefined) entry.model = m.model;
+    if (m.color !== undefined) entry.color = m.color;
+  }
+  return out;
 }
 
 // ── maw CLI arg builders (return arg arrays for execFile — no shell) ──────────

@@ -47,8 +47,24 @@ test("clean + in sync → up to date", () => {
   expect(parseGitButtonState(clean).kind).toBe("uptodate");
 });
 
-test("clean + behind only (no ahead) still reads up to date (pull out of scope)", () => {
-  expect(parseGitButtonState({ ...clean, behind: 2 }).kind).toBe("uptodate");
+test("clean + behind only (no ahead) → Pull with count (safe fast-forward)", () => {
+  const r = parseGitButtonState({ ...clean, behind: 2 });
+  expect(r.kind).toBe("pull");
+  expect(r.label).toBe("Pull (2)");
+  expect(r.behind).toBe(2);
+});
+
+test("clean + diverged (behind AND ahead) → diverged info, not push/pull", () => {
+  const r = parseGitButtonState({ ...clean, behind: 2, ahead: 1 });
+  expect(r.kind).toBe("diverged");
+  expect(r.label).toContain("diverged");
+  expect(r.behind).toBe(2);
+  expect(r.ahead).toBe(1);
+});
+
+test("dirty wins over behind (commit before pull)", () => {
+  const r = parseGitButtonState({ ...clean, porcelain: " M a.ts", behind: 5 });
+  expect(r.kind).toBe("commit");
 });
 
 test("not a repo → init (offer git init)", () => {

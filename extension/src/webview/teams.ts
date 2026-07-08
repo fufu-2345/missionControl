@@ -8,6 +8,7 @@ import {
   oracleCandidates,
   readTeamDetailSync,
   saveTeam,
+  teamExists,
 } from "../commands/teamsOps";
 import {
   COLOR_OPTIONS,
@@ -15,6 +16,7 @@ import {
   DEFAULT_ROLE,
   ROLE_OPTIONS,
   isSafeTeamName,
+  normalizeOracle,
   type TeamMember,
 } from "../commands/teamsModel";
 
@@ -57,10 +59,8 @@ function sanitizeMembers(raw: unknown): TeamMember[] {
   for (const m of raw) {
     // Normalize to the oracle STEM: `maw bud <stem>` makes repo <stem>-oracle,
     // so a typed "fusion-oracle" would become "fusion-oracle-oracle". Strip it.
-    const oracle = (typeof m?.oracle === "string" ? m.oracle.trim() : "").replace(
-      /-oracle$/,
-      "",
-    );
+    // Shared with the panel's duplicate check (normalizeOracle) so both agree.
+    const oracle = normalizeOracle(typeof m?.oracle === "string" ? m.oracle : "");
     if (!oracle) continue;
     out.push({
       oracle,
@@ -130,10 +130,15 @@ export function openTeamsPanel(_projectId: string | null = null): vscode.Webview
           vscode.window.showErrorMessage(
             `Teams: ชื่อทีมไม่ถูกต้อง (ใช้ได้แค่ A-Z a-z 0-9 . _ -): '${name}'`,
           );
+          panel.webview.postMessage({ type: "op_done" });
           return;
         }
-        if (listTeamSummaries().some((t) => t.name === name)) {
+        // Guard against ALL stores (incl. the ψ vault maw checks) so a duplicate
+        // — even a vault-only ghost — is caught here with a clean message rather
+        // than reaching maw and failing with a cryptic error.
+        if (teamExists(name)) {
           vscode.window.showErrorMessage(`Teams: ทีม '${name}' มีอยู่แล้ว`);
+          panel.webview.postMessage({ type: "op_done" });
           return;
         }
         const members = sanitizeMembers(msg.members);
@@ -145,7 +150,12 @@ export function openTeamsPanel(_projectId: string | null = null): vscode.Webview
             : `Teams: สร้าง '${name}' มีปัญหา — ${r.errors.join(" · ")}`,
         );
         pushList(panel);
-        await pushDetail(panel, name); // jump straight into the new team
+        if (r.ok) {
+          await pushDetail(panel, name); // jump straight into the new team
+        } else {
+          // Stay on the form so the user can fix + retry; re-enable its button.
+          panel.webview.postMessage({ type: "op_done" });
+        }
         return;
       }
       case "delete_team": {
@@ -176,7 +186,7 @@ export function openTeamsPanel(_projectId: string | null = null): vscode.Webview
   return panel;
 }
 
-function renderShell(): string {
+export function renderShell(): string {
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
   html, body { height: 100%; margin: 0; padding: 0; }
@@ -230,6 +240,11 @@ function renderShell(): string {
   .note { font-size: 11px; opacity: 0.6; margin-top: 8px; line-height: 1.5; }
   .barrow { display: flex; gap: 8px; margin-top: 14px; align-items: center; }
   .x { color: #f85149; cursor: pointer; font-weight: 700; border: none; background: none; font-size: 14px; }
+  table.members tr.dup td { background: rgba(248,81,73,0.09); }
+  table.members tr.dup .oracle-new { border-color: #f85149; box-shadow: 0 0 0 1px #f85149; }
+  table.members tr.dup .oracle-name { color: #f85149; }
+  .dup-msg { color: #f85149; font-size: 12px; margin: 12px 0 0; display: none; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
 </style></head>
 <body>
   <div class="topbar">
@@ -248,6 +263,22 @@ function renderShell(): string {
     .replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
   function el(id){ return document.getElementById(id); }
   function post(type, extra){ vscode.postMessage(Object.assign({ type: type }, extra||{})); }
+  // Disable a submit button on click so a create/save can't be double-fired
+  // while the extension is mid-maw (a create with new members takes seconds).
+  // Returns true if already busy (caller should bail). The extension re-enables
+  // via an "op_done" message on failure; on success it re-renders a fresh DOM.
+  function busy(btn){
+    if (btn.disabled) return true;
+    btn.disabled = true;
+    btn.dataset.label = btn.textContent;
+    btn.textContent = 'Working…';
+    return false;
+  }
+  function clearBusy(){
+    var b = document.querySelector('button[data-label]');
+    while (b){ b.disabled = false; b.textContent = b.dataset.label; delete b.dataset.label;
+      b = document.querySelector('button[data-label]'); }
+  }
 
   function optionList(values, sel){
     return values.map(v => '<option value="'+esc(v)+'"'+(v===sel?' selected':'')+'>'+esc(v)+'</option>').join('');
@@ -318,11 +349,67 @@ function renderShell(): string {
     });
     return out;
   }
+  // ── Duplicate-name guard ─────────────────────────────────────────────────────
+  // Mirrors teamsModel.normalizeOracle / findDuplicateOracleNames (a webview
+  // script can't import). Uses a Set (NOT a plain object) so oracle names like
+  // "toString"/"constructor" don't collide with Object.prototype keys.
+  function normOracle(s){
+    s = String(s == null ? '' : s).trim();
+    return s.slice(-7) === '-oracle' ? s.slice(0, -7) : s;
+  }
+  function duplicateNames(names){
+    var seen = new Set(), dup = new Set();
+    names.forEach(function(n){
+      var k = normOracle(n);
+      if (!k) return;            // blank rows are never a duplicate
+      if (seen.has(k)) dup.add(k);
+      seen.add(k);
+    });
+    return dup;
+  }
+  function rowNames(tbody){
+    return Array.prototype.map.call(tbody.querySelectorAll('tr'), function(tr){
+      var ni = tr.querySelector('.oracle-new');
+      var ns = tr.querySelector('.oracle-name');
+      return ni ? ni.value : (ns ? ns.textContent : '');
+    });
+  }
+  // Highlight every row in a duplicated-name group, show the message, and block
+  // Save until the roster is unique. Runs live (typing/add/remove) + on render.
+  function validateMembers(root){
+    var tbody = root.querySelector('tbody'); if (!tbody) return;
+    var trs = tbody.querySelectorAll('tr');
+    var names = rowNames(tbody);
+    var dup = duplicateNames(names);
+    Array.prototype.forEach.call(trs, function(tr, i){
+      var k = normOracle(names[i]);
+      tr.classList.toggle('dup', !!k && dup.has(k));
+    });
+    var list = []; dup.forEach(function(k){ list.push(k); });
+    var msg = el('dupMsg');
+    if (msg){
+      if (list.length){
+        msg.textContent = '⚠ ชื่อ oracle ซ้ำ: ' + list.join(', ') + ' — แก้ให้ไม่ซ้ำก่อนบันทึก';
+        msg.style.display = 'block';
+      } else {
+        msg.textContent = ''; msg.style.display = 'none';
+      }
+    }
+    // Don't fight busy(): only manage the disabled state when the button isn't
+    // mid-save (busy() tags it with data-label while a save/create is in flight).
+    var save = el('saveTeam') || el('createTeam');
+    if (save && !save.dataset.label) save.disabled = list.length > 0;
+  }
+
   function wireMemberTable(root, candidates){
     var tbody = root.querySelector('tbody');
-    root.querySelectorAll('.x').forEach(function(b){
-      b.addEventListener('click', function(){ b.closest('tr').remove(); });
-    });
+    function bindRow(tr){
+      var x = tr.querySelector('.x');
+      if (x) x.addEventListener('click', function(){ tr.remove(); validateMembers(root); });
+      var inp = tr.querySelector('.oracle-new');
+      if (inp) inp.addEventListener('input', function(){ validateMembers(root); });
+    }
+    Array.prototype.forEach.call(tbody.querySelectorAll('tr'), bindRow);
     var addBtn = root.querySelector('.add-member');
     if (addBtn) addBtn.addEventListener('click', function(){
       // Always addable — a blank row where you TYPE a new (or existing) oracle
@@ -331,9 +418,11 @@ function renderShell(): string {
       holder.innerHTML = memberRowHtml({ oracle: '', role: OPT.defaultRole }, true, candidates);
       var row = holder.firstElementChild;
       tbody.appendChild(row);
-      row.querySelector('.x').addEventListener('click', function(){ row.remove(); });
+      bindRow(row);
       var inp = row.querySelector('.oracle-new'); if (inp) inp.focus();
+      validateMembers(root);
     });
+    validateMembers(root); // initial state — flags divergent stores that already dup
   }
   function memberTableHtml(members, editableOracle, candidates){
     // Shared suggestions: existing oracle names autocomplete in the text input,
@@ -368,11 +457,13 @@ function renderShell(): string {
       + '</div>'
       + '<label>สมาชิก ('+t.members.length+')</label>'
       + memberTableHtml(t.members, false, m.candidates)
+      + '<div class="dup-msg" id="dupMsg"></div>'
       + '<div class="barrow"><button class="primary" id="saveTeam">Save</button></div>';
     var content = el("content");
     wireMemberTable(content, m.candidates);
     el("delTeam").addEventListener('click', function(){ post('delete_team', { name: t.name }); });
     el("saveTeam").addEventListener('click', function(){
+      if (busy(this)) return;
       post('save_team', {
         name: t.name,
         description: el("teamDesc").value,
@@ -399,10 +490,12 @@ function renderShell(): string {
       + '</div>'
       + '<label>สมาชิก</label>'
       + memberTableHtml([], true, m.candidates)
+      + '<div class="dup-msg" id="dupMsg"></div>'
       + '<div class="barrow"><button class="primary" id="createTeam">Create</button></div>';
     var content = el("content");
     wireMemberTable(content, m.candidates);
     el("createTeam").addEventListener('click', function(){
+      if (busy(this)) return;
       post('create_team', {
         name: el("newName").value,
         description: el("newDesc").value,
@@ -418,6 +511,7 @@ function renderShell(): string {
     else if (m.type === "team_detail") renderDetail(m);
     else if (m.type === "team_new") renderNew(m);
     else if (m.type === "go_list") post('reload');
+    else if (m.type === "op_done") clearBusy();
   });
   post("ready");
 </script></body></html>`;

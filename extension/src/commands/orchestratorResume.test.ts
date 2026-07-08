@@ -7,9 +7,11 @@ import {
   isResumable,
   parseOrchesMeta,
   parsePlan,
+  partitionStarred,
   type ResumableProject,
   serializeOrchesMeta,
   sortResumable,
+  toggleStar,
 } from "./orchestratorResume";
 
 test("parsePlan: counts total + done from checkbox lines", () => {
@@ -115,4 +117,32 @@ test("buildResumeKickoff: names project + tells it NOT to ask a new requirement"
   expect(k).toContain("อย่าถาม build requirement ใหม่");
   expect(k).toContain("foreman");
   expect(k).toContain("bob, jack");
+});
+
+test("toggleStar: add if absent, remove if present, never mutates input", () => {
+  const base = ["/x/one"];
+  expect(toggleStar(base, "/x/two")).toEqual(["/x/one", "/x/two"]); // add
+  expect(toggleStar(["/x/one", "/x/two"], "/x/one")).toEqual(["/x/two"]); // remove
+  expect(base).toEqual(["/x/one"]); // input untouched
+  expect(toggleStar(toggleStar(base, "/x/two"), "/x/two")).toEqual(["/x/one"]); // round-trip
+});
+
+test("partitionStarred: starred float to top, sub-order preserved within groups", () => {
+  const p = (name: string): ResumableProject => ({
+    name,
+    path: "/x/" + name,
+    sprintDocs: 0,
+    openWorktrees: 0,
+  });
+  const list = [p("a"), p("b"), p("c"), p("d")];
+  expect(partitionStarred(list, new Set(["/x/b", "/x/d"])).map((x) => x.name)).toEqual([
+    "b",
+    "d",
+    "a",
+    "c",
+  ]);
+  expect(partitionStarred(list, new Set()).map((x) => x.name)).toEqual(["a", "b", "c", "d"]); // none → unchanged
+  expect(
+    partitionStarred(list, new Set(["/x/a", "/x/b", "/x/c", "/x/d"])).map((x) => x.name),
+  ).toEqual(["a", "b", "c", "d"]); // all → order unchanged
 });

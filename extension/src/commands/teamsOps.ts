@@ -12,9 +12,11 @@ import {
   isSafeTeamName,
   mergeTeamStores,
   MODEL_ALIASES,
+  reconcileToolMembers,
   removeArgs,
   type TeamDetail,
   type TeamMember,
+  type ToolMember,
 } from "./teamsModel";
 
 // Extension-side team CRUD. Membership + roles persist through the maw CLI
@@ -31,7 +33,43 @@ const BUD_TIMEOUT = 90000; // scaffolding an oracle (repo + ψ vault) is slower
 // All local oracles live under this org (matches every entry in oracles.json).
 const ORACLE_ORG = "fufu-2345";
 
-const runMaw = (args: string[]): Promise<RunResult> => run("maw", args, { timeout: MAW_TIMEOUT });
+// maw resolves its ψ vault (where `team create` writes/checks the uniqueness
+// manifest) RELATIVE TO CWD. With no cwd, it resolved against the opaque
+// extension-host cwd — scattering stray ~/ψ vaults and making the "already
+// exists" check target a different vault than a later invocation. Pin every maw
+// call to the soulbrew tree (the same root terminal.ts/status.ts/claude.ts use)
+// so create/delete/existence all agree on ONE deterministic vault.
+const SOULBREW_DIR = path.join(os.homedir(), "Desktop", "soulbrew");
+// MAW_QUIET=1 suppresses maw's per-invocation stderr banner ("loaded config: 0
+// triggers…" + "loaded N plugins…"). Without it, firstLine() surfaces the banner
+// instead of the real error on any failure. Spread process.env — env REPLACES.
+const MAW_ENV = { ...process.env, MAW_QUIET: "1" };
+const MAW_OPTS = { timeout: MAW_TIMEOUT, cwd: SOULBREW_DIR, env: MAW_ENV };
+
+const runMaw = (args: string[]): Promise<RunResult> => run("maw", args, MAW_OPTS);
+
+/** Resolve maw's ψ vault dir the way maw's resolvePsi() does, from a base cwd:
+ *  walk up for a dir that has BOTH CLAUDE.md and ψ/; else fall back to <base>/ψ.
+ *  We invoke maw with cwd=SOULBREW_DIR, so this MUST use the same base to agree
+ *  with where maw actually writes/checks the manifest. */
+function resolvePsi(base: string): string {
+  let dir = base;
+  for (;;) {
+    if (fs.existsSync(path.join(dir, "ψ")) && fs.existsSync(path.join(dir, "CLAUDE.md"))) {
+      return path.join(dir, "ψ");
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break; // filesystem root
+    dir = parent;
+  }
+  return path.join(base, "ψ");
+}
+
+/** A team's ψ-vault dir — the store maw enforces `create` uniqueness against
+ *  (its manifest.json is what makes maw say "already exists"). */
+function teamVaultDir(name: string): string {
+  return path.join(resolvePsi(SOULBREW_DIR), "memory", "mailbox", "teams", name);
+}
 
 /** Existing oracle names from the fleet registry (used to decide whether an
  *  added member is a brand-new oracle to scaffold, or one that already exists). */
@@ -51,7 +89,7 @@ function scaffoldOracle(name: string): Promise<RunResult> {
   return run(
     "maw",
     ["bud", name, "--root", "--org", ORACLE_ORG, "--scaffold-only"],
-    { timeout: BUD_TIMEOUT },
+    { timeout: BUD_TIMEOUT, cwd: SOULBREW_DIR, env: MAW_ENV },
   );
 }
 
@@ -85,7 +123,7 @@ interface ToolConfig {
   name?: string;
   description?: string;
   createdAt?: string;
-  members?: { name: string; model?: string; color?: string; [k: string]: unknown }[];
+  members?: ToolMember[];
   [k: string]: unknown;
 }
 
@@ -97,16 +135,38 @@ function readJson<T>(file: string): T | null {
   }
 }
 
-/** Every team name from the oracle store (the panel's source of truth), sorted. */
+/** Every known team name, sorted. Unions the oracle-registry store (teams with
+ *  members) with the tool store (`maw team create` writes ~/.claude/teams/<t>/
+ *  config.json for EVERY team, including 0-member ones) — so a memberless team
+ *  created from the panel actually shows up on the list, not just teams that got
+ *  an oracle-invite. */
 export function listTeamNames(): string[] {
-  try {
-    return fs
-      .readdirSync(MAW_TEAMS_DIR)
-      .filter((e) => fs.existsSync(path.join(MAW_TEAMS_DIR, e, "oracle-members.json")))
-      .sort((a, b) => a.localeCompare(b));
-  } catch {
-    return [];
-  }
+  const names = new Set<string>();
+  const collect = (base: string, marker: string): void => {
+    try {
+      for (const e of fs.readdirSync(base)) {
+        if (fs.existsSync(path.join(base, e, marker))) names.add(e);
+      }
+    } catch {
+      /* dir may not exist yet */
+    }
+  };
+  collect(MAW_TEAMS_DIR, "oracle-members.json");
+  collect(TOOL_TEAMS_DIR, "config.json");
+  return [...names].sort((a, b) => a.localeCompare(b));
+}
+
+/** True if a team of this name already exists in ANY store the panel or maw care
+ *  about — oracle-registry, tool store, OR the ψ-vault manifest maw enforces
+ *  `create` uniqueness against. The create pre-guard uses this so a vault-only
+ *  "ghost" (e.g. left after a delete before P1, or a 0-member create) is caught
+ *  with a clean "already exists" message instead of a cryptic maw failure. */
+export function teamExists(name: string): boolean {
+  return (
+    fs.existsSync(path.join(MAW_TEAMS_DIR, name, "oracle-members.json")) ||
+    fs.existsSync(path.join(TOOL_TEAMS_DIR, name, "config.json")) ||
+    fs.existsSync(path.join(teamVaultDir(name), "manifest.json"))
+  );
 }
 
 /** Summaries for the list screen (name + counts + role preview). */
@@ -143,25 +203,20 @@ export function oracleCandidates(exclude: string[] = []): string[] {
 }
 
 /** Upsert the tool-store config.json — description and/or per-member run-config
- *  (model/color). Creates the dir/file if the team never ran. */
+ *  (model/color), and PRUNE members named in `remove`. Creates the dir/file if
+ *  the team never ran. Removing here is essential: `oracle-remove` only cleans
+ *  the maw store, so a removed member left in this store is re-surfaced by
+ *  mergeTeamStores and appears to "come back" after Save. */
 function writeToolConfig(
   name: string,
-  patch: { description?: string; members?: TeamMember[] },
+  patch: { description?: string; members?: TeamMember[]; remove?: string[] },
 ): void {
   const dir = path.join(TOOL_TEAMS_DIR, name);
   const file = path.join(dir, "config.json");
   const cfg: ToolConfig = readJson<ToolConfig>(file) ?? { name, members: [] };
   if (!Array.isArray(cfg.members)) cfg.members = [];
   if (patch.description !== undefined) cfg.description = patch.description;
-  for (const m of patch.members ?? []) {
-    let entry = cfg.members.find((x) => x.name === m.oracle);
-    if (!entry) {
-      entry = { name: m.oracle };
-      cfg.members.push(entry);
-    }
-    if (m.model !== undefined) entry.model = m.model;
-    if (m.color !== undefined) entry.color = m.color;
-  }
+  cfg.members = reconcileToolMembers(cfg.members, { upsert: patch.members, remove: patch.remove });
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n");
 }
@@ -183,18 +238,27 @@ export async function saveTeam(
 
   for (const oracle of diff.removed) {
     const r = await runMaw(removeArgs(oracle, name));
-    if (!r.ok) errors.push(`remove ${oracle}: ${firstLine(r)}`);
+    // Tolerate "not found" (like deleteTeam): the member may already be absent
+    // from the maw store — e.g. a prior desync where it lingered only in the tool
+    // store. The tool-store prune below still runs, so the delete completes either
+    // way and the recovery Save doesn't surface a spurious error.
+    if (!r.ok && !/not found/i.test(r.stderr + r.stdout)) {
+      errors.push(`remove ${oracle}: ${firstLine(r)}`);
+    }
   }
   // Added members may be brand-new oracles (scaffold them first); roleChanged
   // are always existing, so ensureAndInvite just re-invites to upsert the role.
   await ensureAndInvite(name, [...diff.added, ...diff.roleChanged], errors);
   // Description + run-config (model/color) are data-file writes. Include the
-  // added members' config too so a brand-new member's model/color persists.
+  // added members' config too so a brand-new member's model/color persists, and
+  // PRUNE removed members from the tool store in the same write — otherwise
+  // mergeTeamStores re-appends them and the delete appears to undo itself.
   try {
     const cfgMembers = [...diff.added, ...diff.configChanged];
     writeToolConfig(name, {
       description: description !== original.description ? description : undefined,
       members: cfgMembers,
+      remove: diff.removed,
     });
   } catch (e) {
     errors.push(`config write: ${String(e)}`);
@@ -222,24 +286,37 @@ export async function createTeam(
   return { ok: errors.length === 0, errors };
 }
 
-/** Delete a team: maw delete (tool store) + rm the oracle store dir. The vault
- *  manifest (if any) may linger as a "vault-only" ghost — surfaced, not force-rm'd. */
+/** Delete a team from ALL THREE stores: `maw team delete` (tool store) + rm the
+ *  oracle-registry dir + rm the ψ-vault manifest dir. Removing the ψ vault is
+ *  essential — `maw team delete` leaves it behind, and that lingering "ghost"
+ *  manifest is what made a later create of the same name fail "already exists". */
 export async function deleteTeam(name: string): Promise<SaveResult> {
   const errors: string[] = [];
   const del = await runMaw(deleteArgs(name));
   if (!del.ok && !/not found/i.test(del.stderr + del.stdout)) {
     errors.push(`delete: ${firstLine(del)}`);
   }
-  try {
-    fs.rmSync(path.join(MAW_TEAMS_DIR, name), { recursive: true, force: true });
-  } catch (e) {
-    errors.push(`rm oracle store: ${String(e)}`);
+  for (const dir of [path.join(MAW_TEAMS_DIR, name), teamVaultDir(name)]) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch (e) {
+      errors.push(`rm ${dir}: ${String(e)}`);
+    }
   }
   return { ok: errors.length === 0, errors };
 }
 
-function firstLine(r: RunResult): string {
-  return (r.stderr || r.stdout || "failed").split("\n")[0];
+/** First MEANINGFUL line of a maw result. maw prints a plugin-loading banner
+ *  ("loaded config: …" / "loaded N plugins …") to stderr on every invocation;
+ *  MAW_QUIET=1 (see MAW_ENV) suppresses it, but strip any banner line that slips
+ *  through so the real error surfaces instead of the meaningless banner. */
+export function firstLine(r: RunResult): string {
+  const lines = (r.stderr || r.stdout || "failed")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const meaningful = lines.filter((l) => !/^loaded /.test(l));
+  return meaningful[0] ?? lines[0] ?? "failed";
 }
 
 // ── Model options for the per-member dropdown (live, not hardcoded IDs) ───────

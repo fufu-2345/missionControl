@@ -329,17 +329,18 @@ function nextTwinSession(base: string): string {
  *  are guarded by orches-drive but the twin is told to yield, not steal. */
 function twinKickoffNote(session: string, base: string, orch: string): string {
   return (
-    `\n\n[โหมด twin] คุณคือ session เสริม '${session}' ของ ${orch} — session หลัก '${base}' กำลังทำงานอื่นอยู่ งานนี้แยกขาดจากกัน:\n` +
-    `- ψ/DB ของ ${orch} เป็นก้อนเดียวแชร์กัน → แท็กทุก memory capture (oracle_learn / oracle_trace / /rrr) ด้วย "[${session}]" ใน summary เพื่อไม่ปนกับ session หลัก\n` +
-    `- ไฟล์ ψ ที่แชร์ (เช่น ψ/inbox/pending-rrr.md) → append เท่านั้น ห้ามเขียนทับทั้งไฟล์\n` +
-    `- ก่อน dispatch: worker ที่ session หลักใช้อยู่ = อย่าแย่ง (guard เดิมจะเตือน) → เลือก worker ที่ว่าง หรือรายงาน user`
+    `\n\n[instance] คุณคือ instance '${session}' ของ ${orch} — instance '${base}' ของ ${orch} กำลังรัน run อื่นอยู่ · 1 session = 1 team run แยกขาดกัน:\n` +
+    `- ψ/DB ของ ${orch} เป็นก้อนเดียวแชร์กัน → แท็กทุก memory capture (oracle_learn / oracle_trace / /rrr) ด้วย "[${session}]" + project ใน summary เพื่อไม่ปนกับ run อื่น\n` +
+    `- ไฟล์ ψ ที่แชร์ (เช่น ψ/inbox/pending-rrr.md) → append เท่านั้น ห้ามเขียนทับ/แก้ไฟล์เดิม\n` +
+    `- worker ที่ run อื่นใช้อยู่ = ห้ามแย่ง/ห้าม wake ซ้ำ → เปิด instance window ของ worker ใน session นี้ (orches-drive Step 3.5)`
   );
 }
 
 /** Wake + attach the orchestrator with the right kickoff (fresh build vs
  *  resume). Shared by the command palette flow and the dashboard screens.
- *  If the orchestrator is ALREADY awake, asks the user: open a SECOND tmux
- *  session (twin — same oracle, separate job) or inject into the live one.
+ *  1 session = 1 team run: a resume of an already-live project re-attaches to
+ *  its session; otherwise this run gets its own session (base pin if free, else
+ *  a fresh `base-N` instance) — no modal, no twin/inject prompt.
  *  On resume it also stamps `.orches-meta.json` (team + session) so the team
  *  picker defaults and attach-on-doing find the right session next time. */
 export async function launchOrchestrator(opts: {
@@ -347,8 +348,9 @@ export async function launchOrchestrator(opts: {
   team: OracleTeam;
   mode: "new" | "resume";
   project?: ResumableProject;
+  askMode?: boolean;
 }): Promise<{ error?: string; cancelled?: boolean }> {
-  const { orch, team, mode, project } = opts;
+  const { orch, team, mode, project, askMode = false } = opts;
   if (!isSafeOracleName(orch)) return { error: `ชื่อ orchestrator ไม่ปลอดภัย: ${orch}` };
   if (mode === "resume" && !project) return { error: "resume แต่ไม่มี project" };
 
@@ -364,42 +366,28 @@ export async function launchOrchestrator(opts: {
     };
   }
 
+  // 1 session = 1 team instance: a resume of an already-live project just
+  // re-attaches to its running session (no modal, no second run).
+  if (mode === "resume" && project && attachToProject(project)) return {};
+
   const workers = team.members
     .filter((m) => m.role !== "orchestrator")
     .map((m) => m.oracle);
   let kickoff =
     mode === "resume" && project
-      ? buildResumeKickoff(project.name, project.path, team.name, orch, workers)
-      : buildKickoffPrompt(team.name, orch, workers);
+      ? buildResumeKickoff(project.name, project.path, team.name, orch, workers, askMode)
+      : buildKickoffPrompt(team.name, orch, workers, askMode);
 
   const baseSession = readSessionPin(orch)?.trim() || `claude-${orch}`;
   let session = baseSession;
   let inject = false; // deliver kickoff into the live pane instead of creating
 
   if (tmuxHasSession(baseSession)) {
-    // Same oracle can't think two jobs in one conversation. Ask: twin session
-    // (separate job, same team config — nothing to re-create) or same session.
-    const TWIN = "เปิด session ใหม่ (งานแยก)";
-    const SAME = "ส่งเข้า session เดิม";
-    const pick = await vscode.window.showWarningMessage(
-      `'${orch}' ตื่นอยู่แล้ว (session '${baseSession}') — งานนี้จะให้ทำที่ไหน?`,
-      {
-        modal: true,
-        detail:
-          "session ใหม่ = ทีม/oracle เดิม แต่แยกบทสนทนา ทำ 2 งานคู่กันได้ (ระวัง: bob/jack/john มีตัวเดียว ถ้า 2 งานต้องใช้ worker ตัวเดียวกันพร้อมกัน งานหลังต้องรอ) · " +
-          "session เดิม = ส่ง kickoff ต่อท้ายบทสนทนาที่กำลังทำอยู่",
-      },
-      TWIN,
-      SAME,
-    );
-    if (pick === TWIN) {
-      session = nextTwinSession(baseSession);
-      kickoff += twinKickoffNote(session, baseSession, orch);
-    } else if (pick === SAME) {
-      inject = true;
-    } else {
-      return { cancelled: true };
-    }
+    // Base session is busy with ANOTHER run — no modal, no twin/inject choice.
+    // This run gets its own fresh instance session (1 session = 1 team instance);
+    // the orchestrator pulls its workers into THIS session (orches-drive Step 3.5).
+    session = nextTwinSession(baseSession); // base-2, base-3, …
+    kickoff += twinKickoffNote(session, baseSession, orch);
   }
 
   if (mode === "resume" && project) {
@@ -482,9 +470,23 @@ export async function startOrchestratorCommand(_context: vscode.ExtensionContext
   }
   if (!orch) return;
 
-  // 3) wake + attach (fresh build kickoff). Resume flow goes through the
+  // 3) โหมดสัมภาษณ์: ปกติ vs โหมดถาม (grilling + scrutinize). Default = ปกติ.
+  const askPick = await vscode.window.showQuickPick(
+    [
+      { label: "ปกติ", description: "discuss requirement แบบเดิม", ask: false },
+      {
+        label: "🔎 โหมดถาม",
+        description: "สัมภาษณ์ requirement ละเอียด (grilling) + รีวิวแผนก่อนลงมือ (scrutinize)",
+        ask: true,
+      },
+    ],
+    { title: `${orch} — โหมดสัมภาษณ์ requirement?`, placeHolder: "โหมดถาม = ถามละเอียดขึ้นก่อนย่อยงาน" },
+  );
+  if (!askPick) return;
+
+  // 4) wake + attach (fresh build kickoff). Resume flow goes through the
   //    dashboard screens (launchOrchestrator with mode:"resume").
-  const r = await launchOrchestrator({ orch, team, mode: "new" });
+  const r = await launchOrchestrator({ orch, team, mode: "new", askMode: askPick.ask });
   if (r.cancelled) return;
   if (r.error) {
     vscode.window.showErrorMessage(`Mission Control: ${r.error}`);

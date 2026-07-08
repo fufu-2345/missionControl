@@ -10,7 +10,7 @@ import {
   listOrchestratorTeams,
   scanResumableProjects,
 } from "../commands/startOrchestrator";
-import type { ResumableProject } from "../commands/orchestratorResume";
+import { partitionStarred, toggleStar, type ResumableProject } from "../commands/orchestratorResume";
 import type { OracleTeam } from "../commands/teams";
 
 // Dedicated editor-tab panel for the "▶ เริ่มใหม่ / ⏮ ทำต่อ" orchestrator flow —
@@ -26,8 +26,20 @@ interface WizState {
   projects: ResumableProject[];
   project?: ResumableProject;
   team?: OracleTeam;
+  askMode?: boolean; // "โหมดถาม" toggle — grilling interview + scrutinize plan review
 }
 let _st: WizState | undefined;
+
+const STARRED_KEY = "missioncontrol.starredProjects";
+let _ctx: vscode.ExtensionContext | undefined;
+
+/** Starred project paths from per-user globalState (empty if context missing). */
+function starredList(): string[] {
+  return _ctx?.globalState.get<string[]>(STARRED_KEY, []) ?? [];
+}
+async function setStarred(list: string[]): Promise<void> {
+  await _ctx?.globalState.update(STARRED_KEY, list);
+}
 
 async function computeGitStates(
   projects: ResumableProject[],
@@ -46,14 +58,16 @@ async function computeGitStates(
 async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch = false) {
   const projects = _st?.projects ?? [];
   annotateLiveState(projects); // refresh the live "doing" flag each render (cheap: one tmux call)
-  const states = await computeGitStates(projects, fetch);
+  const starred = new Set(starredList());
+  const ordered = partitionStarred(projects, starred); // starred float to top; sub-order preserved
+  const states = await computeGitStates(ordered, fetch);
   panel.webview.postMessage({
     type: "screen_projects",
     title: "⏮ ทำต่อ — เลือก project ค้าง",
     subtitle: projects.length
       ? "⠋ กำลังทำ = worker run อยู่ตอนนี้ · 🔨 ค้าง = sprint ที่ยังไม่เสร็จ (จากแผน หรือ worktree ที่เปิดค้าง) · 'ทำ X/N' = เสร็จกี่ sprint · ปุ่มขวา = git"
       : "ไม่พบงานค้าง — ต้องมี docs/plan.md, docs/*sprint-*.md หรือ worktree agents/* เปิดอยู่",
-    items: projects.map((p) => ({
+    items: ordered.map((p) => ({
       path: p.path,
       name: p.name,
       sprints: p.sprintDocs,
@@ -61,6 +75,7 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch = false) {
       plannedTotal: p.plannedTotal,
       plannedDone: p.plannedDone,
       doing: p.doing,
+      starred: starred.has(p.path),
       git: { path: p.path, ...states[p.path] },
     })),
   });
@@ -78,6 +93,8 @@ function pushTeamsScreen(panel: vscode.WebviewPanel) {
     title: (_st?.mode === "continue" ? "⏮ ทำต่อ" : "▶ เริ่มใหม่") + " — เลือกทีม",
     subtitle: _st?.project ? `project: ${_st.project.name}` : "เลือก oracle-team",
     canBack: _st?.mode === "continue",
+    // โหมดถาม toggle เฉพาะ "เริ่มใหม่" — resume ยังไม่รองรับ (รอหน้า setting)
+    askable: _st?.mode === "new",
     items: ordered.map((t) => ({
       name: t.name,
       isDefault: t.name === def,
@@ -93,16 +110,18 @@ function pushOrchScreen(panel: vscode.WebviewPanel, team: OracleTeam) {
     type: "screen_orch",
     title: `${team.name} — เลือก orchestrator`,
     subtitle: "ทีมนี้มี orchestrator หลายตัว",
+    askable: _st?.mode === "new",
     items: team.orchestrators.map((o) => ({ name: o })),
   });
 }
 
 /** Team chosen → 1 orchestrator auto-launches; >1 asks; 0 guides. */
-function pickTeam(panel: vscode.WebviewPanel, name: string) {
+function pickTeam(panel: vscode.WebviewPanel, name: string, askMode = false) {
   if (!_st) return;
   const team = listOrchestratorTeams().find((t) => t.name === name);
   if (!team) return;
   _st.team = team;
+  _st.askMode = askMode; // remember for the orch-picker screen (its post re-sends too)
   if (!team.orchestrators.length) {
     vscode.window.showWarningMessage(
       `Orchestrator: ทีม '${team.name}' ไม่มี member role:orchestrator — เพิ่มก่อนในหน้า Teams`,
@@ -110,19 +129,20 @@ function pickTeam(panel: vscode.WebviewPanel, name: string) {
     return;
   }
   if (team.orchestrators.length === 1) {
-    void doLaunch(panel, team.orchestrators[0]);
+    void doLaunch(panel, team.orchestrators[0], askMode);
   } else {
     pushOrchScreen(panel, team);
   }
 }
 
-async function doLaunch(panel: vscode.WebviewPanel, orch: string) {
+async function doLaunch(panel: vscode.WebviewPanel, orch: string, askMode = false) {
   if (!_st?.team) return;
   const r = await launchOrchestrator({
     orch,
     team: _st.team,
     mode: _st.mode === "continue" ? "resume" : "new",
     project: _st.project,
+    askMode,
   });
   if (r.cancelled) return; // user backed out of the twin/inject choice — keep the wizard
   if (r.error) {
@@ -137,7 +157,11 @@ async function doLaunch(panel: vscode.WebviewPanel, orch: string) {
   panel.dispose();
 }
 
-export function openOrchestratorPanel(mode: "new" | "continue"): vscode.WebviewPanel {
+export function openOrchestratorPanel(
+  mode: "new" | "continue",
+  context: vscode.ExtensionContext,
+): vscode.WebviewPanel {
+  _ctx = context;
   _st = { mode, projects: mode === "continue" ? scanResumableProjects() : [] };
   if (_panel) {
     _panel.title = titleFor(mode);
@@ -184,11 +208,27 @@ export function openOrchestratorPanel(mode: "new" | "continue"): vscode.WebviewP
         pushTeamsScreen(panel);
         return;
       }
+      case "toggle_star": {
+        const p = typeof msg.path === "string" ? msg.path : "";
+        if (!p || !_ctx) return;
+        // await update: durable; Memento.get reflects it synchronously so the
+        // re-partition below is already correct — no ordering bug elsewhere.
+        await setStarred(toggleStar(starredList(), p));
+        await pushProjectsScreen(panel);
+        return;
+      }
       case "pick_team":
-        if (typeof msg.name === "string") pickTeam(panel, msg.name);
+        if (typeof msg.name === "string") pickTeam(panel, msg.name, msg.askMode === true);
         return;
       case "pick_orch":
-        if (typeof msg.name === "string") void doLaunch(panel, msg.name);
+        // Trust the CURRENT toggle when the client sends it — OR-ing with the
+        // stale team-pick value made ON→OFF at this step impossible.
+        if (typeof msg.name === "string")
+          void doLaunch(
+            panel,
+            msg.name,
+            typeof msg.askMode === "boolean" ? msg.askMode : _st.askMode === true,
+          );
         return;
       case "back":
         // teams → back to projects (continue mode only)
@@ -212,9 +252,14 @@ export function openOrchestratorPanel(mode: "new" | "continue"): vscode.WebviewP
       case "git_auto": {
         const p = typeof msg.path === "string" ? msg.path : "";
         if (!p) return;
+        // gen = client's per-project request generation. Echoed back verbatim so
+        // the client can DROP results of cancelled/superseded runs (without it, a
+        // cancelled run's stale message could get auto-committed by the next run).
+        const gen = typeof msg.gen === "number" ? msg.gen : 0;
         panel.webview.postMessage({
           type: "git_auto_result",
           path: p,
+          gen,
           message: await gitOps.autoCommitMessage(p),
         });
         return;
@@ -234,6 +279,31 @@ export function openOrchestratorPanel(mode: "new" | "continue"): vscode.WebviewP
         const st = await gitOps.readGitStatus(p);
         const r = await gitOps.pushRepo(p, st.hasUpstream);
         notify(r.ok, `push ${short(p)}`, r);
+        await pushProjectsScreen(panel);
+        return;
+      }
+      case "git_commit_push": {
+        // Armed auto-commit+push (the glowing Commit+Push buttons). One case so
+        // the push STRICTLY follows a successful commit — two separate posted
+        // messages would race (both handlers start independently).
+        const p = typeof msg.path === "string" ? msg.path : "";
+        const message = typeof msg.message === "string" ? msg.message.trim() : "";
+        if (!p || !message) return;
+        const c = await gitOps.commitAll(p, message);
+        notify(c.ok, `commit ${short(p)}`, c);
+        if (c.ok) {
+          const st = await gitOps.readGitStatus(p);
+          const r = await gitOps.pushRepo(p, st.hasUpstream);
+          notify(r.ok, `push ${short(p)}`, r);
+        }
+        await pushProjectsScreen(panel);
+        return;
+      }
+      case "git_pull": {
+        const p = typeof msg.path === "string" ? msg.path : "";
+        if (!p) return;
+        const r = await gitOps.pullRepo(p);
+        notify(r.ok, `pull ${short(p)}`, r);
         await pushProjectsScreen(panel);
         return;
       }
@@ -308,6 +378,11 @@ function renderShell(): string {
   .card.default .cname { color: #56d364; }
   .badge-last { font-size: 10px; font-weight: 700; color: #0d1117; background: #3fb950;
     padding: 1px 8px; border-radius: 8px; margin-left: 8px; vertical-align: middle; }
+  .star { flex: 0 0 auto; font-size: 19px; line-height: 1; cursor: pointer; user-select: none;
+    opacity: 0.4; padding: 5px 7px; margin: -3px -1px; border-radius: 6px;
+    display: inline-flex; align-items: center; justify-content: center; }
+  .star:hover { opacity: 0.8; background: var(--vscode-list-hoverBackground); }
+  .star.on { color: #e3b341; opacity: 1; }
   .chip { font-size: 10px; padding: 1px 7px; border-radius: 8px; margin-left: 8px;
     vertical-align: middle; font-weight: 600; }
   .chip.act { background: rgba(196,127,26,0.22); color: #e3a13a; }
@@ -323,6 +398,21 @@ function renderShell(): string {
     border-radius: 4px; padding: 5px 7px; font-size: 12px; box-sizing: border-box;
     font-family: var(--vscode-font-family); cursor: auto; }
   .barrow { display: flex; gap: 6px; margin-top: 4px; }
+  .git-pushx { background: #1f6feb; color: #fff; border: none; border-radius: 5px;
+    padding: 4px 12px; font-weight: 600; }
+  /* แสงวิ่งรอบปุ่ม = arm แล้ว (auto คิดเสร็จจะยิงเองหลัง grace 3 วิ) — a light dot
+     orbiting the button border via an animated conic ring on ::after */
+  @property --gl { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
+  .glow { position: relative; }
+  .glow::after { content: ''; position: absolute; inset: -3px; border-radius: 9px; padding: 2px;
+    background: conic-gradient(from var(--gl), transparent 0deg 250deg, #ffd33d 300deg,
+      #fff8c5 330deg, #ffd33d 350deg, transparent 360deg);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    mask-composite: exclude;
+    animation: glspin 1.1s linear infinite; pointer-events: none; }
+  @keyframes glspin { to { --gl: 360deg; } }
 </style></head>
 <body>
   <div class="topbar">
@@ -332,11 +422,18 @@ function renderShell(): string {
   <div class="content" id="content"><div class="empty">Loading…</div></div>
 <script>
   const vscode = acquireVsCodeApi();
-  var COLOR = { commit:'#c47f1a', push:'#1f6feb', 'create-push':'#238636', init:'#57606a' };
+  var COLOR = { commit:'#c47f1a', push:'#1f6feb', pull:'#1b9aaa', 'create-push':'#238636', init:'#57606a' };
   function esc(s){ return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;")
     .replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
   function el(id){ return document.getElementById(id); }
   function post(t,x){ vscode.postMessage(Object.assign({type:t}, x||{})); }
+
+  // "โหมดถาม" toggle — persists across screen re-renders (this script runs once).
+  // On: the launch post carries askMode:true → kickoff gets the grilling+scrutinize trigger.
+  var askMode=false;
+  function askBtnStyle(){ return askMode
+    ? 'background:rgba(63,185,80,0.18);color:#56d364;border-color:#3fb950;' : ''; }
+  function askBtnLabel(){ return '🔎 โหมดถาม: '+(askMode?'เปิด ✓':'ปิด'); }
 
   // Text-animate the "doing" spinner(s): one shared ticker cycles a braille glyph
   // through every .spin on screen (re-queried each tick so it survives re-render).
@@ -345,19 +442,28 @@ function renderShell(): string {
     var ns=document.querySelectorAll('.spin'); for(var i=0;i<ns.length;i++) ns[i].textContent=f;
   }, 90);
 
-  function actionsHtml(canBack){
+  function actionsHtml(canBack, showFetch, askable){
+    // fetch = git-refresh of the PROJECTS screen only. On teams/orch it navigated
+    // to a (possibly empty) projects screen with no back button — a dead end.
+    // askBtn only in "เริ่มใหม่" (askable) — resume ยังไม่รองรับโหมดถาม (รอหน้า setting).
     return (canBack ? '<button id="backBtn">← กลับ</button>' : '')
-      + '<button id="reloadBtn">fetch</button>';
+      + (askable ? '<button id="askBtn" title="เปิด = สัมภาษณ์ requirement ละเอียด (grilling) + รีวิวแผนก่อนลงมือ (scrutinize)" style="'+askBtnStyle()+'">'+askBtnLabel()+'</button>' : '')
+      + (showFetch ? '<button id="reloadBtn">fetch</button>' : '');
   }
   function wireActions(canBack){
     if (canBack){ var b=el("backBtn"); if(b) b.addEventListener('click',function(){post('back');}); }
-    el("reloadBtn").addEventListener('click',function(){post('git_refresh');});
+    var ab=el("askBtn"); if(ab) ab.addEventListener('click',function(){
+      askMode=!askMode; ab.textContent=askBtnLabel(); ab.style.cssText=askBtnStyle(); });
+    var rb=el("reloadBtn"); if(rb) rb.addEventListener('click',function(){post('git_refresh');});
   }
 
   // ── git button (project rows) ────────────────────────────────────────────
   function gitCell(g){
     if (!g || g.kind==='none') return '';
     if (g.kind==='uptodate') return '<span style="color:#7d8590;font-size:11px;">'+esc(g.label)+'</span>';
+    // diverged = local AND remote both moved → no safe auto-action. Show an info
+    // chip (not a button); the user reconciles in a terminal (pull --rebase/merge).
+    if (g.kind==='diverged') return '<span style="color:#e3a13a;font-size:11px;" title="local + remote ต่างมี commit ใหม่ — reconcile เองใน terminal (git pull --rebase หรือ merge)">'+esc(g.label)+'</span>';
     // commit / create-push open an inline form (message / repo name) — the caret
     // signals that, so the orange button doesn't read as "commit right now".
     var caret = (g.kind==='commit'||g.kind==='create-push') ? ' ▾' : '';
@@ -369,6 +475,7 @@ function renderShell(): string {
       +'<textarea class="git-msg" rows="2" style="width:100%" placeholder="commit message…"></textarea>'
       +'<div class="barrow"><button class="git-auto">✨ auto</button>'
       +'<button class="git-go" style="background:#238636;color:#fff;border:none;border-radius:5px;padding:4px 12px;font-weight:600;">✓ Commit</button>'
+      +'<button class="git-pushx" style="display:none" title="auto เสร็จแล้ว commit + push ให้เลย · กดตอนแสงคู่ = ยกเลิกแสงทั้งหมด">⇧ Push ด้วย</button>'
       +'<button class="git-x">ยกเลิก</button></div></div>';
     if (g.kind==='create-push'){ var _p=String(g.path||'').split('/').filter(Boolean); var def=_p[_p.length-1]||'';
       return '<div class="git-editor" style="display:none">'
@@ -380,7 +487,8 @@ function renderShell(): string {
 
   function renderProjects(m){
     el("title").textContent = m.title; el("subtitle").textContent = m.subtitle;
-    el("actions").innerHTML = actionsHtml(false); wireActions(false);
+    askMode=false; // "ทำต่อ" (projects) ไม่มีโหมดถาม → กันค่าค้างจากรอบ new
+    el("actions").innerHTML = actionsHtml(false, true, false); wireActions(false);
     var items = m.items||[];
     el("content").innerHTML = items.length ? items.map(function(it){
       var wt = it.worktrees||0, sp = it.sprints||0;
@@ -398,49 +506,132 @@ function renderShell(): string {
       // Progress line: with a plan show "did X of N"; else the sprint-doc count.
       var sub = pt > 0 ? 'ทำ '+pd+'/'+pt+' sprint' : 'ทำไปแล้ว '+sp+' sprint';
       return '<div class="card" data-path="'+esc(it.path)+'">'
+        +'<span class="star'+(it.starred?' on':'')+'" role="button" title="ปักดาว / เอาดาวออก">'+(it.starred?'★':'☆')+'</span>'
         +'<div style="flex:1"><button class="pick"><span class="cname">'+esc(it.name)+chip+'</span>'
         +'<span class="csub">'+sub+'</span></button>'+gitEditor(it.git)+'</div>'
         +'<span class="git-cell">'+gitCell(it.git)+'</span></div>';
     }).join('') : '<div class="empty">'+esc(m.subtitle)+'</div>';
     el("content").querySelectorAll('.card').forEach(function(card){
       var path=card.dataset.path;
-      // Whole row selects the project — except clicks on the git button or its
-      // inline form (those do their own thing).
+      // Whole row selects the project — except clicks on the git button, its
+      // inline form, or the star toggle (those do their own thing).
       card.addEventListener('click',function(e){
-        if (e.target.closest('.git-act') || e.target.closest('.git-editor')) return;
+        if (e.target.closest('.git-act') || e.target.closest('.git-editor') || e.target.closest('.star')) return;
+        // เพิ่งมี editor หุบไป (commit/ยกเลิก) → layout เพิ่งขยับ คลิกที่ 2 ของ
+        // double-click จะตกใส่แถวอื่น — เมินช่วงสั้นๆ กัน pick/attach ผิดโปรเจค
+        if (Date.now() - _edCloseAt < 350) return;
         post('pick_project',{path:path});
       });
+      var starEl=card.querySelector('.star');
+      if(starEl) starEl.addEventListener('click',function(e){ e.stopPropagation(); post('toggle_star',{path:path}); });
       wireGit(card, path);
     });
+    // DOM เพิ่งถูกสร้างใหม่ทั้งจอ (host re-render หลังทุก git action) — สถานะ arm/แสง
+    // อยู่ใน AUTO (script ตัวนี้รันครั้งเดียว) จึงต้อง apply กลับเข้าปุ่มทุกใบ
+    items.forEach(function(it){ applyAutoUi(it.path); });
   }
   function wireGit(card, path){
     var ed=card.querySelector('.git-editor'), act=card.querySelector('.git-act');
     if(act) act.addEventListener('click',function(e){ e.stopPropagation();
       var k=act.dataset.kind;
       if(k==='push'){ post('git_push',{path:path}); return; }
+      if(k==='pull'){ post('git_pull',{path:path}); return; }
       if(k==='init'){ post('git_init',{path:path}); return; }
       // commit / create-push: OPEN the form (never toggle-closed). Re-clicking the
       // orange button used to collapse it → looked like "nothing happened / stuck".
-      if(ed){ ed.style.display='block'; var mb=ed.querySelector('.git-msg'); if(mb) mb.focus(); } });
+      if(ed){ ed.style.display='block'; ast(path).edOpen=true; var mb=ed.querySelector('.git-msg'); if(mb) mb.focus(); } });
     if(!ed) return;
-    var x=ed.querySelector('.git-x'); if(x) x.addEventListener('click',function(){ed.style.display='none';});
-    var au=ed.querySelector('.git-auto'); if(au) au.addEventListener('click',function(){au.textContent='✨ …';au.disabled=true;post('git_auto',{path:path});});
+    var mb0=ed.querySelector('.git-msg'); if(mb0) mb0.addEventListener('input',function(){
+      var st=ast(path); st.draft=mb0.value; st.edOpen=true;});  // เก็บ draft กันหายตอนจอ re-render
+    var x=ed.querySelector('.git-x'); if(x) x.addEventListener('click',function(){
+      // ปิดฟอร์ม = ล้มเลิกทั้งหมด (หยุด auto + ปลดแสง + ทิ้ง draft) — กัน arm ค้างแบบมองไม่เห็น
+      var st=ast(path); st.thinking=false; st.gen++; disarm(path); st.draft=null; st.edOpen=false;
+      applyAutoUi(path); _edCloseAt=Date.now(); ed.style.display='none';});
+    var au=ed.querySelector('.git-auto'); if(au) au.addEventListener('click',function(){
+      var st=ast(path);
+      st.gen++;  // ทุกการกด = ตัดผลของ request เก่าที่ยังลอยอยู่ทิ้งเสมอ
+      // หยุดทุกกรณีที่ระบบกำลังทำงาน: กำลังคิด "หรือ" แสงวิ่งอยู่ (รวมช่วง grace ที่คิดเสร็จแล้ว)
+      if(st.thinking || st.armed>0){ st.thinking=false; disarm(path); applyAutoUi(path); return; }
+      st.thinking=true; st.msg=null; applyAutoUi(path); post('git_auto',{path:path,gen:st.gen});});
     var go=ed.querySelector('.git-go'); if(go) go.addEventListener('click',function(){
-      var v=(ed.querySelector('.git-msg').value||'').trim(); if(!v)return; post('git_commit',{path:path,message:v}); ed.style.display='none';});
+      var st=ast(path);
+      if(st.armed>0){ disarmToBox(path, ed); return; }        // กดตอนแสงวิ่ง = ยกเลิก auto-commit (auto ยังคิดต่อ)
+      if(st.thinking){ st.armed=1; st.armedAt=Date.now(); applyAutoUi(path); return; } // arm: คิดเสร็จ = commit เอง (grace 3 วิ)
+      var v=(ed.querySelector('.git-msg').value||'').trim(); if(!v)return;
+      st.draft=null; st.edOpen=false; _edCloseAt=Date.now();
+      post('git_commit',{path:path,message:v}); ed.style.display='none';});
+    var px=ed.querySelector('.git-pushx'); if(px) px.addEventListener('click',function(){
+      var st=ast(path);
+      if(st.armed===1){ st.armed=2; st.armedAt=Date.now(); if(st.msg) scheduleExec(path); applyAutoUi(path); return; } // arm push + reset 3 วิ
+      if(st.armed===2){ disarmToBox(path, ed); return; }      // กดตอนแสงคู่ = แสงหายทั้งคู่ (auto ยังคิดต่อ)
+    });
     var go2=ed.querySelector('.git-go2'); if(go2) go2.addEventListener('click',function(){
       var n=(ed.querySelector('.git-repo').value||'').trim(); if(!n)return;
+      ast(path).edOpen=false; _edCloseAt=Date.now();
       post('git_createpush',{path:path,repoName:n,isPrivate:ed.querySelector('.git-priv').checked}); ed.style.display='none';});
   }
   function fillAuto(path,message){
-    var card=el("content").querySelector('.card[data-path="'+(window.CSS&&CSS.escape?CSS.escape(path):path)+'"]');
+    var card=cardOf(path);
     if(!card)return; var au=card.querySelector('.git-auto'); if(au){au.textContent='✨ auto';au.disabled=false;}
+    var st=ast(path); st.edOpen=true; if(message) st.draft=message;  // เก็บเป็น draft — รอด re-render
     var ed=card.querySelector('.git-editor'); if(ed) ed.style.display='block';
     var box=card.querySelector('.git-msg'); if(box&&message) box.value=message;
   }
 
+  // ── auto-commit arming — สถานะแยกต่อ project, ตัวจับเวลาอิสระต่อกัน ─────────
+  // st = { thinking: auto กำลังคิด, armed: 0 ไม่ arm / 1 commit / 2 commit+push,
+  //        armedAt: เวลา click ล่าสุดที่เพิ่ม/ขยับ arm (จุดเริ่ม grace 3 วิ),
+  //        msg: ข้อความที่ auto คิดเสร็จ (รอ grace), execTimer: setTimeout id }
+  var AUTO = {};
+  var GRACE_MS = 3000;
+  // กัน double-click: คลิกที่ 2 ตกบน layout ที่เพิ่งขยับ (editor เพิ่งหุบ) แล้วกลายเป็น
+  // pick_project ของแถวอื่น — จำเวลาหุบล่าสุดไว้แล้วเมิน card-click ช่วงสั้นๆ หลังจากนั้น
+  var _edCloseAt = 0;
+  function ast(p){ return AUTO[p] || (AUTO[p] = {thinking:false, armed:0, armedAt:0, msg:null,
+    execTimer:null, gen:0, draft:null, edOpen:false}); }
+  function cardOf(p){ return el("content").querySelector('.card[data-path="'+(window.CSS&&CSS.escape?CSS.escape(p):p)+'"]'); }
+  function disarm(p){ var st=ast(p); st.armed=0; st.armedAt=0;
+    if(st.execTimer){ clearTimeout(st.execTimer); st.execTimer=null; }
+    var m=st.msg; st.msg=null; return m; }
+  function scheduleExec(p){ var st=ast(p);
+    if(st.execTimer) clearTimeout(st.execTimer);
+    var wait=Math.max(0, GRACE_MS-(Date.now()-st.armedAt));
+    st.execTimer=setTimeout(function(){ execArmed(p); }, wait); }
+  function execArmed(p){ var st=ast(p); st.execTimer=null;
+    if(!st.armed || !st.msg) return;
+    var withPush=(st.armed===2), msg=st.msg;
+    st.armed=0; st.armedAt=0; st.msg=null; applyAutoUi(p);
+    post(withPush?'git_commit_push':'git_commit',{path:p,message:msg}); }
+  function applyAutoUi(p){ var card=cardOf(p); if(!card) return;
+    var st=ast(p), ed=card.querySelector('.git-editor');
+    var au=card.querySelector('.git-auto'), go=card.querySelector('.git-go'), px=card.querySelector('.git-pushx');
+    if(!go) return;
+    // ปุ่ม auto = ปุ่มหยุดตลอดช่วงที่ระบบทำงาน (กำลังคิด "หรือ" แสงวิ่งช่วง grace)
+    if(au){ au.textContent = (st.thinking || st.armed>0) ? '⏹ หยุด' : '✨ auto'; au.disabled=false; }
+    if(ed && (st.thinking || st.armed>0 || st.edOpen)) ed.style.display='block';
+    // ฟื้น message ที่พิมพ์ค้าง/auto เติมไว้ หลังจอถูก re-render (host refresh ทุก git action)
+    var bx=card.querySelector('.git-msg'); if(bx && st.draft && !bx.value) bx.value=st.draft;
+    go.classList.toggle('glow', st.armed>0);
+    if(px){ px.style.display = st.armed>0 ? '' : 'none'; px.classList.toggle('glow', st.armed===2); } }
+  // คืน msg ที่ค้างเข้า textarea ตอนปลด arm ระหว่าง grace — จะได้ไม่หายไปเฉยๆ
+  function disarmToBox(p, ed){ var m=disarm(p); applyAutoUi(p);
+    if(m){ var st=ast(p); st.draft=m; st.edOpen=true;
+      var b=ed.querySelector('.git-msg'); if(b && !b.value.trim()) b.value=m; } }
+  function handleAutoResult(p, message, gen){ var st=ast(p);
+    if(typeof gen==='number' && gen!==st.gen) return;  // ผลของ request ที่ถูกยกเลิก/แทนที่ — ทิ้ง (กัน commit ด้วย message เก่า)
+    if(!st.thinking) return;                       // ถูกยกเลิกไปแล้ว — ทิ้งผลเงียบๆ
+    st.thinking=false;
+    if(st.armed>0){
+      st.msg=String(message||'').trim();
+      if(!st.msg){ disarm(p); applyAutoUi(p); fillAuto(p,''); return; }   // auto คิดไม่ออก → ปลด arm ให้พิมพ์เอง
+      scheduleExec(p); applyAutoUi(p); return;     // ครบ grace (นับจาก click ล่าสุด) แล้วยิงเอง
+    }
+    applyAutoUi(p); fillAuto(p, message); }
+
   function renderTeams(m){
     el("title").textContent=m.title; el("subtitle").textContent=m.subtitle;
-    el("actions").innerHTML=actionsHtml(m.canBack); wireActions(m.canBack);
+    var askable=m.askable===true; if(!askable) askMode=false;
+    el("actions").innerHTML=actionsHtml(m.canBack, false, askable); wireActions(m.canBack);
     var items=m.items||[];
     el("content").innerHTML = items.length ? items.map(function(it){
       return '<div class="card teamcard'+(it.isDefault?' default':'')+'" data-name="'+esc(it.name)+'"><button class="pick">'
@@ -448,17 +639,18 @@ function renderShell(): string {
         +'<span class="csub">'+esc(it.sub)+'</span></button></div>';
     }).join('') : '<div class="empty">ยังไม่มีทีม — สร้างในหน้า Teams ก่อน</div>';
     el("content").querySelectorAll('.card').forEach(function(c){
-      c.addEventListener('click',function(){post('pick_team',{name:c.dataset.name});});});
+      c.addEventListener('click',function(){post('pick_team',{name:c.dataset.name, askMode:askMode});});});
   }
   function renderOrch(m){
     el("title").textContent=m.title; el("subtitle").textContent=m.subtitle;
-    el("actions").innerHTML=actionsHtml(false); wireActions(false);
+    var askable=m.askable===true; if(!askable) askMode=false;
+    el("actions").innerHTML=actionsHtml(false, false, askable); wireActions(false);
     el("content").innerHTML=(m.items||[]).map(function(it){
       return '<div class="card" data-name="'+esc(it.name)+'"><button class="pick">'
         +'<span class="cname">'+esc(it.name)+'</span><span class="csub">orchestrator</span></button></div>';
     }).join('');
     el("content").querySelectorAll('.card').forEach(function(c){
-      c.addEventListener('click',function(){post('pick_orch',{name:c.dataset.name});});});
+      c.addEventListener('click',function(){post('pick_orch',{name:c.dataset.name, askMode:askMode});});});
   }
 
   window.addEventListener("message",function(e){
@@ -466,7 +658,7 @@ function renderShell(): string {
     if(m.type==="screen_projects") renderProjects(m);
     else if(m.type==="screen_teams") renderTeams(m);
     else if(m.type==="screen_orch") renderOrch(m);
-    else if(m.type==="git_auto_result") fillAuto(m.path,m.message);
+    else if(m.type==="git_auto_result") handleAutoResult(m.path,m.message,m.gen);
   });
   post("ready");
 </script></body></html>`;

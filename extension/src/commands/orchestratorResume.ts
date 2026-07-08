@@ -111,3 +111,21 @@ export function sortResumable(list: ResumableProject[]): ResumableProject[] {
       a.name.localeCompare(b.name),
   );
 }
+
+/** Toggle a project path in the starred list: add if absent, remove if present.
+ *  Pure — returns a new array, never mutates the input. */
+export function toggleStar(list: string[], path: string): string[] {
+  return list.includes(path) ? list.filter((p) => p !== path) : [...list, path];
+}
+
+/** Stable-partition resumable projects so starred ones float to the top, while
+ *  preserving the incoming (sortResumable) order within each group. Pure. */
+export function partitionStarred(
+  list: ResumableProject[],
+  starred: ReadonlySet<string>,
+): ResumableProject[] {
+  const top: ResumableProject[] = [];
+  const rest: ResumableProject[] = [];
+  for (const p of list) (starred.has(p.path) ? top : rest).push(p);
+  return [...top, ...rest];
+}

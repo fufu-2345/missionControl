@@ -16,7 +16,6 @@ import { statusCommand } from "./commands/status";
 import { terminalCommand } from "./commands/terminal";
 import { PROJECT_STATE_KEY, setCurrentProjectId } from "./projectState";
 import { registerStatusBar } from "./statusBar";
-import { pushDashboardEvent } from "./webview/dashboard";
 import { openOrchestratorPanel } from "./webview/orchestrator";
 import { registerSidebar } from "./webview/sidebar";
 import { openIdeasPanel, type Idea } from "./webview/ideas";
@@ -47,10 +46,10 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("missioncontrol.terminal", () => terminalCommand(context)),
     vscode.commands.registerCommand("missioncontrol.startOrchestrator", () => startOrchestratorCommand(context)),
     vscode.commands.registerCommand("missioncontrol.orchestratorNew", () =>
-      openOrchestratorPanel("new"),
+      openOrchestratorPanel("new", context),
     ),
     vscode.commands.registerCommand("missioncontrol.orchestratorContinue", () =>
-      openOrchestratorPanel("continue"),
+      openOrchestratorPanel("continue", context),
     ),
   ];
   context.subscriptions.push(...registrations);
@@ -67,11 +66,6 @@ export function activate(context: vscode.ExtensionContext) {
   // project. Backend includes project_id in every payload by convention.
   const ws = new WSClient();
   ws.on((ev) => {
-    // Mirror every WS event into the dashboard's Recent Activity feed.
-    // No-op when the dashboard panel isn't open. Always called FIRST so
-    // the rest of the existing toast / status-bar / auto-open logic runs
-    // unchanged (additive only).
-    pushDashboardEvent(ev.event, ev.data);
     if (ev.event === "ideas_ready") {
       const data = ev.data as { ideas?: Idea[]; project_id?: string };
       if (Array.isArray(data.ideas) && data.ideas.length > 0) {

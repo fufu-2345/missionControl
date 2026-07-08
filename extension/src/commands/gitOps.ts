@@ -21,7 +21,13 @@ export interface RunResult {
 export function run(
   cmd: string,
   args: string[],
-  opts: { cwd?: string; timeout?: number; maxBuffer?: number; input?: string } = {},
+  opts: {
+    cwd?: string;
+    timeout?: number;
+    maxBuffer?: number;
+    input?: string;
+    env?: NodeJS.ProcessEnv;
+  } = {},
 ): Promise<RunResult> {
   return new Promise((resolve) => {
     const child = cp.execFile(
@@ -31,6 +37,9 @@ export function run(
         cwd: opts.cwd,
         timeout: opts.timeout ?? GIT_TIMEOUT,
         maxBuffer: opts.maxBuffer ?? 4 * 1024 * 1024,
+        // undefined → child inherits process.env; an object REPLACES it, so
+        // callers wanting extra vars must spread process.env themselves.
+        env: opts.env,
       },
       (err, stdout, stderr) => {
         resolve({ ok: !err, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
@@ -94,6 +103,13 @@ export async function commitAll(dir: string, message: string): Promise<RunResult
   const add = await git(dir, ["add", "-A"]);
   if (!add.ok) return add;
   return git(dir, ["commit", "-m", message]);
+}
+
+/** Fast-forward pull. `--ff-only` refuses (harmless error) if the branch can't
+ *  advance cleanly — but the UI only offers Pull on a clean, strictly-behind
+ *  tree, so in practice it always fast-forwards without a merge or conflict. */
+export function pullRepo(dir: string): Promise<RunResult> {
+  return git(dir, ["pull", "--ff-only"], FETCH_TIMEOUT);
 }
 
 /** Push current branch. Sets upstream on first push when none is configured. */
