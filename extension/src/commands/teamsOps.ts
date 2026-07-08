@@ -296,11 +296,25 @@ export async function deleteTeam(name: string): Promise<SaveResult> {
   if (!del.ok && !/not found/i.test(del.stderr + del.stdout)) {
     errors.push(`delete: ${firstLine(del)}`);
   }
-  for (const dir of [path.join(MAW_TEAMS_DIR, name), teamVaultDir(name)]) {
-    try {
-      fs.rmSync(dir, { recursive: true, force: true });
-    } catch (e) {
-      errors.push(`rm ${dir}: ${String(e)}`);
+  // oracle-registry dir = maw's own team state (regenerable) → remove wholesale.
+  try {
+    fs.rmSync(path.join(MAW_TEAMS_DIR, name), { recursive: true, force: true });
+  } catch (e) {
+    errors.push(`rm ${path.join(MAW_TEAMS_DIR, name)}: ${String(e)}`);
+  }
+  // ψ vault holds TEAM MEMORY, not just the uniqueness manifest — drop ONLY the
+  // "ghost" manifest.json (what blocks re-create), then rmdir the vault only if
+  // it is now empty. A non-empty vault (real memory files present) makes rmdir
+  // throw ENOTEMPTY → caught → memory preserved. (Previously this rm -rf'd the
+  // whole vault, destroying team memory with no confirm.)
+  const vault = teamVaultDir(name);
+  try {
+    fs.rmSync(path.join(vault, "manifest.json"), { force: true });
+    fs.rmdirSync(vault);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code !== "ENOTEMPTY" && code !== "ENOENT") {
+      errors.push(`rm manifest ${vault}: ${String(e)}`);
     }
   }
   return { ok: errors.length === 0, errors };

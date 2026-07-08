@@ -112,7 +112,13 @@ export function openTeamsPanel(_projectId: string | null = null): vscode.Webview
       }
       case "save_team": {
         const name = typeof msg.name === "string" ? msg.name : "";
-        if (!isSafeTeamName(name)) return;
+        if (!isSafeTeamName(name)) {
+          // busy() already disabled the Save button — must release it or it
+          // stays stuck at "Working…" forever.
+          vscode.window.showErrorMessage(`Teams: ชื่อทีมไม่ถูกต้อง: '${name}'`);
+          panel.webview.postMessage({ type: "op_done" });
+          return;
+        }
         const members = sanitizeMembers(msg.members);
         const description = typeof msg.description === "string" ? msg.description : "";
         const r = await saveTeam(name, description, members);
@@ -149,11 +155,13 @@ export function openTeamsPanel(_projectId: string | null = null): vscode.Webview
             ? `Teams: สร้าง '${name}' (${members.length} สมาชิก) แล้ว`
             : `Teams: สร้าง '${name}' มีปัญหา — ${r.errors.join(" · ")}`,
         );
-        pushList(panel);
         if (r.ok) {
-          await pushDetail(panel, name); // jump straight into the new team
+          pushList(panel); // refresh list, then jump into the new team
+          await pushDetail(panel, name);
         } else {
           // Stay on the form so the user can fix + retry; re-enable its button.
+          // (Do NOT pushList here — it re-renders the list view over the form,
+          // wiping the typed name/members the user needs to fix.)
           panel.webview.postMessage({ type: "op_done" });
         }
         return;

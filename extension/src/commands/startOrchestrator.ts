@@ -366,9 +366,16 @@ export async function launchOrchestrator(opts: {
     };
   }
 
-  // 1 session = 1 team instance: a resume of an already-live project just
-  // re-attaches to its running session (no modal, no second run).
-  if (mode === "resume" && project && attachToProject(project)) return {};
+  // 1 session = 1 team instance: a resume of a project that is ACTUALLY live
+  // right now (a worker pane under its own agents/) re-attaches to its running
+  // session. Gate on `doing` (refreshed from live panes) — NOT merely "the
+  // team's orchestrator has some live session", which would wrongly attach into
+  // a DIFFERENT project the same orchestrator happens to be driving (its
+  // .orches-meta.json session can be stale/shared across projects).
+  if (mode === "resume" && project) {
+    annotateLiveState([project]);
+    if (project.doing && attachToProject(project)) return {};
+  }
 
   const workers = team.members
     .filter((m) => m.role !== "orchestrator")

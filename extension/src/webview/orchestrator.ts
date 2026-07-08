@@ -624,7 +624,7 @@ function renderShell(): string {
     if(st.armed>0){
       st.msg=String(message||'').trim();
       if(!st.msg){ disarm(p); applyAutoUi(p); fillAuto(p,''); return; }   // auto คิดไม่ออก → ปลด arm ให้พิมพ์เอง
-      scheduleExec(p); applyAutoUi(p); return;     // ครบ grace (นับจาก click ล่าสุด) แล้วยิงเอง
+      st.armedAt=Date.now(); scheduleExec(p); applyAutoUi(p); return;  // grace นับจากตอน "ผลมาถึง" (user เพิ่งเห็น msg) — ไม่ใช่จาก click ก่อน gen (ไม่งั้น gen>3วิ = ยิงทันทีไม่มีช่อง cancel)
     }
     applyAutoUi(p); fillAuto(p, message); }
 
