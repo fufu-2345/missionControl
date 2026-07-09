@@ -379,7 +379,8 @@ export async function launchOrchestrator(opts: {
 
   const workers = team.members
     .filter((m) => m.role !== "orchestrator")
-    .map((m) => m.oracle);
+    .map((m) => m.oracle)
+    .filter(isSafeOracleName); // same whitelist as the orchestrator name — keeps unsafe roster entries out of the dispatch list AND the pane-layout shell args
   let kickoff =
     mode === "resume" && project
       ? buildResumeKickoff(project.name, project.path, team.name, orch, workers, askMode)
@@ -421,7 +422,7 @@ export async function launchOrchestrator(opts: {
   // Safe: session = maw pin (NN-oracle) / claude-<safe-orch> (+ "-N" twin suffix).
   const command = inject
     ? `tmux attach -t '=${session}'`
-    : buildTmuxLaunchCommand(orch, repoPath, kickoff, session);
+    : buildTmuxLaunchCommand(orch, repoPath, kickoff, session, workers);
 
   // One editor tab per SESSION (twin gets its own) — never touch other tabs.
   const prevTerm = _orchTerminals.get(session);

@@ -150,6 +150,28 @@ export function parseOraclePath(oraclesJson: string, name: string): string | nul
   }
 }
 
+/** Shell snippet that arranges the freshly-launched orchestrator session into
+ *  the 2-column /orches layout — orchestrator pane fixed on the left, oracle
+ *  toggle buttons on the tmux status bar (clicking one opens/closes its pane on
+ *  the right, up to 3). Delegates to the tested `pane-layout.sh` (pure tmux) —
+ *  NOT reimplemented in TS: tmux has no API (any impl just shells out to `tmux`),
+ *  and the status-bar click handler MUST be a shell-callable script regardless.
+ *  Empty string when there are no workers (no buttons to show). Guarded on the
+ *  script being executable so a missing skill silently skips the layout instead
+ *  of breaking the launch. */
+export function buildPaneLayoutInitCommand(
+  session: string,
+  window: string,
+  workers: string[],
+): string {
+  if (!workers.length) return "";
+  const args = [session, window, ...workers].map(shSingleQuote).join(" ");
+  return (
+    `LAY="$HOME/.claude/skills/orches-drive/pane-layout.sh" && ` +
+    `[ -x "$LAY" ] && bash "$LAY" init ${args}`
+  );
+}
+
 /** Command to launch the orchestrator INSIDE a tmux session, as a FRESH
  *  interactive claude in its own repo dir (loads its CLAUDE.md + ψ + global
  *  skills), with the kickoff as the first message.
@@ -162,14 +184,17 @@ export function parseOraclePath(oraclesJson: string, name: string): string | nul
  *  the orchestrator survives; (2) its Bash subprocesses inherit $TMUX so
  *  `maw team bring` / `tmux send-keys` dispatch works (a bare terminal has no
  *  $TMUX → bring fails "not in tmux"); (3) it shows up in the Sessions panel.
- *  `-A` reattaches if the session already exists (the launch command only runs
- *  on first creation — safe to re-click). No `--continue` (exits for a fresh
+ *  `-A -d` creates the session detached (no-op if it already exists) so
+ *  pane-layout can arrange it before we attach; the inner claude runs only on
+ *  first creation, while the layout-init + `tmux attach` run every invocation
+ *  (both idempotent — safe to re-click). No `--continue` (exits for a fresh
  *  oracle with no prior conversation). All layers single-quote-escaped. */
 export function buildTmuxLaunchCommand(
   orchestrator: string,
   repoPath: string,
   kickoff: string,
   sessionName?: string,
+  workers: string[] = [],
 ): string {
   const session = sessionName?.trim() || `claude-${orchestrator}`;
   // -n names the initial window after the repo (e.g. foreman-oracle): maw wake
@@ -180,8 +205,17 @@ export function buildTmuxLaunchCommand(
   const inner =
     `cd ${shSingleQuote(repoPath)} && ` +
     `claude --dangerously-skip-permissions ${shSingleQuote(kickoff)}`;
+  // Detached create → lay out → attach (mirrors buildTeamUpCommand). A plain
+  // attached `new-session` blocks until the user detaches, so the layout could
+  // only run afterward. `-A -d` creates (or no-ops if the session is already
+  // live) WITHOUT attaching, so pane-layout runs against the session first; then
+  // we attach into the finished 2-column view. Re-clicking stays safe: `-A -d`
+  // no-ops and pane-layout init is idempotent (re-applies the same layout).
+  const layout = buildPaneLayoutInitCommand(session, window, workers);
   return (
-    `tmux new-session -A -s ${shSingleQuote(session)} ` +
-    `-n ${shSingleQuote(window)} ${shSingleQuote(inner)}`
+    `tmux new-session -A -d -s ${shSingleQuote(session)} ` +
+    `-n ${shSingleQuote(window)} ${shSingleQuote(inner)} && { ` +
+    (layout ? `${layout} ; ` : "") +
+    `tmux attach -t ${shSingleQuote(`=${session}`)} ; }`
   );
 }

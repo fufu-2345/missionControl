@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 
 import {
   buildKickoffPrompt,
+  buildPaneLayoutInitCommand,
   buildResumeKickoff,
   buildTmuxLaunchCommand,
   isSafeOracleName,
@@ -26,13 +27,13 @@ test("parseSessionPin: missing oracle / empty / bad JSON → null", () => {
 
 test("buildTmuxLaunchCommand: pinned session name wins over claude-<orch>", () => {
   const cmd = buildTmuxLaunchCommand("foreman", "/p/foreman-oracle", "hi", "09-foreman");
-  expect(cmd.startsWith("tmux new-session -A -s '09-foreman' -n 'foreman-oracle' '")).toBe(true);
+  expect(cmd.startsWith("tmux new-session -A -d -s '09-foreman' -n 'foreman-oracle' '")).toBe(true);
   expect(cmd).not.toContain("claude-foreman");
 });
 
 test("buildTmuxLaunchCommand: blank pin falls back to claude-<orch>", () => {
   const cmd = buildTmuxLaunchCommand("foreman", "/p/foreman-oracle", "hi", "  ");
-  expect(cmd.startsWith("tmux new-session -A -s 'claude-foreman' -n 'foreman-oracle' '")).toBe(true);
+  expect(cmd.startsWith("tmux new-session -A -d -s 'claude-foreman' -n 'foreman-oracle' '")).toBe(true);
 });
 
 test("parseTeamRoster: valid roster with an orchestrator", () => {
@@ -99,13 +100,41 @@ test("isSafeOracleName: whitelist", () => {
   expect(isSafeOracleName("$(whoami)")).toBe(false);
 });
 
-test("buildTmuxLaunchCommand: tmux new-session -A wrapping cd + fresh claude", () => {
+test("buildTmuxLaunchCommand: tmux new-session -A -d wrapping cd + fresh claude", () => {
   const cmd = buildTmuxLaunchCommand("foreman", "/p/foreman-oracle", "hello");
-  expect(cmd.startsWith("tmux new-session -A -s 'claude-foreman' -n 'foreman-oracle' '")).toBe(true);
+  expect(cmd.startsWith("tmux new-session -A -d -s 'claude-foreman' -n 'foreman-oracle' '")).toBe(true);
   expect(cmd).toContain("cd "); // inner: cd into the oracle repo
   expect(cmd).toContain("/p/foreman-oracle");
   expect(cmd).toContain("claude --dangerously-skip-permissions");
   expect(cmd).toContain("hello");
+});
+
+test("buildPaneLayoutInitCommand: workers → guarded pane-layout init", () => {
+  const cmd = buildPaneLayoutInitCommand("09-foreman", "foreman-oracle", ["bob", "jack"]);
+  expect(cmd).toContain("pane-layout.sh");
+  expect(cmd).toContain("init '09-foreman' 'foreman-oracle' 'bob' 'jack'");
+  expect(cmd).toContain('[ -x "$LAY" ]'); // graceful skip when the skill is absent
+});
+
+test("buildPaneLayoutInitCommand: no workers → empty (no buttons to show)", () => {
+  expect(buildPaneLayoutInitCommand("09-foreman", "foreman-oracle", [])).toBe("");
+});
+
+test("buildTmuxLaunchCommand: workers → detached create, layout, then attach", () => {
+  const cmd = buildTmuxLaunchCommand("foreman", "/p/foreman-oracle", "hi", "09-foreman", [
+    "bob",
+    "john",
+  ]);
+  expect(cmd.startsWith("tmux new-session -A -d -s '09-foreman' -n 'foreman-oracle' '")).toBe(true);
+  expect(cmd).toContain("init '09-foreman' 'foreman-oracle' 'bob' 'john'"); // layout wired in
+  expect(cmd.trimEnd().endsWith("tmux attach -t '=09-foreman' ; }")).toBe(true);
+});
+
+test("buildTmuxLaunchCommand: no workers → detached+attach, no layout", () => {
+  const cmd = buildTmuxLaunchCommand("foreman", "/p/foreman-oracle", "hi", "09-foreman");
+  expect(cmd).toContain("tmux new-session -A -d -s '09-foreman'");
+  expect(cmd).not.toContain("pane-layout.sh");
+  expect(cmd).toContain("tmux attach -t '=09-foreman'");
 });
 
 test("buildTmuxLaunchCommand: NO --continue (fresh session, not resume)", () => {
