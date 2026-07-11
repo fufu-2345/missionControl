@@ -38,8 +38,9 @@ export function indexFromStatus(s: any): SearchViewModel["index"] {
 /** Fetch everything the section needs and reconcile into a view model. */
 export async function buildSearchState(): Promise<SearchViewModel> {
   const { online, config } = await getConfig();
+  const intent = readIntent();
   if (!online) {
-    return reconcile({ online: false, config: null, health: null, docs: 0, index: { status: "idle", current: 0, total: 0, eta: 0 }, intent: readIntent() });
+    return reconcile({ online: false, config: null, health: null, docs: 0, index: indexFromStatus(null), intent });
   }
   const [health, stats, idx] = await Promise.all([getHealth(), getStats(), indexStatus()]);
   return reconcile({
@@ -48,7 +49,7 @@ export async function buildSearchState(): Promise<SearchViewModel> {
     health,
     docs: docsFromStats(stats),
     index: indexFromStatus(idx),
-    intent: readIntent(),
+    intent,
   });
 }
 
@@ -66,15 +67,15 @@ export function searchSectionStyle(): string {
     // sliding on/off switch
     ".so-switch{position:relative;width:64px;height:26px;border-radius:999px;border:1px solid var(--vscode-panel-border,rgba(128,128,128,.4));background:var(--vscode-input-background);cursor:pointer}",
     ".so-switch .kn{position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:var(--vscode-foreground);opacity:.7;transition:left .16s ease}",
-    ".so-switch.on{border-color:#3fb950;background:rgba(63,185,80,.18)}",
-    ".so-switch.on .kn{left:40px;background:#3fb950;opacity:1}",
+    ".so-switch.on{border-color:var(--vscode-charts-green,#3fb950);background:rgba(63,185,80,.18)}",
+    ".so-switch.on .kn{left:40px;background:var(--vscode-charts-green,#3fb950);opacity:1}",
     // segmented slide (2 cells)
     ".so-seg{display:inline-flex;border:1px solid var(--vscode-panel-border,rgba(128,128,128,.4));border-radius:8px;overflow:hidden}",
     ".so-seg button{background:transparent;color:var(--vscode-foreground);border:0;padding:6px 16px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit}",
     ".so-seg button.sel{background:var(--vscode-focusBorder);color:#fff}",
     ".so-model{display:flex;justify-content:space-between;align-items:center;padding:8px 0;font-size:12.5px}",
     ".so-badge{font-size:9.5px;font-weight:700;padding:1px 6px;border-radius:4px;margin-left:8px}",
-    ".so-badge.ok{background:rgba(63,185,80,.18);color:#3fb950}",
+    ".so-badge.ok{background:rgba(63,185,80,.18);color:var(--vscode-charts-green,#3fb950)}",
     ".so-badge.warn{background:var(--vscode-charts-orange,#d18616);color:#1a1a1a}",
     ".so-btn{background:transparent;color:var(--vscode-foreground);border:1px solid var(--vscode-panel-border,rgba(128,128,128,.4));border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:600;font-family:inherit;margin-left:6px}",
     ".so-btn:hover{border-color:var(--vscode-focusBorder)}",
