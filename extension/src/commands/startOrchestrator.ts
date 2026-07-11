@@ -6,6 +6,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 
 import {
+  buildContinueKickoff,
   buildKickoffPrompt,
   buildResumeKickoff,
   buildTmuxLaunchCommand,
@@ -15,6 +16,12 @@ import {
   parseSessionPin,
   parseTeamRoster,
 } from "./teams";
+import {
+  decideCancelOutcome,
+  readRunMarker,
+  resolveContinueTarget,
+  writeRunMarker,
+} from "./continueRun";
 import {
   defaultTeamForProject,
   isProjectLive,
@@ -306,7 +313,7 @@ export function attachToProject(project: ResumableProject): boolean {
   return true;
 }
 
-function tmuxHasSession(session: string): boolean {
+export function tmuxHasSession(session: string): boolean {
   try {
     cp.execFileSync("tmux", ["has-session", "-t", `=${session}`], { stdio: "ignore" });
     return true;
@@ -321,6 +328,127 @@ function nextTwinSession(base: string): string {
     if (!tmuxHasSession(`${base}-${i}`)) return `${base}-${i}`;
   }
   return `${base}-${Date.now() % 1000}`; // 9 twins already?! — just don't collide
+}
+
+// ── inline "▶ continue" button: detached one-sprint launch + safe cancel ──────
+// These are tmux/git side-effect wrappers — NOT bun-unit-tested. Their pure
+// inputs (resolveContinueTarget, marker fns, decideCancelOutcome) are covered by
+// continueRun.test.ts; verification here is `npm run compile` + manual E2E.
+
+/** tmux #{session_created} (epoch seconds) for a session, or undefined. */
+export function sessionCreatedAt(session: string): number | undefined {
+  try {
+    const out = cp
+      .execFileSync("tmux", ["display-message", "-p", "-t", `=${session}`, "#{session_created}"], {
+        encoding: "utf8",
+      })
+      .trim();
+    const n = Number(out);
+    return Number.isFinite(n) ? n : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Launch ONE headless sprint for `project` with its last-used team, detached in
+ *  tmux (attachable but no editor terminal opened). No-ask: team/orchestrator are
+ *  auto-resolved from .orches-meta.json. Writes the .orches-run.json marker the
+ *  webview polls. Idempotent-ish: if a run is already live for this project it is
+ *  a no-op that returns the existing session. */
+export function launchContinueRun(project: ResumableProject): { error?: string; session?: string } {
+  const teams = readTeams();
+  const target = resolveContinueTarget(project, teams);
+  if ("error" in target) return { error: target.error };
+
+  // Already spinning for THIS project → don't double-launch.
+  const existing = readRunMarker(project.path);
+  if (existing?.status === "running" && tmuxHasSession(existing.session)) {
+    return { session: existing.session };
+  }
+
+  // The orchestrator runs in ITS OWN oracle repo (loads its CLAUDE.md + ψ), not
+  // the project repo — the project path travels in the kickoff. Same resolution
+  // as launchOrchestrator so the button, `maw wake`, and resume all converge.
+  let orchRepo: string | null = null;
+  try {
+    orchRepo = parseOraclePath(fs.readFileSync(ORACLES_JSON, "utf8"), target.orch);
+  } catch {
+    orchRepo = null;
+  }
+  if (!orchRepo) {
+    return {
+      error: `หา repo ของ '${target.orch}' ไม่เจอใน ~/.maw/oracles.json — ลองรัน \`maw oracle scan\` ก่อน`,
+    };
+  }
+
+  const baseSession = readSessionPin(target.orch)?.trim() || `claude-${target.orch}`;
+  const session = tmuxHasSession(baseSession) ? nextTwinSession(baseSession) : baseSession;
+
+  const workers = target.team.members
+    .filter((m) => m.role !== "orchestrator")
+    .map((m) => m.oracle)
+    .filter(isSafeOracleName);
+  const kickoff = buildContinueKickoff(
+    project.name,
+    project.path,
+    target.team.name,
+    target.orch,
+    workers,
+  );
+  const command = buildTmuxLaunchCommand(target.orch, orchRepo, kickoff, session, workers, false);
+
+  let baseMainSha = "";
+  try {
+    baseMainSha = cp
+      .execFileSync("git", ["-C", project.path, "rev-parse", "HEAD"], { encoding: "utf8" })
+      .trim();
+  } catch {
+    /* fresh repo with no commit — abort revert will simply skip the reset */
+  }
+  try {
+    cp.execFileSync("bash", ["-lc", command]);
+  } catch (e) {
+    return { error: `launch ล้มเหลว: ${String(e)}` };
+  }
+  writeRunMarker(project.path, {
+    status: "running",
+    sprint: (project.plannedDone ?? 0) + 1,
+    session,
+    sessionCreatedAt: sessionCreatedAt(session),
+    baseMainSha,
+    startedAt: new Date().toISOString(),
+  });
+  return { session };
+}
+
+/** Cancel a running continue-run: kill its session, then decide keep-done vs
+ *  revert. Never rewrites already-merged/pushed history — the safe local revert
+ *  is delegated to `orches-integrate.sh abort`, whose own guard skips when
+ *  origin/main is ahead of the recorded base. */
+export async function cancelContinueRun(project: ResumableProject): Promise<void> {
+  const marker = readRunMarker(project.path);
+  if (!marker) return;
+  try {
+    cp.execFileSync("tmux", ["kill-session", "-t", `=${marker.session}`], { stdio: "ignore" });
+  } catch {
+    /* already gone */
+  }
+  // Re-read AFTER the kill — the sprint's "done" may have landed in the race
+  // between the user clicking cancel and orches-drive finishing.
+  const after = readRunMarker(project.path);
+  const intg = `${os.homedir()}/.claude/skills/orches-drive/orches-integrate.sh`;
+  if (decideCancelOutcome(after?.status, false) === "keep_done") {
+    writeRunMarker(project.path, { ...(after ?? marker), status: "done" });
+    return;
+  }
+  try {
+    cp.execFileSync("bash", [intg, "abort", project.path, marker.baseMainSha ?? ""], {
+      stdio: "ignore",
+    });
+  } catch {
+    /* abort is best-effort; still mark cancelled so the button frees up */
+  }
+  writeRunMarker(project.path, { ...marker, status: "cancelled" });
 }
 
 /** Extra kickoff block for a twin session — same oracle, second brain-thread.

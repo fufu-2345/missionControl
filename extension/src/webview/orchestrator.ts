@@ -5,12 +5,17 @@ import { parseGitButtonState, type GitButtonState } from "../commands/gitStatus"
 import {
   annotateLiveState,
   attachToProject,
+  cancelContinueRun,
   defaultTeamFor,
+  launchContinueRun,
   launchOrchestrator,
   listOrchestratorTeams,
   scanResumableProjects,
+  sessionCreatedAt,
+  tmuxHasSession,
 } from "../commands/startOrchestrator";
 import { partitionStarred, toggleStar, type ResumableProject } from "../commands/orchestratorResume";
+import { pendingSprints, readRunMarker, resolveButtonState } from "../commands/continueRun";
 import type { OracleTeam } from "../commands/teams";
 
 // Single "Projects" webview panel (its OWN editor tab, mirroring teams.ts) — the
@@ -64,20 +69,54 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch = false) {
     type: "screen_projects",
     title: "⏮ ทำต่อ — เลือก project ค้าง",
     subtitle: projects.length
-      ? "⠋ กำลังทำ = worker run อยู่ตอนนี้ · 🔨 ค้าง = sprint ที่ยังไม่เสร็จ (จากแผน หรือ worktree ที่เปิดค้าง) · 'ทำ X/N' = เสร็จกี่ sprint · ปุ่มขวา = git"
+      ? "⠋ กำลังทำ = worker run อยู่ตอนนี้ · 🔨 ค้าง = sprint ที่ยังไม่เสร็จ (จากแผน หรือ worktree ที่เปิดค้าง) · 'ทำไปแล้ว X' = เสร็จกี่ sprint · ปุ่มขวา = git"
       : "ไม่พบงานค้าง — ต้องมี docs/plan.md, docs/*sprint-*.md หรือ worktree agents/* เปิดอยู่",
-    items: ordered.map((p) => ({
-      path: p.path,
-      name: p.name,
-      sprints: p.sprintDocs,
-      worktrees: p.openWorktrees,
-      plannedTotal: p.plannedTotal,
-      plannedDone: p.plannedDone,
-      doing: p.doing,
-      starred: starred.has(p.path),
-      git: { path: p.path, ...states[p.path] },
-    })),
+    items: ordered.map((p) => {
+      // continue-button state derived purely (marker + tmux liveness) — the
+      // zombie guard compares the live session's creation time to the recorded one.
+      const marker = readRunMarker(p.path);
+      const live = marker
+        ? { alive: tmuxHasSession(marker.session), createdAt: sessionCreatedAt(marker.session) }
+        : { alive: false };
+      const btn = resolveButtonState(pendingSprints(p), marker, live);
+      return {
+        path: p.path,
+        name: p.name,
+        sprints: p.sprintDocs,
+        worktrees: p.openWorktrees,
+        plannedTotal: p.plannedTotal,
+        plannedDone: p.plannedDone,
+        doing: p.doing,
+        starred: starred.has(p.path),
+        run: { state: btn.state, errorMsg: btn.errorMsg },
+        git: { path: p.path, ...states[p.path] },
+      };
+    }),
   });
+  // Keep polling while any run is live so the spinner + git panel stay fresh.
+  if (ordered.some((p) => readRunMarker(p.path)?.status === "running")) startSpinPoll(panel);
+}
+
+// ── continue-run spin poll: re-render while any project's run is live ─────────
+let _spinPoll: ReturnType<typeof setInterval> | undefined;
+function startSpinPoll(panel: vscode.WebviewPanel) {
+  if (_spinPoll) return;
+  _spinPoll = setInterval(async () => {
+    const projs = _st?.projects ?? [];
+    const anyRunning = projs.some((p) => readRunMarker(p.path)?.status === "running");
+    // A sprint that just landed "done" → fetch so the right-hand git panel updates.
+    for (const p of projs) {
+      if (readRunMarker(p.path)?.status === "done") await gitOps.fetchRepo(p.path);
+    }
+    if (_panel) await pushProjectsScreen(_panel);
+    if (!anyRunning) stopSpinPoll();
+  }, 2500);
+}
+function stopSpinPoll() {
+  if (_spinPoll) {
+    clearInterval(_spinPoll);
+    _spinPoll = undefined;
+  }
 }
 
 function pushTeamsScreen(panel: vscode.WebviewPanel) {
@@ -174,6 +213,7 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
   );
   _panel = panel;
   panel.onDidDispose(() => {
+    stopSpinPoll();
     _panel = undefined;
     _st = undefined;
   });
@@ -240,11 +280,19 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
       case "git_refresh":
         await pushProjectsScreen(panel, true);
         return;
-      case "git_init": {
-        const p = typeof msg.path === "string" ? msg.path : "";
+      case "continue_run": {
+        const p = _st.projects.find((x) => x.path === msg.path);
         if (!p) return;
-        const r = await gitOps.gitInit(p);
-        notify(r.ok, `git init ${short(p)}`, r);
+        const r = launchContinueRun(p);
+        if (r.error) vscode.window.showWarningMessage(`Continue: ${r.error}`);
+        await pushProjectsScreen(panel);
+        startSpinPoll(panel);
+        return;
+      }
+      case "cancel_run": {
+        const p = _st.projects.find((x) => x.path === msg.path);
+        if (!p) return;
+        await cancelContinueRun(p);
         await pushProjectsScreen(panel);
         return;
       }
@@ -391,6 +439,16 @@ function renderShell(): string {
     display: inline-flex; align-items: center; gap: 4px; }
   .chip.doing .spin { font-family: var(--vscode-editor-font-family, monospace);
     font-weight: 700; width: 1ch; display: inline-block; text-align: center; }
+  /* inline "▶ ทำต่อ" continue button — green idle, amber stale, spinning ⟳ */
+  .cont { flex: 0 0 auto; align-self: center; margin: 0 6px; font-size: 11px; font-weight: 600;
+    border: 1px solid #2ea043; color: #3fb950; background: rgba(63,185,80,0.12);
+    border-radius: 6px; padding: 4px 10px; cursor: pointer; white-space: nowrap;
+    display: inline-flex; align-items: center; gap: 5px; }
+  .cont:hover { background: rgba(63,185,80,0.22); }
+  .cont.spin, .cont.stale { border-color: #c47f1a; color: #e3a13a; background: rgba(196,127,26,0.14); }
+  .cont.err { border-color: #f85149; color: #f85149; background: rgba(248,81,73,0.12); cursor: help; }
+  .cont-rot { display: inline-block; animation: contspin 1.1s linear infinite; }
+  @keyframes contspin { to { transform: rotate(360deg); } }
   .git-editor { margin-top: 6px; }
   .git-editor textarea, .git-editor input { background: var(--vscode-input-background);
     color: var(--vscode-input-foreground); border: 1px solid var(--vscode-panel-border);
@@ -421,7 +479,7 @@ function renderShell(): string {
   <div class="content" id="content"><div class="empty">Loading…</div></div>
 <script>
   const vscode = acquireVsCodeApi();
-  var COLOR = { commit:'#c47f1a', push:'#1f6feb', pull:'#1b9aaa', 'create-push':'#238636', init:'#57606a' };
+  var COLOR = { commit:'#c47f1a', push:'#1f6feb', pull:'#1b9aaa', 'create-push':'#238636' };
   function esc(s){ return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;")
     .replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
   function el(id){ return document.getElementById(id); }
@@ -505,12 +563,25 @@ function renderShell(): string {
       var chip = it.doing
         ? '<span class="chip doing"><span class="spin">⠋</span> กำลังทำ</span>'
         : (pending > 0 ? '<span class="chip act">🔨 ค้าง '+pending+' sprint</span>' : '');
-      // Progress line: with a plan show "did X of N"; else the sprint-doc count.
-      var sub = pt > 0 ? 'ทำ '+pd+'/'+pt+' sprint' : 'ทำไปแล้ว '+sp+' sprint';
+      // Progress line: always "ทำไปแล้ว X sprint" — how many are DONE. With a plan
+      // that's the [x] count (pd); without a plan, the sprint-doc count (sp). How
+      // many remain is the "ค้าง" chip's job, not this line's.
+      var done = pt > 0 ? pd : sp;
+      // done>0 → "ทำไปแล้ว X sprint" · done===0 → ยังไม่ทำอะไรเลย = "พร้อมเริ่ม"
+      var sub = done > 0 ? 'ทำไปแล้ว '+done+' sprint' : 'พร้อมเริ่ม';
+      // continue button: run 1 sprint headless with the last-used team (state
+      // resolved host-side). spinning = คลิกเพื่อยกเลิก · stale = run หลุด, คลิกเริ่มใหม่.
+      var run = it.run || { state: 'hidden' };
+      var contBtn =
+        run.state === 'spinning' ? '<button class="cont spin" title="กำลังทำต่อ — คลิกเพื่อยกเลิก"><span class="cont-rot">⟳</span> กำลังทำ</button>' :
+        run.state === 'idle'     ? '<button class="cont" title="ทำต่อ 1 sprint ด้วยทีมล่าสุด (auto, background)">▶ ทำต่อ</button>' :
+        run.state === 'stale'    ? '<button class="cont stale" title="run หลุด — คลิกเพื่อเริ่มใหม่">⚠ ทำต่อ</button>' :
+        run.state === 'error'    ? '<button class="cont err" title="'+esc(run.errorMsg||'error')+'">⚠ error</button>' : '';
       return '<div class="card" data-path="'+esc(it.path)+'">'
         +'<span class="star'+(it.starred?' on':'')+'" role="button" title="ปักดาว / เอาดาวออก">'+(it.starred?'★':'☆')+'</span>'
         +'<div style="flex:1"><button class="pick"><span class="cname">'+esc(it.name)+chip+'</span>'
         +'<span class="csub">'+sub+'</span></button>'+gitEditor(it.git)+'</div>'
+        +contBtn
         +'<span class="git-cell">'+gitCell(it.git)+'</span></div>';
     }).join('') : '<div class="empty">'+esc(m.subtitle)+'</div>';
     el("content").querySelectorAll('.card').forEach(function(card){
@@ -518,7 +589,7 @@ function renderShell(): string {
       // Whole row selects the project — except clicks on the git button, its
       // inline form, or the star toggle (those do their own thing).
       card.addEventListener('click',function(e){
-        if (e.target.closest('.git-act') || e.target.closest('.git-editor') || e.target.closest('.star')) return;
+        if (e.target.closest('.git-act') || e.target.closest('.git-editor') || e.target.closest('.star') || e.target.closest('.cont')) return;
         // เพิ่งมี editor หุบไป (commit/ยกเลิก) → layout เพิ่งขยับ คลิกที่ 2 ของ
         // double-click จะตกใส่แถวอื่น — เมินช่วงสั้นๆ กัน pick/attach ผิดโปรเจค
         if (Date.now() - _edCloseAt < 350) return;
@@ -526,6 +597,11 @@ function renderShell(): string {
       });
       var starEl=card.querySelector('.star');
       if(starEl) starEl.addEventListener('click',function(e){ e.stopPropagation(); post('toggle_star',{path:path}); });
+      var contEl=card.querySelector('.cont');
+      if(contEl) contEl.addEventListener('click',function(e){ e.stopPropagation();
+        // spinning → this click CANCELS the live run; any other state → start one.
+        if(contEl.classList.contains('spin')) post('cancel_run',{path:path});
+        else post('continue_run',{path:path}); });
       wireGit(card, path);
     });
     // DOM เพิ่งถูกสร้างใหม่ทั้งจอ (host re-render หลังทุก git action) — สถานะ arm/แสง
@@ -538,7 +614,6 @@ function renderShell(): string {
       var k=act.dataset.kind;
       if(k==='push'){ post('git_push',{path:path}); return; }
       if(k==='pull'){ post('git_pull',{path:path}); return; }
-      if(k==='init'){ post('git_init',{path:path}); return; }
       // commit / create-push: OPEN the form (never toggle-closed). Re-clicking the
       // orange button used to collapse it → looked like "nothing happened / stuck".
       if(ed){ ed.style.display='block'; ast(path).edOpen=true; var mb=ed.querySelector('.git-msg'); if(mb) mb.focus(); } });

@@ -119,6 +119,28 @@ export function buildResumeKickoff(
   return lines.join(" ");
 }
 
+/** Kickoff for the inline "▶ continue" BUTTON: resume this project and run
+ *  exactly ONE sprint headless, then stop. No requirement discussion, no --ask,
+ *  no sprint-checkpoint UI. The marker contract (.orches-run.json done/error) is
+ *  what the extension polls; MERGE_MODE stays whatever Settings says (never
+ *  passed/hardcoded here). */
+export function buildContinueKickoff(
+  projectName: string,
+  projectPath: string,
+  team: string,
+  orch: string,
+  workers: string[],
+): string {
+  return (
+    `/orches-drive --once ` +
+    `resume project "${projectName}" ที่ ${projectPath} (team ${team}, ผม=${orch}). ` +
+    `ทำ sprint ถัดไปใน docs/plan.md อันเดียวแล้วหยุด — ห้ามวน sprint ต่อ ไม่โชว์ปุ่ม checkpoint. ` +
+    `MERGE_MODE อ่านจาก Settings (อย่าถาม). worker: ${workers.join(", ") || "(none)"}. ` +
+    `เมื่อจบ 1 sprint เขียน .orches-run.json {"status":"done"} แล้ว exit; ` +
+    `ถ้าล้ม เขียน {"status":"error","errorMsg":"<เหตุผล>"} แล้ว exit.`
+  );
+}
+
 /** Find an oracle's pinned tmux session name from maw config content
  *  (`sessions` map in `~/.config/maw/maw.config.*.json`). The pin is what
  *  `maw wake` resolves FIRST, so the button launching into the same name means
@@ -195,6 +217,7 @@ export function buildTmuxLaunchCommand(
   kickoff: string,
   sessionName?: string,
   workers: string[] = [],
+  attach = true, // continue-button passes false → detached, no attach
 ): string {
   const session = sessionName?.trim() || `claude-${orchestrator}`;
   // -n names the initial window after the repo (e.g. foreman-oracle): maw wake
@@ -212,10 +235,13 @@ export function buildTmuxLaunchCommand(
   // we attach into the finished 2-column view. Re-clicking stays safe: `-A -d`
   // no-ops and pane-layout init is idempotent (re-applies the same layout).
   const layout = buildPaneLayoutInitCommand(session, window, workers);
-  return (
+  const head =
     `tmux new-session -A -d -s ${shSingleQuote(session)} ` +
-    `-n ${shSingleQuote(window)} ${shSingleQuote(inner)} && { ` +
-    (layout ? `${layout} ; ` : "") +
-    `tmux attach -t ${shSingleQuote(`=${session}`)} ; }`
-  );
+    `-n ${shSingleQuote(window)} ${shSingleQuote(inner)}`;
+  // The trailing block runs post-create steps: layout (idempotent) then, unless
+  // detached (attach=false, the continue button), attach into the finished view.
+  const parts: string[] = [];
+  if (layout) parts.push(`${layout} ;`);
+  if (attach) parts.push(`tmux attach -t ${shSingleQuote(`=${session}`)} ;`);
+  return parts.length ? `${head} && { ${parts.join(" ")} }` : head;
 }

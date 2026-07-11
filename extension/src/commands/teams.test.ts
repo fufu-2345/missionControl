@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import {
+  buildContinueKickoff,
   buildKickoffPrompt,
   buildPaneLayoutInitCommand,
   buildResumeKickoff,
@@ -10,6 +11,24 @@ import {
   parseSessionPin,
   parseTeamRoster,
 } from "./teams";
+
+test("buildContinueKickoff: names the project path + drives ONE sprint via --once", () => {
+  const k = buildContinueKickoff("demo", "/p/demo", "brew", "foreman", ["mike"]);
+  expect(k).toContain("/p/demo");
+  expect(k).toContain("--once");
+  expect(k).toContain("/orches-drive");
+});
+
+test("buildTmuxLaunchCommand: attach=false omits the trailing tmux attach", () => {
+  const cmd = buildTmuxLaunchCommand("foreman", "/x", "hi", "claude-foreman", [], false);
+  expect(cmd).toContain("new-session");
+  expect(cmd).not.toContain("tmux attach");
+});
+
+test("buildTmuxLaunchCommand: default still attaches (unchanged behavior)", () => {
+  const cmd = buildTmuxLaunchCommand("foreman", "/x", "hi", "claude-foreman", []);
+  expect(cmd).toContain("tmux attach");
+});
 
 test("parseSessionPin: finds pinned session for an oracle", () => {
   const cfg = JSON.stringify({ sessions: { foreman: "09-foreman", bob: "05-bob" } });
