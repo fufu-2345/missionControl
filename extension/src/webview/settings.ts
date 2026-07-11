@@ -191,7 +191,12 @@ export function openSettingsPanel(): vscode.WebviewPanel {
           title: "เลือกไฟล์ model (เผื่อโหลดไว้แล้วแต่ระบบไม่รู้ path)",
         });
         if (picked && picked[0]) {
-          writeIntent({ modelPath: picked[0].fsPath });
+          try {
+            writeIntent({ modelPath: picked[0].fsPath });
+          } catch (err) {
+            const m = err instanceof Error ? err.message : String(err);
+            vscode.window.showErrorMessage(`Search: ${m}`);
+          }
         }
         await pushSearch(panel);
         return;
