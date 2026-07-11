@@ -132,4 +132,11 @@ describe("reconcile", () => {
   test("UI_MODELS is exactly the two exposed models", () => {
     expect(UI_MODELS.map((m) => m.key)).toEqual(["bge-m3", "nomic"]);
   });
+
+  test("clamps selectedModel to UI_MODELS when oracle reports hidden collection as primary", () => {
+    const c = cfg(true, "qwen3", { "qwen3": { ready: true }, "bge-m3": { ready: false }, nomic: { ready: true } });
+    const vm = reconcile({ online: true, config: c, health: { vectorMode: "embedded" }, docs: 0, index: IDLE_INDEX, intent: intentOff });
+    expect(vm.selectedModel).toBe("bge-m3");
+    expect(vm.models.filter((m) => m.primary).map((m) => m.key)).toEqual(["bge-m3"]);
+  });
 });

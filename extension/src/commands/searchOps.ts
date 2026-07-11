@@ -113,6 +113,8 @@ export function reconcile(input: {
   const state = config?.state || {};
   const cols = state.collections || {};
   const primary = state.primary || "bge-m3";
+  const uiKeys = UI_MODELS.map((m) => m.key);
+  const selected = uiKeys.includes(primary) ? primary : "bge-m3";
 
   // Display hybrid/mode: enabled=true is authoritative (ON+Vector). enabled=false
   // is ambiguous (OFF vs ON+Graph) → disambiguate from stored intent.
@@ -134,7 +136,7 @@ export function reconcile(input: {
     label: m.label,
     status: statusFromCol(cols[m.key]),
     reason: cols[m.key]?.reason || "",
-    primary: m.key === primary,
+    primary: m.key === selected,
   }));
 
   const runtimeOn = !!health && health.vectorMode !== "disabled" && !!health.vectorMode;
@@ -148,7 +150,7 @@ export function reconcile(input: {
     hybridEnabled,
     mode,
     models,
-    selectedModel: primary,
+    selectedModel: selected,
     readiness: {
       ready: state.ready === true,
       reason: state.reason || "",
