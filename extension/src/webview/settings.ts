@@ -6,6 +6,14 @@ import {
   setSetting,
   type SettingEntry,
 } from "../commands/settingsOps";
+import { deriveEnabled, readIntent, writeIntent } from "../commands/searchOps";
+import { patchConfig } from "../commands/oracleVectorClient";
+import {
+  buildSearchState,
+  searchSectionBody,
+  searchSectionScript,
+  searchSectionStyle,
+} from "./searchSection";
 
 // Editor-area Settings page. Singleton panel + a display-ready postMessage + a
 // small message switch — mirrors accounts.ts / teams.ts. All fs lives in
@@ -40,6 +48,11 @@ function pushList(panel: vscode.WebviewPanel): void {
   });
 }
 
+async function pushSearch(panel: vscode.WebviewPanel): Promise<void> {
+  const state = await buildSearchState();
+  panel.webview.postMessage({ type: "searchState", state });
+}
+
 export function openSettingsPanel(): vscode.WebviewPanel {
   if (_panel) {
     _panel.reveal();
@@ -65,6 +78,7 @@ export function openSettingsPanel(): vscode.WebviewPanel {
       case "ready":
       case "reload":
         pushList(panel);
+        void pushSearch(panel);
         return;
 
       case "set": {
@@ -76,6 +90,30 @@ export function openSettingsPanel(): vscode.WebviewPanel {
           vscode.window.showErrorMessage(`Settings: ${m}`);
         }
         pushList(panel); // always re-push so the UI reflects on-disk truth
+        return;
+      }
+
+      case "reloadSearch":
+        await pushSearch(panel);
+        return;
+
+      case "searchSet": {
+        try {
+          if (msg.field === "hybrid" || msg.field === "mode") {
+            const intent = writeIntent(
+              msg.field === "hybrid"
+                ? { hybridEnabled: msg.value === true }
+                : { mode: msg.value === "graph" ? "graph" : "vector" },
+            );
+            await patchConfig({ enabled: deriveEnabled(intent) });
+          } else if (msg.field === "model" && typeof msg.value === "string") {
+            await patchConfig({ collections: { [msg.value]: { primary: true } } });
+          }
+        } catch (err) {
+          const m = err instanceof Error ? err.message : String(err);
+          vscode.window.showErrorMessage(`Search: ${m}`);
+        }
+        await pushSearch(panel);
         return;
       }
     }
@@ -138,6 +176,7 @@ function renderShell(): string {
     border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2)); padding-top: 14px;
   }
   .note b { opacity: 0.95; }
+  ${searchSectionStyle()}
 </style>
 </head>
 <body>
@@ -145,6 +184,7 @@ function renderShell(): string {
   <div class="lead">ปรับ knob ของ Mission Control — บันทึกทันทีเมื่อเปลี่ยนค่า</div>
   <div class="path" id="path"></div>
   <div id="groups"></div>
+  ${searchSectionBody()}
   <div class="note">
     <b>เก็บที่ไหน:</b> ทุกค่าเขียนลงไฟล์ <b id="path2"></b> ตรงๆ (local เครื่องนี้เท่านั้น ไม่ push git) · เปลี่ยนแล้วมีผลกับงานที่ <b>เริ่มใหม่</b> หลังจากนี้<br />
     <b>legacy:</b> คีย์ที่ติดป้าย legacy ยังบันทึกได้ แต่ไม่มีผลกับ runtime แล้ว (ของเดิมที่ backend/orchestrator ถูกถอดออก) — เก็บไว้เผื่อกลับมาใช้
@@ -243,6 +283,10 @@ function renderShell(): string {
   });
 
   post("ready");
+  window.__mcVscode = vscode;
+</script>
+<script>
+  ${searchSectionScript()}
 </script>
 </body></html>`;
 }
