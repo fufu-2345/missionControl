@@ -7,7 +7,7 @@ import {
   type SettingEntry,
 } from "../commands/settingsOps";
 import { deriveEnabled, readIntent, writeIntent } from "../commands/searchOps";
-import { patchConfig } from "../commands/oracleVectorClient";
+import { patchConfig, startIndex, stopIndex } from "../commands/oracleVectorClient";
 import {
   buildSearchState,
   searchSectionBody,
@@ -51,6 +51,25 @@ function pushList(panel: vscode.WebviewPanel): void {
 async function pushSearch(panel: vscode.WebviewPanel): Promise<void> {
   const state = await buildSearchState();
   panel.webview.postMessage({ type: "searchState", state });
+}
+
+let _indexPoll: ReturnType<typeof setInterval> | undefined;
+function pollSearchWhileIndexing(panel: vscode.WebviewPanel): void {
+  if (_indexPoll) return;
+  _indexPoll = setInterval(async () => {
+    const state = await buildSearchState();
+    panel.webview.postMessage({ type: "searchState", state });
+    if (state.index.status !== "indexing" && state.index.status !== "stopping") {
+      clearInterval(_indexPoll);
+      _indexPoll = undefined;
+    }
+  }, 1500);
+  panel.onDidDispose(() => {
+    if (_indexPoll) {
+      clearInterval(_indexPoll);
+      _indexPoll = undefined;
+    }
+  });
 }
 
 export function openSettingsPanel(): vscode.WebviewPanel {
@@ -112,6 +131,35 @@ export function openSettingsPanel(): vscode.WebviewPanel {
         } catch (err) {
           const m = err instanceof Error ? err.message : String(err);
           vscode.window.showErrorMessage(`Search: ${m}`);
+        }
+        await pushSearch(panel);
+        return;
+      }
+
+      case "indexStart": {
+        const ok = await vscode.window.showWarningMessage(
+          "เริ่ม index embeddings ตอนนี้? งานนี้กิน CPU หนักและใช้เวลาสักพัก (หยุดได้ด้วยปุ่ม Stop).",
+          { modal: true },
+          "Index now",
+        );
+        if (ok !== "Index now") return;
+        try {
+          await startIndex();
+          await pushSearch(panel);
+          pollSearchWhileIndexing(panel);
+        } catch (err) {
+          const m = err instanceof Error ? err.message : String(err);
+          vscode.window.showErrorMessage(`Index: ${m}`);
+        }
+        return;
+      }
+
+      case "indexStop": {
+        try {
+          await stopIndex();
+        } catch (err) {
+          const m = err instanceof Error ? err.message : String(err);
+          vscode.window.showErrorMessage(`Index: ${m}`);
         }
         await pushSearch(panel);
         return;
