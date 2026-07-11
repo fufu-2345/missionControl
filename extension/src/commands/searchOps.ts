@@ -52,3 +52,111 @@ export function writeIntent(patch: Partial<SearchIntent>): SearchIntent {
 export function deriveEnabled(intent: SearchIntent): boolean {
   return intent.hybridEnabled && intent.mode === "vector";
 }
+
+export type ModelStatus = "ready" | "not-installed" | "not-indexed" | "unknown";
+
+export type SearchModelView = {
+  key: string;
+  label: string;
+  status: ModelStatus;
+  reason: string;
+  primary: boolean;
+};
+
+export type SearchViewModel = {
+  oracleOnline: boolean;
+  hybridEnabled: boolean;
+  mode: SearchMode;
+  models: SearchModelView[];
+  selectedModel: string;
+  readiness: { ready: boolean; reason: string; action: string };
+  docs: number;
+  index: { status: string; current: number; total: number; eta: number };
+  envOverrideNote: string;
+  modelPath: string;
+};
+
+// Loose shapes for the oracle payloads (we read defensively).
+export type OracleColState = { key?: string; ready?: boolean; reason?: string };
+export type OracleConfigPayload = {
+  enabled?: boolean;
+  state?: { ready?: boolean; primary?: string; reason?: string; recommendedAction?: string | null; collections?: Record<string, OracleColState> };
+  config?: { collections?: Record<string, { primary?: boolean }> };
+};
+export type OracleHealthPayload = { vectorMode?: string; vectorDisabledReason?: string };
+
+/** The two embedding models the UI exposes. bge-m3 first = default/primary. */
+export const UI_MODELS: { key: string; label: string }[] = [
+  { key: "bge-m3", label: "BGE-M3" },
+  { key: "nomic", label: "nomic" },
+];
+
+function statusFromCol(col: OracleColState | undefined): ModelStatus {
+  if (!col) return "unknown";
+  if (col.ready === true) return "ready";
+  const r = (col.reason || "").toLowerCase();
+  if (r.includes("install") || r.includes("model") || r.includes("pull")) return "not-installed";
+  if (r.includes("index")) return "not-indexed";
+  return "unknown";
+}
+
+export function reconcile(input: {
+  online: boolean;
+  config: OracleConfigPayload | null;
+  health: OracleHealthPayload | null;
+  docs: number;
+  index: SearchViewModel["index"];
+  intent: SearchIntent;
+}): SearchViewModel {
+  const { online, config, health, docs, index, intent } = input;
+  const enabled = config?.enabled === true;
+  const state = config?.state || {};
+  const cols = state.collections || {};
+  const primary = state.primary || "bge-m3";
+
+  // Display hybrid/mode: enabled=true is authoritative (ON+Vector). enabled=false
+  // is ambiguous (OFF vs ON+Graph) → disambiguate from stored intent.
+  let hybridEnabled: boolean;
+  let mode: SearchMode;
+  if (enabled) {
+    hybridEnabled = true;
+    mode = "vector";
+  } else if (intent.hybridEnabled && intent.mode === "graph") {
+    hybridEnabled = true;
+    mode = "graph";
+  } else {
+    hybridEnabled = false;
+    mode = intent.mode;
+  }
+
+  const models: SearchModelView[] = UI_MODELS.map((m) => ({
+    key: m.key,
+    label: m.label,
+    status: statusFromCol(cols[m.key]),
+    reason: cols[m.key]?.reason || "",
+    primary: m.key === primary,
+  }));
+
+  const runtimeOn = !!health && health.vectorMode !== "disabled" && !!health.vectorMode;
+  const envOverrideNote =
+    online && !enabled && runtimeOn
+      ? "หมายเหตุ: runtime ของ oracle เปิด vector อยู่ (อาจตั้ง ORACLE_VECTOR_ENABLED) — ต่างจากสวิตช์ที่เห็น"
+      : "";
+
+  return {
+    oracleOnline: online,
+    hybridEnabled,
+    mode,
+    models,
+    selectedModel: primary,
+    readiness: {
+      ready: state.ready === true,
+      reason: state.reason || "",
+      action: state.recommendedAction || "",
+    },
+    docs,
+    index,
+    envOverrideNote,
+    modelPath: intent.modelPath,
+  };
+}

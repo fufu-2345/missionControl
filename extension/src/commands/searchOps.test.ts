@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
-import { deriveEnabled, readIntent, writeIntent } from "./searchOps";
+import { deriveEnabled, readIntent, writeIntent, reconcile, UI_MODELS } from "./searchOps";
 import { readConfig } from "./settingsOps";
 
 let tmp: string;
@@ -64,5 +64,72 @@ describe("deriveEnabled", () => {
     expect(deriveEnabled({ hybridEnabled: false, mode: "vector", modelPath: "" })).toBe(false);
     expect(deriveEnabled({ hybridEnabled: true, mode: "vector", modelPath: "" })).toBe(true);
     expect(deriveEnabled({ hybridEnabled: true, mode: "graph", modelPath: "" })).toBe(false);
+  });
+});
+
+const IDLE_INDEX = { status: "idle", current: 0, total: 0, eta: 0 };
+
+function cfg(enabled: boolean, primary: string, colReady: Record<string, { ready: boolean; reason?: string }>) {
+  const collections: Record<string, unknown> = {};
+  for (const key of Object.keys(colReady)) {
+    collections[key] = { key, ready: colReady[key].ready, reason: colReady[key].reason || "", adapter: "lancedb", model: key, provider: "ollama" };
+  }
+  return {
+    source: "file",
+    enabled,
+    engine: "lancedb",
+    state: { enabled, ready: colReady[primary]?.ready ?? false, primary, reason: colReady[primary]?.reason || "", recommendedAction: null, collections },
+    options: { localEngines: ["lancedb"], embeddingProviders: ["ollama"] },
+    config: { collections: { "bge-m3": { primary: primary === "bge-m3" }, nomic: { primary: primary === "nomic" }, qwen3: {} } },
+  };
+}
+
+describe("reconcile", () => {
+  const intentOff = { hybridEnabled: false, mode: "vector" as const, modelPath: "" };
+  const intentGraph = { hybridEnabled: true, mode: "graph" as const, modelPath: "" };
+
+  test("offline → banner, controls flagged offline", () => {
+    const vm = reconcile({ online: false, config: null, health: null, docs: 0, index: IDLE_INDEX, intent: intentOff });
+    expect(vm.oracleOnline).toBe(false);
+  });
+
+  test("enabled=true → shows ON + Vector regardless of stored mode", () => {
+    const c = cfg(true, "bge-m3", { "bge-m3": { ready: true }, nomic: { ready: true } });
+    const vm = reconcile({ online: true, config: c, health: { vectorMode: "embedded" }, docs: 482, index: IDLE_INDEX, intent: intentGraph });
+    expect(vm.hybridEnabled).toBe(true);
+    expect(vm.mode).toBe("vector");
+    expect(vm.docs).toBe(482);
+    expect(vm.selectedModel).toBe("bge-m3");
+  });
+
+  test("enabled=false + intent graph → ON + Graph", () => {
+    const c = cfg(false, "bge-m3", { "bge-m3": { ready: false, reason: "not installed" }, nomic: { ready: true } });
+    const vm = reconcile({ online: true, config: c, health: { vectorMode: "disabled" }, docs: 0, index: IDLE_INDEX, intent: intentGraph });
+    expect(vm.hybridEnabled).toBe(true);
+    expect(vm.mode).toBe("graph");
+  });
+
+  test("enabled=false + intent off → OFF", () => {
+    const c = cfg(false, "bge-m3", { "bge-m3": { ready: false }, nomic: { ready: true } });
+    const vm = reconcile({ online: true, config: c, health: { vectorMode: "disabled" }, docs: 0, index: IDLE_INDEX, intent: intentOff });
+    expect(vm.hybridEnabled).toBe(false);
+  });
+
+  test("exposes only bge-m3 + nomic, maps status from reason", () => {
+    const c = cfg(true, "bge-m3", { "bge-m3": { ready: false, reason: "bge-m3 not installed in ollama" }, nomic: { ready: true } });
+    const vm = reconcile({ online: true, config: c, health: { vectorMode: "embedded" }, docs: 0, index: IDLE_INDEX, intent: intentOff });
+    expect(vm.models.map((m) => m.key).sort()).toEqual(["bge-m3", "nomic"]);
+    expect(vm.models.find((m) => m.key === "bge-m3")?.status).toBe("not-installed");
+    expect(vm.models.find((m) => m.key === "nomic")?.status).toBe("ready");
+  });
+
+  test("env override note when runtime enabled but config disabled", () => {
+    const c = cfg(false, "bge-m3", { "bge-m3": { ready: true }, nomic: { ready: true } });
+    const vm = reconcile({ online: true, config: c, health: { vectorMode: "embedded" }, docs: 0, index: IDLE_INDEX, intent: intentOff });
+    expect(vm.envOverrideNote.length).toBeGreaterThan(0);
+  });
+
+  test("UI_MODELS is exactly the two exposed models", () => {
+    expect(UI_MODELS.map((m) => m.key)).toEqual(["bge-m3", "nomic"]);
   });
 });
