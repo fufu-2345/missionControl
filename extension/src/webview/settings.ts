@@ -8,6 +8,7 @@ import {
 } from "../commands/settingsOps";
 import { deriveEnabled, readIntent, writeIntent } from "../commands/searchOps";
 import { patchConfig, startIndex, stopIndex } from "../commands/oracleVectorClient";
+import { pullModel } from "../commands/ollamaPull";
 import {
   buildSearchState,
   searchSectionBody,
@@ -158,6 +159,39 @@ export function openSettingsPanel(): vscode.WebviewPanel {
         } catch (err) {
           const m = err instanceof Error ? err.message : String(err);
           vscode.window.showErrorMessage(`Index: ${m}`);
+        }
+        await pushSearch(panel);
+        return;
+      }
+
+      case "installModel": {
+        if (typeof msg.model !== "string") return;
+        const model = msg.model;
+        const ok = await vscode.window.showWarningMessage(
+          `ดาวน์โหลดโมเดล ${model} ผ่าน ollama? ไฟล์อาจใหญ่หลาย GB.`,
+          { modal: true },
+          "Install",
+        );
+        if (ok !== "Install") return;
+        await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title: `ollama pull ${model}`, cancellable: false },
+          async (progress) => {
+            const code = await pullModel(model, (line) => progress.report({ message: line }));
+            if (code !== 0) vscode.window.showErrorMessage(`ollama pull ${model} ล้มเหลว (exit ${code})`);
+          },
+        );
+        await pushSearch(panel);
+        return;
+      }
+
+      case "chooseModelFile": {
+        const picked = await vscode.window.showOpenDialog({
+          canSelectMany: false,
+          openLabel: "ใช้ไฟล์นี้เป็น model",
+          title: "เลือกไฟล์ model (เผื่อโหลดไว้แล้วแต่ระบบไม่รู้ path)",
+        });
+        if (picked && picked[0]) {
+          writeIntent({ modelPath: picked[0].fsPath });
         }
         await pushSearch(panel);
         return;
