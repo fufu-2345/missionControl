@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
-import { deriveEnabled, readIntent, writeIntent, reconcile, UI_MODELS } from "./searchOps";
+import { deriveEnabled, readIntent, writeIntent, reconcile, UI_MODELS, modelPrimaryCollections } from "./searchOps";
 import { readConfig } from "./settingsOps";
 
 let tmp: string;
@@ -138,5 +138,27 @@ describe("reconcile", () => {
     const vm = reconcile({ online: true, config: c, health: { vectorMode: "embedded" }, docs: 0, index: IDLE_INDEX, intent: intentOff });
     expect(vm.selectedModel).toBe("bge-m3");
     expect(vm.models.filter((m) => m.primary).map((m) => m.key)).toEqual(["bge-m3"]);
+  });
+});
+
+describe("modelPrimaryCollections", () => {
+  // The oracle keeps the FIRST of multiple primaries, so a switch must set the
+  // chosen model true AND the others false (verified against a live oracle:
+  // {nomic:{primary:true}} alone left primary=bge-m3).
+  test("sets chosen primary=true and every other exposed model primary=false", () => {
+    expect(modelPrimaryCollections("nomic")).toEqual({
+      "bge-m3": { primary: false },
+      nomic: { primary: true },
+    });
+    expect(modelPrimaryCollections("bge-m3")).toEqual({
+      "bge-m3": { primary: true },
+      nomic: { primary: false },
+    });
+  });
+
+  test("covers exactly the exposed UI models", () => {
+    expect(Object.keys(modelPrimaryCollections("nomic")).sort()).toEqual(
+      UI_MODELS.map((m) => m.key).sort(),
+    );
   });
 });

@@ -6,7 +6,7 @@ import {
   setSetting,
   type SettingEntry,
 } from "../commands/settingsOps";
-import { deriveEnabled, writeIntent } from "../commands/searchOps";
+import { deriveEnabled, writeIntent, modelPrimaryCollections } from "../commands/searchOps";
 import { patchConfig, startIndex, stopIndex } from "../commands/oracleVectorClient";
 import { pullModel } from "../commands/ollamaPull";
 import {
@@ -125,7 +125,9 @@ export function openSettingsPanel(): vscode.WebviewPanel {
             );
             await patchConfig({ enabled: deriveEnabled(intent) });
           } else if (msg.field === "model" && typeof msg.value === "string") {
-            await patchConfig({ collections: { [msg.value]: { primary: true } } });
+            // Set the chosen model primary AND unset the others — the oracle keeps
+            // the first of multiple primaries, so a lone {primary:true} won't switch.
+            await patchConfig({ collections: modelPrimaryCollections(msg.value) });
           }
         } catch (err) {
           const m = err instanceof Error ? err.message : String(err);

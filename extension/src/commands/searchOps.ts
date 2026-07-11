@@ -91,6 +91,18 @@ export const UI_MODELS: { key: string; label: string }[] = [
   { key: "nomic", label: "nomic" },
 ];
 
+/** Build the PATCH `collections` body to make `chosen` the primary model.
+ *  The oracle keeps the FIRST of multiple primaries, so setting only the chosen
+ *  model's primary=true leaves the old default (bge-m3) winning — we must set
+ *  primary=false on the others too. Every exposed model gets an explicit flag. */
+export function modelPrimaryCollections(
+  chosen: string,
+): Record<string, { primary: boolean }> {
+  const out: Record<string, { primary: boolean }> = {};
+  for (const m of UI_MODELS) out[m.key] = { primary: m.key === chosen };
+  return out;
+}
+
 function statusFromCol(col: OracleColState | undefined): ModelStatus {
   if (!col) return "unknown";
   if (col.ready === true) return "ready";
