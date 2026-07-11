@@ -64,12 +64,6 @@ function pollSearchWhileIndexing(panel: vscode.WebviewPanel): void {
       _indexPoll = undefined;
     }
   }, 1500);
-  panel.onDidDispose(() => {
-    if (_indexPoll) {
-      clearInterval(_indexPoll);
-      _indexPoll = undefined;
-    }
-  });
 }
 
 export function openSettingsPanel(): vscode.WebviewPanel {
@@ -86,6 +80,10 @@ export function openSettingsPanel(): vscode.WebviewPanel {
   _panel = panel;
   panel.onDidDispose(() => {
     _panel = undefined;
+    if (_indexPoll) {
+      clearInterval(_indexPoll);
+      _indexPoll = undefined;
+    }
   });
 
   panel.webview.html = renderShell();
@@ -145,12 +143,12 @@ export function openSettingsPanel(): vscode.WebviewPanel {
         if (ok !== "Index now") return;
         try {
           await startIndex();
-          await pushSearch(panel);
           pollSearchWhileIndexing(panel);
         } catch (err) {
           const m = err instanceof Error ? err.message : String(err);
           vscode.window.showErrorMessage(`Index: ${m}`);
         }
+        await pushSearch(panel);
         return;
       }
 
