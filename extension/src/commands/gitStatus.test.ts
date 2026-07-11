@@ -67,8 +67,8 @@ test("dirty wins over behind (commit before pull)", () => {
   expect(r.kind).toBe("commit");
 });
 
-test("not a repo → init (offer git init)", () => {
+test("not a repo → Create & Push (single button folds in git-init)", () => {
   const r = parseGitButtonState({ ...clean, isRepo: false });
-  expect(r.kind).toBe("init");
-  expect(r.label).toBe("Git init");
+  expect(r.kind).toBe("create-push");
+  expect(r.label).toBe("Create & Push");
 });

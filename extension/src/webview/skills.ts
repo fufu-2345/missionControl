@@ -8,9 +8,11 @@ import * as vscode from "vscode";
 // Frontend-only build: skills are read straight off disk from
 // ~/.claude/skills/<name>/SKILL.md — no backend involved. Each skill is a
 // directory containing a SKILL.md whose YAML frontmatter carries `name` and
-// `description`. The panel shows them as an accordion grouped by category:
-// each category is a full-width bar, collapsed by default; clicking it reveals
-// a 4-column grid of its skills (paginated 50 at a time).
+// `description`. The panel shows them as an accordion with just two buckets —
+// "system" (every non-uploaded skill, whatever [tag] it self-declares) and
+// "uploaded" (dropped in via the uploader). Each bucket is a full-width bar,
+// collapsed by default; clicking it reveals a 4-column grid of its skills
+// (paginated 50 at a time). A card's real [tag] still shows on hover.
 const SKILLS_DIR = path.join(os.homedir(), ".claude", "skills");
 // Skills added through the panel's uploader get this empty marker file so
 // listSkills can force them into the synthetic "uploaded" category regardless
@@ -21,7 +23,12 @@ const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 export type SkillSummary = {
   name: string;
   description: string;
+  /** The skill's own [tag] (core/standard/lab/zombie…), or null when untagged.
+   *  Shown verbatim on the hover chip. Uploaded skills report "uploaded". */
   category: string | null;
+  /** Accordion bucket — the panel groups by THIS, not `category`. Uploaded
+   *  skills are "uploaded"; every other skill collapses into "system". */
+  group: "system" | "uploaded";
   path: string;
   /** True when dropped in via the uploader (has UPLOAD_MARKER). Only these
    *  get an on/off toggle; system skills are always active. */
@@ -150,7 +157,10 @@ export function listSkills(): SkillSummary[] {
     out.push({
       name: meta.name || e.name,
       description: text || rawDesc,
+      // `category` keeps the real [tag] for the hover chip; `group` is the
+      // 2-bucket accordion key (everything non-uploaded collapses to "system").
       category: uploaded ? "uploaded" : category,
+      group: uploaded ? "uploaded" : "system",
       path: skillPath,
       uploaded,
       enabled,
@@ -537,11 +547,14 @@ function renderShell(): string {
   const expanded = {};   // category -> is it open
   const pageByCat = {};  // category -> current 1-based page
 
-  // Category ordering + colors. Unknown categories fall through to "other".
-  const ORDER = ['core', 'standard', 'lab', 'zombie', 'uploaded'];
+  // The accordion has exactly two buckets (system + uploaded); ORDER drives the
+  // section bars. The per-tag colors below are still used by the hover chip,
+  // which shows each skill's real [tag] even though the bars collapse it.
+  const ORDER = ['system', 'uploaded'];
   const COLORS = {
+    system: '#4ea1ff', uploaded: '#f778ba',
     core: '#4ea1ff', standard: '#3fb950', lab: '#bc8cff',
-    zombie: '#f0883e', uploaded: '#f778ba', other: '#8b949e',
+    zombie: '#f0883e', other: '#8b949e',
   };
   function color(cat) { return COLORS[cat] || '#8b949e'; }
 
@@ -560,12 +573,12 @@ function renderShell(): string {
       sroot.innerHTML = '<div class="empty">No skills found in ~/.claude/skills/.</div>';
       return;
     }
-    // Bucket by category.
+    // Bucket into the two accordion groups (system / uploaded).
     const map = {};
-    for (const s of list) { const k = s.category || 'other'; (map[k] = map[k] || []).push(s); }
+    for (const s of list) { const k = s.group || 'system'; (map[k] = map[k] || []).push(s); }
     const known = ORDER.filter(k => map[k]);
-    const extras = Object.keys(map).filter(k => ORDER.indexOf(k) < 0 && k !== 'other').sort();
-    const cats = known.concat(extras, map['other'] ? ['other'] : []);
+    const extras = Object.keys(map).filter(k => ORDER.indexOf(k) < 0).sort();
+    const cats = known.concat(extras);
     sroot.innerHTML = cats.map(cat => section(cat, map[cat])).join('');
     wire(sroot);
   }

@@ -120,12 +120,29 @@ export async function pushRepo(dir: string, hasUpstream: boolean): Promise<RunRe
 }
 
 /** Create a GitHub repo from this local repo and push (external — caller
- *  confirms first). Uses gh; requires gh auth. */
-export function createAndPush(
+ *  confirms first). Uses gh; requires gh auth.
+ *
+ *  The single "Create & Push" button folds in the old "Git init" step, so this
+ *  may be handed a bare folder OR a repo with no commit yet. `gh repo create
+ *  --push` needs a branch to push, so ensure a local repo with ≥1 commit first:
+ *  `git init` if not a repo, then an initial commit if HEAD is still unborn.
+ *  (orches projects arrive already inited + committed → both checks are no-ops.) */
+export async function createAndPush(
   dir: string,
   repoName: string,
   isPrivate: boolean,
 ): Promise<RunResult> {
+  const status = await readGitStatus(dir);
+  if (!status.isRepo) {
+    const init = await gitInit(dir);
+    if (!init.ok) return init;
+  }
+  // Unborn HEAD (fresh init, or a repo that never committed) → stage + commit.
+  const head = await git(dir, ["rev-parse", "--verify", "HEAD"]);
+  if (!head.ok) {
+    const commit = await commitAll(dir, "Initial commit");
+    if (!commit.ok) return commit;
+  }
   return run(
     "gh",
     [

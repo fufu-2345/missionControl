@@ -81,6 +81,10 @@
         "title": "Mission Control: Accounts"
       },
       {
+        "command": "missioncontrol.settings",
+        "title": "Mission Control: Settings"
+      },
+      {
         "command": "missioncontrol.dashboard",
         "title": "Mission Control: Open Dashboard"
       },

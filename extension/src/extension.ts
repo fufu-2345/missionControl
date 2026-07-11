@@ -7,6 +7,7 @@ import { claudeCommand } from "./commands/claude";
 import { dashboardCommand } from "./commands/dashboard";
 import { installCommand } from "./commands/install";
 import { mawToggleCommand } from "./commands/mawServe";
+import { settingsCommand } from "./commands/settingsPanel";
 import { setupCommand } from "./commands/setup";
 import { skillsCommand } from "./commands/skills";
 import { teamsCommand } from "./commands/teamsPanel";
@@ -40,6 +41,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("missioncontrol.skills", () => skillsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.teams", () => teamsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.accounts", () => accountsCommand(context)),
+    vscode.commands.registerCommand("missioncontrol.settings", () => settingsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.dashboard", () => dashboardCommand(context)),
     vscode.commands.registerCommand("missioncontrol.claude", () => claudeCommand(context)),
     vscode.commands.registerCommand("missioncontrol.mawToggle", () => mawToggleCommand(context)),

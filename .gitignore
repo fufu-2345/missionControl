@@ -48,3 +48,4 @@ agents/
 
 # orchestrator resume marker (machine-local, changes every run)
 .orches-meta.json
+.orches-mode

@@ -17,6 +17,7 @@ export interface UsageSummary {
   total: Bucket;
   byDay: Record<string, Bucket>; // key "YYYY-MM-DD" in LOCAL time (matches the user's clock)
   byProject: Record<string, Bucket>; // key = cwd
+  projectLastMs: Record<string, number>; // key = cwd -> latest touched session mtime (ms)
   fileCount: number;
   computedAt: number;
 }
@@ -141,6 +142,39 @@ async function saveFileCache(currentFiles: string[]): Promise<void> {
   }
 }
 
+// Persist the COMPUTED SUMMARY too (not just per-file aggregates), so the UI can
+// paint last-known totals INSTANTLY on open — even on the very first open after
+// a reload, before any scan runs. A cold parse of 450MB is CPU-bound (~5s) and
+// must not block the popup; getInstantUsage() serves this snapshot and kicks a
+// background refresh. Same version gate as the file cache.
+const SUMMARY_FILE = path.join(os.homedir(), ".cache", "mission-control", "usage-summary.json");
+let summaryHydrated = false;
+
+async function hydrateSummary(): Promise<void> {
+  if (summaryHydrated) return;
+  summaryHydrated = true;
+  if (summaryCache) return; // a scan already produced one this process
+  try {
+    const raw = await fs.promises.readFile(SUMMARY_FILE, "utf8");
+    const obj = JSON.parse(raw) as { v?: number; summary?: UsageSummary };
+    if (obj?.v === CACHE_VERSION && obj.summary) {
+      summaryCache = obj.summary;
+      summaryAt = obj.summary.computedAt || 0; // real age → staleness triggers a refresh
+    }
+  } catch {
+    // no persisted summary yet — first open will have to await a cold scan
+  }
+}
+
+async function saveSummary(s: UsageSummary): Promise<void> {
+  try {
+    await fs.promises.mkdir(path.dirname(SUMMARY_FILE), { recursive: true });
+    await fs.promises.writeFile(SUMMARY_FILE, JSON.stringify({ v: CACHE_VERSION, summary: s }));
+  } catch {
+    // best-effort
+  }
+}
+
 function projectsDir(): string {
   const base = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
   return path.join(base, "projects");
@@ -242,39 +276,117 @@ async function aggregateFile(file: string): Promise<FileAgg | null> {
   return agg;
 }
 
+// ── Provider sources ─────────────────────────────────────────────────────────
+// A "usage source" is one CLI's local transcript store. The scan machinery
+// (concurrency, per-file cache, recency, day/week/month buckets) is fully
+// provider-agnostic, so ALL a new provider needs is: where its files live +
+// how to turn one file into a FileAgg (its own token/pricing math). Its spend
+// then just sums into the SAME grand total — giving the "all accounts, all
+// providers, one number" the budget page shows.
+interface UsageSource {
+  id: string; // "claude", "codex", "gemini"
+  root(): string; // dir scanned recursively for *.jsonl; skipped if it doesn't exist
+  aggregate(file: string): Promise<FileAgg | null>; // parse one file (own pricing)
+}
+
+// Wired sources today: Claude Code only. To add a provider LATER:
+//   1. write aggregate<Provider>File() (parse its log lines + its pricing),
+//   2. push { id, root, aggregate } here,
+//   3. remove its entry from UNWIRED_PROVIDER_HINTS below.
+// Example (uncomment + implement when Codex/Gemini transcripts are available):
+//   { id: "codex",  root: () => path.join(os.homedir(), ".codex", "sessions"), aggregate: aggregateCodexFile },
+//   { id: "gemini", root: () => path.join(os.homedir(), ".gemini", "tmp"),      aggregate: aggregateGeminiFile },
+const SOURCES: UsageSource[] = [{ id: "claude", root: projectsDir, aggregate: aggregateFile }];
+
+// Providers we can DETECT but don't parse yet — so the UI can nudge the user to
+// wire them in once they start using one (their spend isn't in the total until
+// then). Drop an entry when its source is added to SOURCES above.
+const UNWIRED_PROVIDER_HINTS: { name: string; marker: string }[] = [
+  { name: "Codex (OpenAI)", marker: path.join(os.homedir(), ".codex") },
+  { name: "Gemini", marker: path.join(os.homedir(), ".gemini") },
+];
+
+/** Names of providers present on disk whose usage is NOT yet summed into the
+ *  total — the budget UI surfaces this as a reminder. */
+export function unwiredProviders(): string[] {
+  return UNWIRED_PROVIDER_HINTS.filter((p) => {
+    try {
+      return fs.existsSync(p.marker);
+    } catch {
+      return false;
+    }
+  }).map((p) => p.name);
+}
+
 async function scan(): Promise<UsageSummary> {
-  const files: string[] = [];
-  await collectJsonl(projectsDir(), files);
+  // Gather files from every AVAILABLE source, tagging each with its parser.
+  const items: { file: string; src: UsageSource }[] = [];
+  for (const src of SOURCES) {
+    const found: string[] = [];
+    await collectJsonl(src.root(), found); // missing dir → yields nothing
+    for (const f of found) items.push({ file: f, src });
+  }
   await hydrateFileCache(); // reuse last run's per-file aggregates across reloads
   const total: Bucket = { cost: 0, tokens: 0 };
   const byDay: Record<string, Bucket> = {};
   const byProject: Record<string, Bucket> = {};
-  for (const file of files) {
-    let st: fs.Stats;
-    try {
-      st = await fs.promises.stat(file);
-    } catch {
-      continue;
-    }
-    let agg = fileCache.get(file);
-    if (!agg || agg.mtimeMs !== st.mtimeMs || agg.size !== st.size) {
-      const fresh = await aggregateFile(file);
-      if (!fresh) continue; // transient read failure — retry next scan, don't cache $0
-      agg = fresh;
-      agg.mtimeMs = st.mtimeMs;
-      agg.size = st.size;
-      fileCache.set(file, agg);
-    }
-    total.cost += agg.cost;
-    total.tokens += agg.tokens;
-    for (const k of Object.keys(agg.byDay)) bump(byDay, k, agg.byDay[k].cost, agg.byDay[k].tokens);
-    for (const k of Object.keys(agg.byProject)) {
-      bump(byProject, k, agg.byProject[k].cost, agg.byProject[k].tokens);
+  const projectLastMs: Record<string, number> = {};
+
+  // Read/parse transcripts CONCURRENTLY (bounded) — they're independent, and a
+  // cold scan is otherwise I/O-bound on 1000+ serial reads (the old `for await`
+  // loop took ~6s cold). A shared index feeds a fixed pool of workers; the
+  // per-file aggregates are merged serially afterwards (cheap, no map races).
+  const CONCURRENCY = 48;
+  const parsed: ({ agg: FileAgg; mtimeMs: number } | null)[] = new Array(items.length).fill(null);
+  let next = 0;
+  async function worker(): Promise<void> {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      // Yield to the event loop each file. JSON.parse of a transcript is
+      // SYNCHRONOUS CPU work that doesn't yield on its own; without this, a cold
+      // scan saturates the extension host for ~5s and blocks it from sending the
+      // "open QuickPick"/repaint IPC — so the budget popup appears to hang even
+      // though its data is already cached. setImmediate lets pending IPC/timer
+      // callbacks run between files, keeping the UI responsive during the scan.
+      await new Promise<void>((r) => setImmediate(r));
+      const { file, src } = items[i];
+      let st: fs.Stats;
+      try {
+        st = await fs.promises.stat(file);
+      } catch {
+        continue;
+      }
+      let agg = fileCache.get(file);
+      if (!agg || agg.mtimeMs !== st.mtimeMs || agg.size !== st.size) {
+        const fresh = await src.aggregate(file);
+        if (!fresh) continue; // transient read failure — retry next scan, don't cache $0
+        fresh.mtimeMs = st.mtimeMs;
+        fresh.size = st.size;
+        fileCache.set(file, fresh);
+        agg = fresh;
+      }
+      parsed[i] = { agg, mtimeMs: st.mtimeMs };
     }
   }
-  summaryCache = { total, byDay, byProject, fileCount: files.length, computedAt: Date.now() };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, items.length || 1) }, worker));
+
+  for (const r of parsed) {
+    if (!r) continue;
+    total.cost += r.agg.cost;
+    total.tokens += r.agg.tokens;
+    for (const k of Object.keys(r.agg.byDay)) bump(byDay, k, r.agg.byDay[k].cost, r.agg.byDay[k].tokens);
+    for (const k of Object.keys(r.agg.byProject)) {
+      bump(byProject, k, r.agg.byProject[k].cost, r.agg.byProject[k].tokens);
+      // "recency" = newest session file that touched this project.
+      if (r.mtimeMs > (projectLastMs[k] ?? 0)) projectLastMs[k] = r.mtimeMs;
+    }
+  }
+  const files = items.map((x) => x.file);
+  summaryCache = { total, byDay, byProject, projectLastMs, fileCount: files.length, computedAt: Date.now() };
   summaryAt = summaryCache.computedAt;
   void saveFileCache(files); // persist for the next reload (fire-and-forget)
+  void saveSummary(summaryCache); // persist totals for instant paint next open
   return summaryCache;
 }
 
@@ -291,6 +403,28 @@ export function computeUsage(force = false): Promise<UsageSummary> {
     inFlight = null;
   });
   return inFlight;
+}
+
+/** INSTANT usage for the UI: returns the last-known snapshot (in-memory, else the
+ *  persisted one from a previous session) WITHOUT waiting for a scan, and kicks a
+ *  background refresh when it's stale. Returns null only when nothing has ever
+ *  been computed (very first run) — callers then fall back to computeUsage(). */
+export async function getInstantUsage(): Promise<UsageSummary | null> {
+  await hydrateSummary();
+  if (!summaryCache) return null;
+  // Defer the stale-revalidate scan to the next tick so the caller can finish
+  // painting (send the "open popup"/repaint IPC) BEFORE the scan starts using
+  // the CPU — otherwise the very open we're trying to speed up waits on it.
+  if (Date.now() - summaryAt >= SUMMARY_TTL) {
+    setTimeout(() => void computeUsage(true).catch(() => {}), 0);
+  }
+  return summaryCache;
+}
+
+/** Force a fresh scan (for an explicit refresh button). Resolves with the new
+ *  snapshot; callers repaint from it. */
+export function refreshUsage(): Promise<UsageSummary> {
+  return computeUsage(true);
 }
 
 /** Sum spend for every day key whose string starts with `prefix` ("YYYY-MM" for

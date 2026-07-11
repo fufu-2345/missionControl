@@ -1,0 +1,248 @@
+import * as vscode from "vscode";
+
+import {
+  configPath,
+  listSettings,
+  setSetting,
+  type SettingEntry,
+} from "../commands/settingsOps";
+
+// Editor-area Settings page. Singleton panel + a display-ready postMessage + a
+// small message switch — mirrors accounts.ts / teams.ts. All fs lives in
+// settingsOps (node-only, tested); this file only bridges it to the webview and
+// does the display grouping.
+let _panel: vscode.WebviewPanel | undefined;
+
+// Group render order — anything not listed falls to the end.
+const GROUP_ORDER = ["Orchestration", "Build", "Other"];
+
+function grouped(entries: SettingEntry[]): { group: string; fields: SettingEntry[] }[] {
+  const byGroup = new Map<string, SettingEntry[]>();
+  for (const e of entries) {
+    const g = byGroup.get(e.group) ?? [];
+    g.push(e);
+    byGroup.set(e.group, g);
+  }
+  const order = (g: string) => {
+    const i = GROUP_ORDER.indexOf(g);
+    return i === -1 ? GROUP_ORDER.length : i;
+  };
+  return [...byGroup.keys()]
+    .sort((a, b) => order(a) - order(b))
+    .map((group) => ({ group, fields: byGroup.get(group) as SettingEntry[] }));
+}
+
+function pushList(panel: vscode.WebviewPanel): void {
+  panel.webview.postMessage({
+    type: "settings",
+    groups: grouped(listSettings()),
+    path: configPath(),
+  });
+}
+
+export function openSettingsPanel(): vscode.WebviewPanel {
+  if (_panel) {
+    _panel.reveal();
+    return _panel;
+  }
+  const panel = vscode.window.createWebviewPanel(
+    "missioncontrol.settings",
+    "Mission Control — Settings",
+    vscode.ViewColumn.One,
+    { enableScripts: true, retainContextWhenHidden: true },
+  );
+  _panel = panel;
+  panel.onDidDispose(() => {
+    _panel = undefined;
+  });
+
+  panel.webview.html = renderShell();
+
+  panel.webview.onDidReceiveMessage(async (msg) => {
+    if (!msg || typeof msg.type !== "string") return;
+
+    switch (msg.type) {
+      case "ready":
+      case "reload":
+        pushList(panel);
+        return;
+
+      case "set": {
+        if (typeof msg.key !== "string") return;
+        try {
+          setSetting(msg.key, msg.value as string | number | boolean);
+        } catch (err) {
+          const m = err instanceof Error ? err.message : String(err);
+          vscode.window.showErrorMessage(`Settings: ${m}`);
+        }
+        pushList(panel); // always re-push so the UI reflects on-disk truth
+        return;
+      }
+    }
+  });
+
+  return panel;
+}
+
+// NOTE: the inline <script> below lives inside this template literal. Keep it
+// FREE of backslashes and backticks — both are processed when the literal is
+// evaluated and would silently corrupt the client script (a known foot-gun in
+// this codebase, see accounts.ts). The regexes here contain no backslashes.
+function renderShell(): string {
+  return `<!DOCTYPE html><html lang="th"><head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: var(--vscode-font-family);
+    color: var(--vscode-foreground);
+    background: var(--vscode-editor-background);
+    padding: 20px 22px; margin: 0;
+  }
+  h1 { font-size: 19px; font-weight: 700; margin: 0 0 4px; }
+  .lead { font-size: 12px; opacity: 0.7; margin-bottom: 4px; }
+  .path { font-size: 11px; opacity: 0.5; margin-bottom: 22px; font-family: var(--vscode-editor-font-family, monospace); }
+  .grp { margin-bottom: 26px; max-width: 820px; }
+  .grp h2 { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; opacity: 0.6; margin: 0 0 10px; }
+  .rows { display: flex; flex-direction: column; gap: 8px; }
+  .row {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 18px;
+    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); border-radius: 8px;
+    padding: 12px 14px; background: var(--vscode-list-hoverBackground, rgba(128,128,128,0.06));
+  }
+  .ri { min-width: 0; }
+  .rl { font-size: 14px; font-weight: 600; }
+  .rl .badge {
+    font-size: 9.5px; font-weight: 700; letter-spacing: 0.5px; padding: 1px 6px; border-radius: 4px; margin-left: 8px;
+    vertical-align: middle; background: var(--vscode-charts-orange, #d18616); color: #1a1a1a;
+  }
+  .rh { font-size: 11.5px; opacity: 0.66; margin-top: 4px; line-height: 1.55; max-width: 560px; }
+  .ra { flex-shrink: 0; display: flex; align-items: center; gap: 6px; padding-top: 2px; }
+  select, input[type=text] {
+    background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border, rgba(128,128,128,0.35)); border-radius: 5px;
+    padding: 5px 8px; font-size: 12.5px; font-family: inherit; min-width: 150px;
+  }
+  select:focus, input:focus { outline: none; border-color: var(--vscode-focusBorder); }
+  .toggle {
+    background: transparent; color: var(--vscode-foreground);
+    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35)); border-radius: 999px;
+    padding: 5px 14px; font-size: 12px; cursor: pointer; min-width: 66px; font-weight: 600;
+  }
+  .toggle.on { border-color: #3fb950; color: #3fb950; background: rgba(63,185,80,0.12); }
+  .toggle:hover { border-color: var(--vscode-focusBorder); }
+  .empty { opacity: 0.55; font-size: 12.5px; padding: 12px 4px; }
+  .note {
+    margin-top: 10px; max-width: 820px; font-size: 12px; line-height: 1.6; opacity: 0.72;
+    border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2)); padding-top: 14px;
+  }
+  .note b { opacity: 0.95; }
+</style>
+</head>
+<body>
+  <h1>Settings</h1>
+  <div class="lead">ปรับ knob ของ Mission Control — บันทึกทันทีเมื่อเปลี่ยนค่า</div>
+  <div class="path" id="path"></div>
+  <div id="groups"></div>
+  <div class="note">
+    <b>เก็บที่ไหน:</b> ทุกค่าเขียนลงไฟล์ <b id="path2"></b> ตรงๆ (local เครื่องนี้เท่านั้น ไม่ push git) · เปลี่ยนแล้วมีผลกับงานที่ <b>เริ่มใหม่</b> หลังจากนี้<br />
+    <b>legacy:</b> คีย์ที่ติดป้าย legacy ยังบันทึกได้ แต่ไม่มีผลกับ runtime แล้ว (ของเดิมที่ backend/orchestrator ถูกถอดออก) — เก็บไว้เผื่อกลับมาใช้
+  </div>
+
+<script>
+  const vscode = acquireVsCodeApi();
+
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+  function post(type, extra) {
+    const m = { type: type };
+    if (extra) { for (const k in extra) { m[k] = extra[k]; } }
+    vscode.postMessage(m);
+  }
+
+  function fieldControl(f) {
+    const key = esc(f.key);
+    if (f.type === "boolean") {
+      const on = f.value === true || f.value === "true";
+      return '<button class="toggle' + (on ? " on" : "") + '" data-act="bool" data-key="' + key +
+        '" data-next="' + (on ? "false" : "true") + '">' + (on ? "ON" : "OFF") + "</button>";
+    }
+    if (f.type === "select") {
+      const opts = (f.options || []).map(function (o) {
+        const sel = String(o.value) === String(f.value) ? " selected" : "";
+        return '<option value="' + esc(o.value) + '"' + sel + ">" + esc(o.label) + "</option>";
+      }).join("");
+      return '<select data-act="select" data-key="' + key + '">' + opts + "</select>";
+    }
+    // number + string → text input committed on Enter / blur
+    return '<input type="text" data-act="text" data-key="' + key + '" value="' + esc(f.value) + '" />';
+  }
+
+  function render(v) {
+    document.getElementById("path").textContent = v.path || "";
+    document.getElementById("path2").textContent = v.path || "";
+    const root = document.getElementById("groups");
+    const groups = v.groups || [];
+    if (!groups.length) {
+      root.innerHTML = '<div class="empty">ยังไม่มีค่าตั้งค่า</div>';
+      return;
+    }
+    let html = "";
+    for (let i = 0; i < groups.length; i++) {
+      const g = groups[i];
+      html += '<section class="grp"><h2>' + esc(g.group) + '</h2><div class="rows">';
+      const fields = g.fields || [];
+      for (let j = 0; j < fields.length; j++) {
+        const f = fields[j];
+        const badge = f.legacy ? ' <span class="badge">LEGACY</span>' : "";
+        html +=
+          '<div class="row"><div class="ri">' +
+            '<div class="rl">' + esc(f.label) + badge + "</div>" +
+            '<div class="rh">' + esc(f.help) + "</div>" +
+          '</div><div class="ra">' + fieldControl(f) + "</div></div>";
+      }
+      html += "</div></section>";
+    }
+    root.innerHTML = html;
+  }
+
+  document.addEventListener("click", function (e) {
+    const t = e.target;
+    if (!t || !t.getAttribute) return;
+    if (t.getAttribute("data-act") === "bool") {
+      post("set", { key: t.getAttribute("data-key"), value: t.getAttribute("data-next") === "true" });
+    }
+  });
+  document.addEventListener("change", function (e) {
+    const t = e.target;
+    if (!t || !t.getAttribute) return;
+    if (t.getAttribute("data-act") === "select") {
+      post("set", { key: t.getAttribute("data-key"), value: t.value });
+    }
+  });
+  document.addEventListener("keydown", function (e) {
+    const t = e.target;
+    if (!t || !t.getAttribute || t.getAttribute("data-act") !== "text") return;
+    if (e.key === "Enter") { t.blur(); }
+  });
+  document.addEventListener("blur", function (e) {
+    const t = e.target;
+    if (!t || !t.getAttribute || t.getAttribute("data-act") !== "text") return;
+    post("set", { key: t.getAttribute("data-key"), value: t.value });
+  }, true);
+
+  window.addEventListener("message", function (ev) {
+    const m = ev.data;
+    if (m && m.type === "settings") { render(m); }
+  });
+
+  post("ready");
+</script>
+</body></html>`;
+}

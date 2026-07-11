@@ -1,83 +1,112 @@
-import * as os from "node:os";
-
 import * as vscode from "vscode";
 
-import {
-  MONTHLY_CAP_KEY,
-  computeUsage,
-  localMonthKey,
-  localTodayKey,
-  sumByPrefix,
-} from "../usage";
+import { MONTHLY_CAP_KEY, computeUsage, getInstantUsage } from "../usage";
+import { buildBudgetView, openBudgetPanel } from "../webview/budget";
 
 // Real Claude Code spend, computed locally from ~/.claude/projects transcripts —
-// no backend. Shows this-month / today / 7-day / all-time USD and lets the user
-// set a monthly cap (stored in globalState; compared against this month's spend).
-// All day buckets are LOCAL dates so "today"/"this month" match the user's clock.
-const fmt = (n: number) => "$" + n.toFixed(2);
+// no backend. Primary UI is a floating QuickPick popup (no editor tab); the
+// "ดูแบบละเอียด" item opens the themed webview panel for the full view.
+// Compute + cap logic are shared with the panel via buildBudgetView.
 
-export async function budgetCommand(context: vscode.ExtensionContext) {
-  const u = await computeUsage(true);
-  const month = sumByPrefix(u, localMonthKey());
-  const today = sumByPrefix(u, localTodayKey());
+interface Row extends vscode.QuickPickItem {
+  action?: "setCap" | "clearCap" | "detail";
+}
 
-  // Last 7 local days (inclusive of today): from local midnight 6 days ago.
-  let last7 = 0;
-  const cutoff = new Date();
-  cutoff.setHours(0, 0, 0, 0);
-  cutoff.setDate(cutoff.getDate() - 6);
-  for (const day of Object.keys(u.byDay)) {
-    const t = new Date(day + "T00:00:00"); // no "Z" → local midnight
-    if (!Number.isNaN(t.getTime()) && t.getTime() >= cutoff.getTime()) {
-      last7 += u.byDay[day].cost;
-    }
+async function setCap(context: vscode.ExtensionContext): Promise<void> {
+  const cap = context.globalState.get<number>(MONTHLY_CAP_KEY);
+  const input = await vscode.window.showInputBox({
+    title: "Monthly budget cap (USD)",
+    value: cap ? String(cap) : "100",
+    prompt: "เทียบกับยอดใช้จ่าย Claude Code ที่คำนวณของเดือนปฏิทินนี้",
+    validateInput: (v) =>
+      Number.isFinite(parseFloat(v)) && parseFloat(v) > 0 ? null : "ต้องเป็นตัวเลขบวก",
+  });
+  if (input === undefined) return;
+  await context.globalState.update(MONTHLY_CAP_KEY, parseFloat(input));
+}
+
+async function clearCap(context: vscode.ExtensionContext): Promise<void> {
+  const pick = await vscode.window.showWarningMessage(
+    "ล้างเพดานงบรายเดือน?",
+    { modal: true },
+    "ล้าง",
+  );
+  if (pick === "ล้าง") await context.globalState.update(MONTHLY_CAP_KEY, undefined);
+}
+
+/** Show the budget as a floating QuickPick. Re-shows itself after a cap edit
+ *  so the numbers stay live without leaving the popup. */
+async function showBudgetPopup(context: vscode.ExtensionContext): Promise<void> {
+  // Instant: use the cached snapshot (kicks a background refresh for next time);
+  // only the very first run ever awaits a scan. The QuickPick is one-shot so it
+  // shows the cached numbers — a budget glance doesn't need sub-15s freshness.
+  const u = (await getInstantUsage()) ?? (await computeUsage());
+  const v = buildBudgetView(context, u);
+
+  const items: Row[] = [
+    { label: "$(calendar) " + v.monthFmt, description: "เดือนนี้" },
+    { label: "$(clock) " + v.todayFmt, description: "วันนี้" },
+    { label: "$(history) " + v.last7Fmt, description: "7 วันล่าสุด" },
+    { label: "$(graph) " + v.allTimeFmt, description: "ทั้งหมด" },
+  ];
+  if (v.providerNote) {
+    items.push({ label: "$(warning) " + v.providerNote });
+  }
+  items.push(
+    { label: "เพดานงบ", kind: vscode.QuickPickItemKind.Separator },
+    {
+      label: "$(gear) " + (v.hasCap ? "แก้เพดานงบรายเดือน" : "ตั้งเพดานงบรายเดือน"),
+      description: v.capNote,
+      action: "setCap",
+    },
+  );
+  if (v.hasCap) {
+    items.push({ label: "$(trash) ล้างเพดานงบ", action: "clearCap" });
   }
 
-  const cap = context.globalState.get<number>(MONTHLY_CAP_KEY);
-  const capLine = cap
-    ? `Monthly cap: ${fmt(cap)} — ${month > cap ? "⚠️ OVER by " + fmt(month - cap) : fmt(cap - month) + " left"}`
-    : "Monthly cap: (not set)";
+  const tokFmt = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
+  items.push({ label: "Top projects", kind: vscode.QuickPickItemKind.Separator });
+  for (const p of [...v.projects].sort((a, b) => b.cost - a.cost).slice(0, 5)) {
+    items.push({ label: p.name, description: p.costFmt + " · " + tokFmt.format(p.tokens) + " tok" });
+  }
 
-  const home = os.homedir();
-  const topProjects = Object.keys(u.byProject)
-    .map((p) => ({ p, cost: u.byProject[p].cost }))
-    .sort((a, b) => b.cost - a.cost)
-    .slice(0, 5)
-    .map((x) => `  ${fmt(x.cost)}  ${x.p.replace(home, "~")}`)
-    .join("\n");
+  items.push({ label: "", kind: vscode.QuickPickItemKind.Separator });
+  items.push({
+    label: "$(list-tree) ดูแบบละเอียด",
+    description: "เปิดหน้ารายละเอียดเต็ม (hero · tiles · progress bar)",
+    action: "detail",
+  });
 
-  const detail =
-    `This month:   ${fmt(month)}\n` +
-    `Today:        ${fmt(today)}\n` +
-    `Last 7 days:  ${fmt(last7)}\n` +
-    `All time:     ${fmt(u.total.cost)}\n\n` +
-    `${capLine}\n\n` +
-    `Top projects (all time):\n${topProjects}\n\n` +
-    `(${u.fileCount} sessions · computed from ~/.claude/projects · Anthropic list pricing)`;
+  const qp = vscode.window.createQuickPick<Row>();
+  qp.title = "Mission Control — Claude usage: " + v.monthFmt + " this month";
+  qp.placeholder = v.sessions + " sessions · คำนวณจาก ~/.claude/projects · Anthropic list pricing";
+  qp.items = items;
+  qp.matchOnDescription = true;
 
-  const buttons = ["Set monthly cap"];
-  if (cap) buttons.push("Clear cap");
+  const picked = await new Promise<Row | undefined>((resolve) => {
+    qp.onDidAccept(() => resolve(qp.selectedItems[0]));
+    qp.onDidHide(() => resolve(undefined));
+    qp.show();
+  });
+  qp.dispose();
 
-  const choice = await vscode.window.showInformationMessage(
-    `Mission Control — Claude usage: ${fmt(month)} this month`,
-    { modal: true, detail },
-    ...buttons,
-  );
+  if (!picked?.action) return;
+  if (picked.action === "detail") {
+    openBudgetPanel(context);
+  } else if (picked.action === "setCap") {
+    await setCap(context);
+    await showBudgetPopup(context);
+  } else if (picked.action === "clearCap") {
+    await clearCap(context);
+    await showBudgetPopup(context);
+  }
+}
 
-  if (choice === "Set monthly cap") {
-    const input = await vscode.window.showInputBox({
-      title: "Monthly budget cap (USD)",
-      value: cap ? String(cap) : "100",
-      prompt: "Compared against this calendar month's computed Claude Code spend.",
-      validateInput: (v) =>
-        Number.isFinite(parseFloat(v)) && parseFloat(v) > 0 ? null : "must be a positive number",
-    });
-    if (input === undefined) return;
-    const v = parseFloat(input);
-    await context.globalState.update(MONTHLY_CAP_KEY, v);
-    void vscode.window.showInformationMessage(`Mission Control: monthly cap set to ${fmt(v)}`);
-  } else if (choice === "Clear cap") {
-    await context.globalState.update(MONTHLY_CAP_KEY, undefined);
-    void vscode.window.showInformationMessage("Mission Control: monthly cap cleared");
+export async function budgetCommand(context: vscode.ExtensionContext): Promise<void> {
+  try {
+    await showBudgetPopup(context);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    vscode.window.showErrorMessage(`Mission Control: Budget failed — ${msg}`);
   }
 }

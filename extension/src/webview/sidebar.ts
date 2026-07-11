@@ -280,6 +280,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   <button class="btn" id="mawToggle" data-cmd="missioncontrol.mawToggle">maw ui…</button>
   <button class="btn" data-cmd="missioncontrol.skills">Skills</button>
   <button class="btn" data-cmd="missioncontrol.accounts">Accounts</button>
+  <button class="btn" data-cmd="missioncontrol.settings">Settings</button>
 
 <script>
   const vscode = acquireVsCodeApi();

@@ -8,9 +8,8 @@ export type GitButtonKind =
   | "push" // clean, local commits ahead of (or no) upstream → needs a push
   | "pull" // clean, strictly behind upstream (ahead==0) → safe fast-forward pull
   | "diverged" // clean, behind AND ahead → manual reconcile (info only, no auto-action)
-  | "create-push" // clean, no remote at all → create GitHub repo + push
+  | "create-push" // no remote (or not a repo yet) → create GitHub repo + push
   | "uptodate" // clean, in sync with upstream → nothing to do
-  | "init" // not a git repo → offer `git init`
   | "none"; // unknown
 
 export interface GitButtonState {
@@ -45,7 +44,12 @@ export function countDirty(porcelain: string): number {
  *  on a button press. */
 export function parseGitButtonState(s: GitRawStatus): GitButtonState {
   const base = { dirtyCount: 0, ahead: s.ahead || 0, behind: s.behind || 0 };
-  if (!s.isRepo) return { ...base, kind: "init", label: "Git init" };
+  // Not a repo yet → still offer ONE green "Create & Push". The create-push
+  // handler (gitOps.createAndPush) git-inits + makes an initial commit before
+  // creating the GitHub repo, so a single button covers bare-folder → published.
+  // (The orches flow already inits+commits up front, so in practice a non-repo
+  // row only appears for a hand-made dir.) No separate "Git init" step.
+  if (!s.isRepo) return { ...base, kind: "create-push", label: "Create & Push" };
 
   const dirtyCount = countDirty(s.porcelain);
   if (dirtyCount > 0) {
