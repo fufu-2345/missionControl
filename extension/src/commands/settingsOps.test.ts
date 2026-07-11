@@ -51,6 +51,14 @@ describe("listSettings", () => {
     expect(mystery?.type).toBe("number");
     expect(s.find((e) => e.key === "flag")?.type).toBe("boolean");
   });
+
+  test("search.* intent keys do not leak into the generic settings list", () => {
+    writeCfg({ "search.hybrid_enabled": true, "search.mode": "graph", mystery: 42 });
+    const s = listSettings();
+    expect(s.some((e) => e.key === "search.hybrid_enabled")).toBe(false);
+    expect(s.some((e) => e.key === "search.mode")).toBe(false);
+    expect(s.find((e) => e.key === "mystery")?.group).toBe("Other"); // genuine unknown key still shows
+  });
 });
 
 describe("setSetting", () => {

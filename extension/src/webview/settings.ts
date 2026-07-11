@@ -6,7 +6,7 @@ import {
   setSetting,
   type SettingEntry,
 } from "../commands/settingsOps";
-import { deriveEnabled, readIntent, writeIntent } from "../commands/searchOps";
+import { deriveEnabled, writeIntent } from "../commands/searchOps";
 import { patchConfig, startIndex, stopIndex } from "../commands/oracleVectorClient";
 import { pullModel } from "../commands/ollamaPull";
 import {

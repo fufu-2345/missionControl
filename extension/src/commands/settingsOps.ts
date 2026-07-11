@@ -163,6 +163,7 @@ export function listSettings(): SettingEntry[] {
   }));
   for (const k of Object.keys(raw)) {
     if (SCHEMA_BY_KEY.has(k)) continue;
+    if (k.startsWith("search.")) continue; // owned by the Search/Oracle section, not a generic knob
     const v = raw[k];
     entries.push({
       key: k,
