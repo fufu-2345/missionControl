@@ -81,6 +81,10 @@
         "title": "Mission Control: Accounts"
       },
       {
+        "command": "missioncontrol.openCodeGraph",
+        "title": "Mission Control: Open Code Graph"
+      },
+      {
         "command": "missioncontrol.settings",
         "title": "Mission Control: Settings"
       },

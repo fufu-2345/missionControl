@@ -13,7 +13,9 @@ import * as vscode from "vscode";
 // "uploaded" (dropped in via the uploader). Each bucket is a full-width bar,
 // collapsed by default; clicking it reveals a 4-column grid of its skills
 // (paginated 50 at a time). A card's real [tag] still shows on hover.
-const SKILLS_DIR = path.join(os.homedir(), ".claude", "skills");
+// Overridable for tests (MC_SKILLS_DIR); defaults to the real global skills dir.
+const SKILLS_DIR =
+  process.env.MC_SKILLS_DIR || path.join(os.homedir(), ".claude", "skills");
 // Skills added through the panel's uploader get this empty marker file so
 // listSkills can force them into the synthetic "uploaded" category regardless
 // of any [tag] their own SKILL.md carries.
@@ -27,8 +29,9 @@ export type SkillSummary = {
    *  Shown verbatim on the hover chip. Uploaded skills report "uploaded". */
   category: string | null;
   /** Accordion bucket — the panel groups by THIS, not `category`. Uploaded
-   *  skills are "uploaded"; every other skill collapses into "system". */
-  group: "system" | "uploaded";
+   *  skills are "uploaded"; auto-created skills (frontmatter installer:auto-skill)
+   *  are "generated"; every other skill collapses into "system". */
+  group: "system" | "uploaded" | "generated";
   path: string;
   /** True when dropped in via the uploader (has UPLOAD_MARKER). Only these
    *  get an on/off toggle; system skills are always active. */
@@ -154,13 +157,17 @@ export function listSkills(): SkillSummary[] {
     // A marker file (dropped by the uploader) wins over the parsed tag — these
     // are surfaced under the "uploaded" category no matter what they self-tag.
     const uploaded = fs.existsSync(path.join(dir, UPLOAD_MARKER));
+    // Auto-created skills stamp installer:auto-skill — they get their own
+    // "generated" bucket instead of collapsing into "system".
+    const generated = !uploaded && meta.installer === "auto-skill";
     out.push({
       name: meta.name || e.name,
       description: text || rawDesc,
       // `category` keeps the real [tag] for the hover chip; `group` is the
-      // 2-bucket accordion key (everything non-uploaded collapses to "system").
-      category: uploaded ? "uploaded" : category,
-      group: uploaded ? "uploaded" : "system",
+      // accordion key. uploaded wins the marker; auto-created → generated;
+      // everything else → system.
+      category: uploaded ? "uploaded" : generated ? meta.category || "generated" : category,
+      group: uploaded ? "uploaded" : generated ? "generated" : "system",
       path: skillPath,
       uploaded,
       enabled,
@@ -177,9 +184,14 @@ function splitFrontmatter(raw: string): { fm: string; body: string } {
 }
 
 /** Minimal single-line YAML reader for the two keys we need. */
-function parseFrontmatter(fm: string): { name?: string; description?: string } {
-  const out: { name?: string; description?: string } = {};
-  for (const key of ["name", "description"] as const) {
+function parseFrontmatter(fm: string): {
+  name?: string;
+  description?: string;
+  installer?: string;
+  category?: string;
+} {
+  const out: { name?: string; description?: string; installer?: string; category?: string } = {};
+  for (const key of ["name", "description", "installer", "category"] as const) {
     const m = fm.match(new RegExp(`^${key}:[ \\t]*(.*)$`, "m"));
     if (m) out[key] = unquoteYaml(m[1].trim());
   }
@@ -547,12 +559,12 @@ function renderShell(): string {
   const expanded = {};   // category -> is it open
   const pageByCat = {};  // category -> current 1-based page
 
-  // The accordion has exactly two buckets (system + uploaded); ORDER drives the
+  // The accordion buckets (system + generated + uploaded); ORDER drives the
   // section bars. The per-tag colors below are still used by the hover chip,
   // which shows each skill's real [tag] even though the bars collapse it.
-  const ORDER = ['system', 'uploaded'];
+  const ORDER = ['system', 'generated', 'uploaded'];
   const COLORS = {
-    system: '#4ea1ff', uploaded: '#f778ba',
+    system: '#4ea1ff', generated: '#e3b341', uploaded: '#f778ba',
     core: '#4ea1ff', standard: '#3fb950', lab: '#bc8cff',
     zombie: '#f0883e', other: '#8b949e',
   };
@@ -573,13 +585,14 @@ function renderShell(): string {
       sroot.innerHTML = '<div class="empty">No skills found in ~/.claude/skills/.</div>';
       return;
     }
-    // Bucket into the two accordion groups (system / uploaded).
+    // Bucket into the accordion groups (system / generated / uploaded).
     const map = {};
     for (const s of list) { const k = s.group || 'system'; (map[k] = map[k] || []).push(s); }
-    const known = ORDER.filter(k => map[k]);
+    // Always show the canonical buckets even when empty (stable list); unknown
+    // extra groups only appear when they actually have skills.
     const extras = Object.keys(map).filter(k => ORDER.indexOf(k) < 0).sort();
-    const cats = known.concat(extras);
-    sroot.innerHTML = cats.map(cat => section(cat, map[cat])).join('');
+    const cats = ORDER.concat(extras);
+    sroot.innerHTML = cats.map(cat => section(cat, map[cat] || [])).join('');
     wire(sroot);
   }
 
@@ -598,6 +611,8 @@ function renderShell(): string {
       + '<span class="clabel">' + escapeHtml(cat) + '</span>'
       + '<span class="cn">' + total + '</span></button>';
     if (!open) return '<div class="section" style="--c:' + col + '">' + head + '</div>';
+    if (total === 0) return '<div class="section" style="--c:' + col + '">' + head
+      + '<div class="cat-body"><div class="empty" style="padding:6px 2px;font-size:12px">No skills in this category yet.</div></div></div>';
 
     const start = (page - 1) * PAGE_SIZE;
     const slice = items.slice(start, start + PAGE_SIZE);

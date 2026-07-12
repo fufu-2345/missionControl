@@ -22,6 +22,16 @@ describe("asset strings", () => {
     expect(s.includes("\\")).toBe(false);
     expect(s).toContain("searchState"); // listens for the host push
   });
+
+  test("offline state offers a retry control wired to reloadSearch (no dead-end)", () => {
+    // When the oracle is offline the section renders only a message and returns.
+    // Without a way to re-fetch, starting the oracle afterwards leaves the panel
+    // stuck (singleton + retainContextWhenHidden). A retry button re-triggers the
+    // host's reloadSearch so the section recovers in one click.
+    const s = searchSectionScript();
+    expect(s).toContain('data-so="retry"');
+    expect(s).toContain("act==='retry') post('reloadSearch')");
+  });
 });
 
 describe("docsFromStats", () => {

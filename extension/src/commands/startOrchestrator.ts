@@ -10,6 +10,7 @@ import {
   buildKickoffPrompt,
   buildResumeKickoff,
   buildTmuxLaunchCommand,
+  formatOrchesLabel,
   isSafeOracleName,
   type OracleTeam,
   parseOraclePath,
@@ -18,6 +19,7 @@ import {
 } from "./teams";
 import {
   decideCancelOutcome,
+  decideContinueAction,
   readRunMarker,
   resolveContinueTarget,
   writeRunMarker,
@@ -355,16 +357,26 @@ export function sessionCreatedAt(session: string): number | undefined {
  *  auto-resolved from .orches-meta.json. Writes the .orches-run.json marker the
  *  webview polls. Idempotent-ish: if a run is already live for this project it is
  *  a no-op that returns the existing session. */
-export function launchContinueRun(project: ResumableProject): { error?: string; session?: string } {
+export function launchContinueRun(
+  project: ResumableProject,
+): { error?: string; session?: string; attached?: boolean } {
   const teams = readTeams();
   const target = resolveContinueTarget(project, teams);
   if ("error" in target) return { error: target.error };
 
-  // Already spinning for THIS project → don't double-launch.
+  // 1-session-1-run collision guard (same intent as launchOrchestrator): decide
+  // from the CURRENT live signals whether this project is already being driven.
+  // The old guard only saw THIS button's own run marker; a project driven by a
+  // full `/orches-drive` (no `.orches-run.json`) slipped through and got a second
+  // orchestrator twin forked onto the same repo. `doing` is refreshed here.
+  annotateLiveState([project]);
   const existing = readRunMarker(project.path);
-  if (existing?.status === "running" && tmuxHasSession(existing.session)) {
-    return { session: existing.session };
-  }
+  const existingAlive =
+    existing?.status === "running" && !!existing.session && tmuxHasSession(existing.session);
+  const action = decideContinueAction(project.doing ?? false, existing, existingAlive);
+  if (action === "already-running") return { session: existing!.session };
+  if (action === "attach" && attachToProject(project)) return { attached: true };
+  // action === "launch" (or attach found no live session to re-enter) → spawn below.
 
   // The orchestrator runs in ITS OWN oracle repo (loads its CLAUDE.md + ψ), not
   // the project repo — the project path travels in the kickoff. Same resolution
@@ -395,7 +407,15 @@ export function launchContinueRun(project: ResumableProject): { error?: string; 
     target.orch,
     workers,
   );
-  const command = buildTmuxLaunchCommand(target.orch, orchRepo, kickoff, session, workers, false);
+  const command = buildTmuxLaunchCommand(
+    target.orch,
+    orchRepo,
+    kickoff,
+    session,
+    workers,
+    false,
+    formatOrchesLabel(project.name, target.team.name),
+  );
 
   let baseMainSha = "";
   try {
@@ -547,10 +567,15 @@ export async function launchOrchestrator(opts: {
       /* best-effort — still attach so the user lands in the session */
     }
   }
+  // On resume the project is known → stamp "<project> / <team>" as the session
+  // label at create-time (new builds name the project at runtime, so their
+  // orchestrator sets @orches_label itself once it picks a name).
+  const orchesLabel =
+    mode === "resume" && project ? formatOrchesLabel(project.name, team.name) : undefined;
   // Safe: session = maw pin (NN-oracle) / claude-<safe-orch> (+ "-N" twin suffix).
   const command = inject
     ? `tmux attach -t '=${session}'`
-    : buildTmuxLaunchCommand(orch, repoPath, kickoff, session, workers);
+    : buildTmuxLaunchCommand(orch, repoPath, kickoff, session, workers, true, orchesLabel);
 
   // One editor tab per SESSION (twin gets its own) — never touch other tabs.
   const prevTerm = _orchTerminals.get(session);

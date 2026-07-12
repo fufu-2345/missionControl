@@ -5,6 +5,7 @@ import { approveCommand } from "./commands/approve";
 import { budgetCommand } from "./commands/budget";
 import { claudeCommand } from "./commands/claude";
 import { dashboardCommand } from "./commands/dashboard";
+import { openCodeGraphCommand } from "./commands/graphOpen";
 import { installCommand } from "./commands/install";
 import { mawToggleCommand } from "./commands/mawServe";
 import { settingsCommand } from "./commands/settingsPanel";
@@ -41,6 +42,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("missioncontrol.skills", () => skillsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.teams", () => teamsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.accounts", () => accountsCommand(context)),
+    vscode.commands.registerCommand("missioncontrol.openCodeGraph", () => openCodeGraphCommand()),
     vscode.commands.registerCommand("missioncontrol.settings", () => settingsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.dashboard", () => dashboardCommand(context)),
     vscode.commands.registerCommand("missioncontrol.claude", () => claudeCommand(context)),

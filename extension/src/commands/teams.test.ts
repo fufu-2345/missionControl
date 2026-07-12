@@ -6,6 +6,7 @@ import {
   buildPaneLayoutInitCommand,
   buildResumeKickoff,
   buildTmuxLaunchCommand,
+  formatOrchesLabel,
   isSafeOracleName,
   parseOraclePath,
   parseSessionPin,
@@ -53,6 +54,32 @@ test("buildTmuxLaunchCommand: pinned session name wins over claude-<orch>", () =
 test("buildTmuxLaunchCommand: blank pin falls back to claude-<orch>", () => {
   const cmd = buildTmuxLaunchCommand("foreman", "/p/foreman-oracle", "hi", "  ");
   expect(cmd.startsWith("tmux new-session -A -d -s 'claude-foreman' -n 'foreman-oracle' '")).toBe(true);
+});
+
+test("formatOrchesLabel: '<project> / <team>', or bare project when no team", () => {
+  expect(formatOrchesLabel("rpn", "brew")).toBe("rpn / brew");
+  expect(formatOrchesLabel("rpn")).toBe("rpn");
+  expect(formatOrchesLabel("rpn", "  ")).toBe("rpn"); // blank team ignored, not "rpn / "
+});
+
+test("buildTmuxLaunchCommand: orchesLabel → session-scoped @orches_label set-option (NO '=' prefix)", () => {
+  const cmd = buildTmuxLaunchCommand("foreman", "/p/foreman-oracle", "hi", "09-foreman", [], true, "rpn / brew");
+  // set-option targets the SESSION with a PLAIN name — tmux 3.4 treats '=name' as
+  // a literal name for set-option, so the '=' prefix (fine for has-session/attach)
+  // must NOT appear here.
+  expect(cmd).toContain("set-option -t '09-foreman' @orches_label 'rpn / brew'");
+  expect(cmd).toContain("new-session"); // still creates the session
+});
+
+test("buildTmuxLaunchCommand: label set even when detached (attach=false — the continue button)", () => {
+  const cmd = buildTmuxLaunchCommand("foreman", "/x", "hi", "claude-foreman", [], false, "rpn / brew");
+  expect(cmd).toContain("@orches_label");
+  expect(cmd).not.toContain("tmux attach");
+});
+
+test("buildTmuxLaunchCommand: no orchesLabel → no set-option (unchanged behavior)", () => {
+  const cmd = buildTmuxLaunchCommand("foreman", "/x", "hi", "claude-foreman", []);
+  expect(cmd).not.toContain("@orches_label");
 });
 
 test("parseTeamRoster: valid roster with an orchestrator", () => {

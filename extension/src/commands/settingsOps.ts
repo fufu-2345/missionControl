@@ -2,6 +2,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { isAutoSkillEnabled, setAutoSkillEnabled } from "./autoSkillOps";
+
 // Node-only settings I/O for the Settings page. Pure fs + a schema — no vscode,
 // no backend — so it's unit-testable (see settingsOps.test.ts). The knobs live
 // on disk at ~/.mission-control/config.json (same file the old QuickPick config
@@ -120,6 +122,15 @@ export const SETTINGS_SCHEMA: FieldSchema[] = [
     legacy: true,
     help: "Let workers review each other instead of a central review pass.",
   },
+  {
+    key: "auto_skill_enabled",
+    label: "Auto-create skills",
+    group: "Skills",
+    type: "boolean",
+    default: true,
+    help:
+      "When ON, every Claude Code session self-judges at the end of a task and auto-saves a reusable procedure as a skill (Hermes-style). The switch is the marked block in ~/.claude/CLAUDE.md — this toggle adds/removes it. Applies to ALL sessions, not just oracles.",
+  },
 ];
 
 const SCHEMA_BY_KEY = new Map(SETTINGS_SCHEMA.map((f) => [f.key, f]));
@@ -161,6 +172,9 @@ export function listSettings(): SettingEntry[] {
     value: f.key in raw ? (raw[f.key] as string | number | boolean) : f.default,
     known: true,
   }));
+  // auto_skill_enabled is not a config.json knob — its truth is the CLAUDE.md block.
+  const autoSkill = entries.find((e) => e.key === "auto_skill_enabled");
+  if (autoSkill) autoSkill.value = isAutoSkillEnabled();
   for (const k of Object.keys(raw)) {
     if (SCHEMA_BY_KEY.has(k)) continue;
     if (k.startsWith("search.")) continue; // owned by the Search/Oracle section, not a generic knob
@@ -190,6 +204,12 @@ export function setSetting(
   key: string,
   value: string | number | boolean,
 ): SettingEntry[] {
+  // auto_skill_enabled toggles the CLAUDE.md block, not a config.json value.
+  if (key === "auto_skill_enabled") {
+    setAutoSkillEnabled(value === true || value === "true");
+    return listSettings();
+  }
+
   const schema = SCHEMA_BY_KEY.get(key);
   const raw = readConfig();
   let next: string | number | boolean = value;

@@ -285,6 +285,10 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         if (!p) return;
         const r = launchContinueRun(p);
         if (r.error) vscode.window.showWarningMessage(`Continue: ${r.error}`);
+        else if (r.attached)
+          vscode.window.showInformationMessage(
+            `Continue: '${p.name}' กำลังทำอยู่แล้ว — เปิด session เดิมให้ (ไม่ launch ซ้ำ)`,
+          );
         await pushProjectsScreen(panel);
         startSpinPoll(panel);
         return;

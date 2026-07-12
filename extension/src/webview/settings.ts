@@ -23,7 +23,7 @@ import {
 let _panel: vscode.WebviewPanel | undefined;
 
 // Group render order — anything not listed falls to the end.
-const GROUP_ORDER = ["Orchestration", "Build", "Other"];
+const GROUP_ORDER = ["Orchestration", "Build", "Skills", "Other"];
 
 function grouped(entries: SettingEntry[]): { group: string; fields: SettingEntry[] }[] {
   const byGroup = new Map<string, SettingEntry[]>();

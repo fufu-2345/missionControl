@@ -123,6 +123,29 @@ export function resolveContinueTarget(
   return { team, orch: team.orchestrators[0] };
 }
 
+export type ContinueAction = "already-running" | "attach" | "launch";
+
+/** What the inline "▶ ทำต่อ" button should do, decided from the live signals so
+ *  it NEVER spawns a second orchestrator twin on a project that is already being
+ *  driven (the double-launch bug):
+ *   - `already-running` — this button's own run is live (running marker + its
+ *     session alive) → leave it; the spinner already reflects it.
+ *   - `attach` — a worker pane is grinding this project (`doing`) but there is no
+ *     live run marker (it's driven by a full `/orches-drive`, which writes no
+ *     `.orches-run.json`) → re-enter that session instead of forking a twin.
+ *   - `launch` — nothing live → start a fresh detached one-sprint run.
+ *  `markerSessionAlive` is supplied by the caller (a tmux `has-session` check on
+ *  `marker.session`) so this stays pure and unit-testable. */
+export function decideContinueAction(
+  doing: boolean,
+  marker: RunMarker | null,
+  markerSessionAlive: boolean,
+): ContinueAction {
+  if (marker?.status === "running" && markerSessionAlive) return "already-running";
+  if (doing) return "attach";
+  return "launch";
+}
+
 /** Cancel precedence: if the sprint finished/merged in the race between the
  *  user clicking cancel and orches-drive landing it, DON'T fake a cancel or
  *  revert merged work — keep the done outcome. */

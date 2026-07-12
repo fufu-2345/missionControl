@@ -12,6 +12,7 @@ import {
   resolveButtonState,
   resolveContinueTarget,
   decideCancelOutcome,
+  decideContinueAction,
   type RunMarker,
 } from "./continueRun";
 import type { OracleTeam } from "./teams";
@@ -150,4 +151,27 @@ test("decideCancelOutcome: sprint already merged → keep_done", () => {
 test("decideCancelOutcome: still running, not merged → revert", () => {
   expect(decideCancelOutcome("running", false)).toBe("revert");
   expect(decideCancelOutcome(undefined, false)).toBe("revert");
+});
+
+// --- Task 5: decideContinueAction (▶ ทำต่อ collision guard) ---
+// The inline button must NEVER spawn a second orchestrator twin on a project
+// that is already being driven — it should attach or no-op instead.
+
+test("decideContinueAction: this button's run is live (running marker + session alive) → already-running", () => {
+  expect(decideContinueAction(false, RUNNING, true)).toBe("already-running");
+});
+
+test("decideContinueAction: a worker is grinding this project (doing) w/o a running marker → attach, not twin", () => {
+  const done = { status: "done", session: "s", startedAt: "x" } as const;
+  expect(decideContinueAction(true, null, false)).toBe("attach"); // driven by full /orches-drive (no run marker)
+  expect(decideContinueAction(true, done, false)).toBe("attach"); // stale done marker from a prior --once
+});
+
+test("decideContinueAction: nothing live → launch", () => {
+  expect(decideContinueAction(false, null, false)).toBe("launch");
+});
+
+test("decideContinueAction: running marker but its session is dead → not already-running (attach if doing, else launch)", () => {
+  expect(decideContinueAction(true, RUNNING, false)).toBe("attach");
+  expect(decideContinueAction(false, RUNNING, false)).toBe("launch");
 });

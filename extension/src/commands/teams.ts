@@ -211,6 +211,15 @@ export function buildPaneLayoutInitCommand(
  *  first creation, while the layout-init + `tmux attach` run every invocation
  *  (both idempotent — safe to re-click). No `--continue` (exits for a fresh
  *  oracle with no prior conversation). All layers single-quote-escaped. */
+/** The `@orches_label` value the Sessions panel shows for a session driving a
+ *  project — "<project> / <team>" (bare "<project>" when the team is unknown).
+ *  Mirrors the display fallback in webview/sessions.ts computeSessionLabel so a
+ *  label the extension stamps and one the dashboard derives look identical. */
+export function formatOrchesLabel(project: string, team?: string): string {
+  const t = team?.trim();
+  return t ? `${project} / ${t}` : project;
+}
+
 export function buildTmuxLaunchCommand(
   orchestrator: string,
   repoPath: string,
@@ -218,6 +227,7 @@ export function buildTmuxLaunchCommand(
   sessionName?: string,
   workers: string[] = [],
   attach = true, // continue-button passes false → detached, no attach
+  orchesLabel?: string, // set @orches_label at create so the Sessions panel shows "<project> / <team>", not the raw NN-<oracle> pin
 ): string {
   const session = sessionName?.trim() || `claude-${orchestrator}`;
   // -n names the initial window after the repo (e.g. foreman-oracle): maw wake
@@ -241,6 +251,12 @@ export function buildTmuxLaunchCommand(
   // The trailing block runs post-create steps: layout (idempotent) then, unless
   // detached (attach=false, the continue button), attach into the finished view.
   const parts: string[] = [];
+  // Stamp the session-scoped display label FIRST (before layout/attach) so the
+  // Sessions panel shows "<project> / <team>" the moment the session appears —
+  // deterministic, not waiting on the orchestrator LLM to run its own set. Plain
+  // `-t <session>` (NO '=' prefix): tmux 3.4 set-option reads '=name' literally.
+  const label = orchesLabel?.trim();
+  if (label) parts.push(`tmux set-option -t ${shSingleQuote(session)} @orches_label ${shSingleQuote(label)} ;`);
   if (layout) parts.push(`${layout} ;`);
   if (attach) parts.push(`tmux attach -t ${shSingleQuote(`=${session}`)} ;`);
   return parts.length ? `${head} && { ${parts.join(" ")} }` : head;
