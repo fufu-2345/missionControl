@@ -261,6 +261,11 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
     _panel = undefined;
     _st = undefined;
   });
+  // ซ่อน panel / สลับไป tab อื่น = ยกเลิก auto-commit+push ที่ arm ค้าง — กัน grace-timer ยิง
+  // commit+push ตอน user ไม่ได้มองหน้า projects อยู่ (เสี่ยงยิงผิดจังหวะ/ผิด repo)
+  panel.onDidChangeViewState(() => {
+    if (!panel.visible) panel.webview.postMessage({ type: "disarm_all" });
+  });
   panel.webview.html = renderShell();
 
   panel.webview.onDidReceiveMessage(async (msg) => {
@@ -697,6 +702,9 @@ function renderShell(): string {
     askMode=false; // Projects list เอง ไม่มีโหมดถาม (ยกไปหน้าเลือกทีมตอนเริ่มใหม่)
     el("actions").innerHTML = actionsHtml(false, true, false, true); wireActions(false);
     var items = m.items||[];
+    // การ์ด project ที่หลุดจาก list (เสร็จ/หาย) ระหว่างที่ยัง arm ค้าง → เลิก arm+timer ทิ้ง (กันยิงตอนการ์ดไม่อยู่แล้ว)
+    var _live={}; items.forEach(function(it){ _live[it.path]=1; });
+    for(var _k in AUTO){ if(Object.prototype.hasOwnProperty.call(AUTO,_k) && !_live[_k]) disarmHard(_k); }
     el("content").innerHTML = items.length ? items.map(function(it){
       var wt = it.worktrees||0, sp = it.sprints||0;
       var pt = it.plannedTotal||0, pd = it.plannedDone||0;
@@ -825,7 +833,13 @@ function renderShell(): string {
   function cardOf(p){ return el("content").querySelector('.card[data-path="'+(window.CSS&&CSS.escape?CSS.escape(p):p)+'"]'); }
   function disarm(p){ var st=ast(p); st.armed=0; st.armedAt=0;
     if(st.execTimer){ clearTimeout(st.execTimer); st.execTimer=null; }
-    var m=st.msg; st.msg=null; return m; }
+    var m=st.msg; st.msg=null; return m; }  // soft: ปลด arm + เคลียร์ timer เท่านั้น — auto ที่ยังคิดอยู่ปล่อยคิดต่อ (disarmToBox พึ่งพฤติกรรมนี้)
+  // hard: soft + ทิ้งผล auto ที่ยัง in-flight ด้วย (thinking=false + gen++ → git_auto_result เก่าถูก drop)
+  // ใช้เฉพาะตอนละทิ้งงานทั้งหมดจริงๆ (ออกจากหน้า / ซ่อน panel / การ์ดหลุด) — ไม่ใช่ตอน user แค่ยกเลิก arm
+  function disarmHard(p){ var st=ast(p); st.thinking=false; st.gen++; return disarm(p); }
+  // ยกเลิก arm/timer ของทุก project พร้อมกัน (hard) + รีเฟรช UI (ลบไฟเรือง/คืนปุ่ม ✨auto/ซ่อน push)
+  // ถ้าไม่เรียก applyAutoUi คลาส .glow จะค้างบนปุ่ม → ไฟเรืองหมุนไม่หยุดตอนกลับมาหน้าเดิม (state ปลดแล้วก็จริง)
+  function disarmAll(){ for(var k in AUTO){ if(Object.prototype.hasOwnProperty.call(AUTO,k)){ disarmHard(k); applyAutoUi(k); } } }
   function scheduleExec(p){ var st=ast(p);
     if(st.execTimer) clearTimeout(st.execTimer);
     var wait=Math.max(0, GRACE_MS-(Date.now()-st.armedAt));
@@ -870,7 +884,7 @@ function renderShell(): string {
     }
     applyAutoUi(p); fillAuto(p, message); }
 
-  function renderTeams(m){
+  function renderTeams(m){ disarmAll();  // ออกจากหน้า projects → เลิก arm/timer ที่ค้างทั้งหมด
     el("title").textContent=m.title; el("subtitle").textContent=m.subtitle;
     var askable=m.askable===true; if(!askable) askMode=false;
     el("actions").innerHTML=actionsHtml(m.canBack, false, askable); wireActions(m.canBack);
@@ -883,7 +897,7 @@ function renderShell(): string {
     el("content").querySelectorAll('.card').forEach(function(c){
       c.addEventListener('click',function(){post('pick_team',{name:c.dataset.name, askMode:askMode});});});
   }
-  function renderOrch(m){
+  function renderOrch(m){ disarmAll();  // ออกจากหน้า projects → เลิก arm/timer ที่ค้างทั้งหมด
     el("title").textContent=m.title; el("subtitle").textContent=m.subtitle;
     var askable=m.askable===true; if(!askable) askMode=false;
     el("actions").innerHTML=actionsHtml(false, false, askable); wireActions(false);
@@ -900,6 +914,7 @@ function renderShell(): string {
     if(m.type==="screen_projects") renderProjects(m);
     else if(m.type==="screen_teams") renderTeams(m);
     else if(m.type==="screen_orch") renderOrch(m);
+    else if(m.type==="disarm_all") disarmAll();  // panel ถูกซ่อน/สลับ tab (backend แจ้งมา) → เลิก arm ค้าง
     else if(m.type==="git_auto_result") handleAutoResult(m.path,m.message,m.gen);
   });
   post("ready");
