@@ -195,10 +195,22 @@ export async function autoCommitMessage(dir: string): Promise<string> {
     maxBuffer: 512 * 1024,
   });
   if (!res.ok) return "";
-  // Take the first non-empty line, strip surrounding quotes/backticks.
-  const line = res.stdout
+  // claude -p sometimes ignores "output ONLY the message" and prepends a preamble
+  // line (e.g. "Here is a concise ... commit message ...:"). Taking the first
+  // non-empty line then commits the PREAMBLE as the subject (this is exactly what
+  // produced commit c8bc703). So: prefer a real Conventional-Commits line; else the
+  // first non-preamble line; else the last non-empty line (preambles sit on top).
+  const lines = res.stdout
     .split(/\r?\n/)
     .map((l) => l.trim())
-    .find((l) => l.length > 0);
+    .filter((l) => l.length > 0);
+  const conventional =
+    /^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]*\))?!?:\s*\S/i;
+  const isPreamble = (l: string) =>
+    /:$/.test(l) || /\b(commit message|here (is|are|'s)|based on|sure|certainly)\b/i.test(l);
+  const line =
+    lines.find((l) => conventional.test(l)) ??
+    lines.find((l) => !isPreamble(l)) ??
+    lines[lines.length - 1];
   return (line ?? "").replace(/^["'`]+|["'`]+$/g, "").slice(0, 120);
 }
