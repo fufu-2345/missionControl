@@ -9,7 +9,27 @@ import {
   loneOracleName,
   teamOfOracle,
   computeSessionLabel,
+  labelNamesProject,
+  sessionForProjectLabel,
 } from "./sessions";
+
+test("labelNamesProject: exact or '<basename> / …', never a prefix, false when undefined", () => {
+  expect(labelNamesProject("rpn", "rpn")).toBe(true);
+  expect(labelNamesProject("rpn / brew", "rpn")).toBe(true);
+  expect(labelNamesProject("rpnx", "rpn")).toBe(false);
+  expect(labelNamesProject("rpnx / t", "rpn")).toBe(false);
+  expect(labelNamesProject(undefined, "rpn")).toBe(false);
+});
+
+test("sessionForProjectLabel: matches exact basename or '<basename> / team', never a prefix", () => {
+  const S = (name: string, orchesLabel?: string) =>
+    ({ name, windows: 1, attached: false, cmd: "claude", cwd: "", orchesLabel });
+  const sessions = [S("05-bob"), S("09-foreman", "rpn / brew"), S("x", "rpnx / t")];
+  expect(sessionForProjectLabel("rpn", sessions)?.name).toBe("09-foreman"); // "rpn / brew"
+  expect(sessionForProjectLabel("rpn", [S("a", "rpn")])?.name).toBe("a"); // exact
+  expect(sessionForProjectLabel("rpn", [S("a", "rpnx"), S("b", "rpnx / t")])).toBeNull(); // prefix ≠ match
+  expect(sessionForProjectLabel("rpn", [S("a")])).toBeNull(); // no label
+});
 
 test("parseTmuxSessions parses tab-separated session lines (with orches label col)", () => {
   const raw =

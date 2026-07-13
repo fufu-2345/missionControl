@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { isAutoSkillEnabled, setAutoSkillEnabled } from "./autoSkillOps";
+import { DEFAULT_MODEL, MODEL_ALIASES } from "./teamsModel";
 
 // Node-only settings I/O for the Settings page. Pure fs + a schema — no vscode,
 // no backend — so it's unit-testable (see settingsOps.test.ts). The knobs live
@@ -73,18 +74,19 @@ export const SETTINGS_SCHEMA: FieldSchema[] = [
       "When the orchestrator pushes to the remote. Asked up-front at the start of a drive; this sets the default it offers.",
   },
   {
-    key: "build_model",
-    label: "Build model",
-    group: "Build",
+    key: "default_member_model",
+    label: "Default member model",
+    group: "Teams",
     type: "select",
-    default: "claude-haiku-4-5",
-    options: [
-      { value: "claude-opus-4-8", label: "Opus 4.8 — strongest" },
-      { value: "claude-sonnet-5", label: "Sonnet 5 — balanced" },
-      { value: "claude-haiku-4-5", label: "Haiku 4.5 — fast + cheap" },
-      { value: "claude-fable-5", label: "Fable 5" },
-    ],
-    help: "Model the worker agents run on during a build.",
+    default: DEFAULT_MODEL,
+    // Options mirror the Team Config member dropdown (teamsModel.MODEL_ALIASES),
+    // shown without the "claude-" prefix like that dropdown does.
+    options: MODEL_ALIASES.map((m) => ({
+      value: m,
+      label: m.replace(/^claude-/, ""),
+    })),
+    help:
+      "Model a newly added team member starts on in the Team Config page. You can still override per member; this only sets what a fresh row is pre-selected to (was hard-coded to sonnet-5).",
   },
   {
     key: "agents",
@@ -155,6 +157,15 @@ export function readConfig(): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+/** The model a newly-added Team Config member is pre-selected to. Configurable
+ *  via the Settings page (default_member_model); falls back to DEFAULT_MODEL
+ *  when unset or blank. Read by the Teams panel — this is what wires the knob to
+ *  actual behaviour (unlike the removed build_model, which nothing consumed). */
+export function getDefaultMemberModel(): string {
+  const v = readConfig()["default_member_model"];
+  return typeof v === "string" && v.trim() ? v : DEFAULT_MODEL;
 }
 
 /** Schema-driven view: every known field (file value or default) plus any

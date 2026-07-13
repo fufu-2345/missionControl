@@ -14,8 +14,11 @@ import * as vscode from "vscode";
 // collapsed by default; clicking it reveals a 4-column grid of its skills
 // (paginated 50 at a time). A card's real [tag] still shows on hover.
 // Overridable for tests (MC_SKILLS_DIR); defaults to the real global skills dir.
-const SKILLS_DIR =
-  process.env.MC_SKILLS_DIR || path.join(os.homedir(), ".claude", "skills");
+// Read per-call (not a module const) so a test can point it at a temp dir even
+// after the module is already imported/cached.
+function skillsDir(): string {
+  return process.env.MC_SKILLS_DIR || path.join(os.homedir(), ".claude", "skills");
+}
 // Skills added through the panel's uploader get this empty marker file so
 // listSkills can force them into the synthetic "uploaded" category regardless
 // of any [tag] their own SKILL.md carries.
@@ -33,8 +36,8 @@ export type SkillSummary = {
    *  are "generated"; every other skill collapses into "system". */
   group: "system" | "uploaded" | "generated";
   path: string;
-  /** True when dropped in via the uploader (has UPLOAD_MARKER). Only these
-   *  get an on/off toggle; system skills are always active. */
+  /** True when dropped in via the uploader (has UPLOAD_MARKER). Uploaded AND
+   *  generated skills get an on/off toggle; system skills are always active. */
   uploaded: boolean;
   /** False when the skill is disabled (SKILL.md renamed to SKILL.md.disabled). */
   enabled: boolean;
@@ -123,6 +126,7 @@ export function openSkillsPanel(
 /** Scan each ~/.claude/skills/<dir>/SKILL.md and return one summary per dir.
  *  Exported so the dashboard's Skills tile can show a real on-disk count. */
 export function listSkills(): SkillSummary[] {
+  const SKILLS_DIR = skillsDir();
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(SKILLS_DIR, { withFileTypes: true });
@@ -240,6 +244,7 @@ async function handleUpload(
   filename: string,
   dataB64: string,
 ): Promise<{ ok: true; name: string } | { ok: false; message: string }> {
+  const SKILLS_DIR = skillsDir();
   if (!filename.toLowerCase().endsWith(".zip")) {
     return { ok: false, message: "Only .zip files are supported." };
   }
@@ -358,16 +363,17 @@ function isSafeName(name: string): boolean {
   );
 }
 
-/** Flip an uploaded skill on/off by renaming SKILL.md <-> SKILL.md.disabled.
- *  Only uploaded skills toggle; system skills stay always-active. */
-function toggleSkill(
+/** Flip a skill on/off by renaming SKILL.md <-> SKILL.md.disabled. Both
+ *  uploaded and auto-created ("generated") skills toggle; system skills stay
+ *  always-active. Exported for unit tests. */
+export function toggleSkill(
   name: string,
   skills: SkillSummary[],
 ): { ok: true } | { ok: false; message: string } {
   const s = skills.find((x) => x.name === name);
   if (!s) return { ok: false, message: "Skill not found." };
-  if (!s.uploaded) {
-    return { ok: false, message: "Only uploaded skills can be toggled." };
+  if (!s.uploaded && s.group !== "generated") {
+    return { ok: false, message: "Only uploaded or generated skills can be toggled." };
   }
   const dir = path.dirname(s.path);
   const on = path.join(dir, "SKILL.md");
@@ -492,7 +498,7 @@ function renderShell(): string {
     font-size: 12px; font-weight: 600; line-height: 1.3; word-break: break-word;
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   }
-  /* On/off switch — rendered only on uploaded skills. */
+  /* On/off switch — rendered on uploaded + generated skills. */
   .tog {
     flex: none; margin-left: 8px; font: inherit; font-size: 10px; font-weight: 700;
     text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 8px;
@@ -617,9 +623,10 @@ function renderShell(): string {
     const start = (page - 1) * PAGE_SIZE;
     const slice = items.slice(start, start + PAGE_SIZE);
     const cards = slice.map(s => {
-      // Uploaded skills carry an on/off switch; system skills never do.
-      const isOff = s.uploaded && !s.enabled;
-      const tog = s.uploaded
+      // Uploaded + generated skills carry an on/off switch; system skills never do.
+      const toggleable = s.uploaded || s.group === 'generated';
+      const isOff = toggleable && !s.enabled;
+      const tog = toggleable
         ? '<button class="tog ' + (s.enabled ? 'on' : 'off') + '" data-tog="' + escapeHtml(s.name)
           + '" title="' + (s.enabled ? 'Disable this skill' : 'Enable this skill') + '">'
           + (s.enabled ? 'on' : 'off') + '</button>'

@@ -103,6 +103,41 @@ export function modelPrimaryCollections(
   return out;
 }
 
+/** The primary model key from an on-disk config (the one search actually uses),
+ *  defaulting to bge-m3. Drives which embed-state-<model>.json we count. */
+export function primaryModelOf(
+  file: { collections?: Record<string, { primary?: boolean }> } | null,
+): string {
+  const cols = file?.collections || {};
+  return Object.keys(cols).find((k) => cols[k]?.primary === true) || "bge-m3";
+}
+
+/** Synthesize an OracleConfigPayload purely from on-disk files — vector-server
+ *  .json for the config plus the indexed-doc count from the embed-state file —
+ *  so the section renders (and stays editable) without touching the server.
+ *  Readiness is derived: vector is "ready" when enabled and something is indexed.
+ *  Per-model install status is unknown from files alone; the server enriches it
+ *  when it happens to be up. */
+export function fileToPayload(
+  file: { enabled?: boolean; collections?: Record<string, { primary?: boolean }> } | null,
+  docs = 0,
+): OracleConfigPayload | null {
+  if (!file) return null;
+  const cols = file.collections || {};
+  const enabled = file.enabled === true;
+  const ready = enabled && docs > 0;
+  return {
+    enabled,
+    state: {
+      ready,
+      primary: primaryModelOf(file),
+      reason: enabled ? (ready ? "" : "ยังไม่ได้ index") : "vector section disabled",
+      collections: {},
+    },
+    config: { collections: cols },
+  };
+}
+
 function statusFromCol(col: OracleColState | undefined): ModelStatus {
   if (!col) return "unknown";
   if (col.ready === true) return "ready";

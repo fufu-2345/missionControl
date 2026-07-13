@@ -10,12 +10,21 @@ import {
   launchContinueRun,
   launchOrchestrator,
   listOrchestratorTeams,
+  listTmuxSessionsSafe,
+  projectDrivenState,
+  reapSession,
   scanResumableProjects,
   sessionCreatedAt,
   tmuxHasSession,
 } from "../commands/startOrchestrator";
 import { partitionStarred, toggleStar, type ResumableProject } from "../commands/orchestratorResume";
-import { pendingSprints, readRunMarker, resolveButtonState } from "../commands/continueRun";
+import {
+  clampSprintCount,
+  finishedSessions,
+  pendingSprints,
+  readRunMarker,
+  resolveButtonState,
+} from "../commands/continueRun";
 import type { OracleTeam } from "../commands/teams";
 
 // Single "Projects" webview panel (its OWN editor tab, mirroring teams.ts) — the
@@ -59,12 +68,16 @@ async function computeGitStates(
   return out;
 }
 
-async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch = false) {
+async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch: boolean | "spin" = false) {
   const projects = _st?.projects ?? [];
   annotateLiveState(projects); // refresh the live "doing" flag each render (cheap: one tmux call)
   const starred = new Set(starredList());
   const ordered = partitionStarred(projects, starred); // starred float to top; sub-order preserved
-  const states = await computeGitStates(ordered, fetch);
+  const states = await computeGitStates(ordered, fetch === true);
+  // Green-row detector: share ONE `tmux list-sessions` across all rows, computed
+  // every render (incl. spin ticks) so an owner/label-driven project doesn't
+  // flicker gray between full renders. `fetch==="spin"` only skips the git fetch.
+  const sessions = listTmuxSessionsSafe();
   panel.webview.postMessage({
     type: "screen_projects",
     title: "⏮ ทำต่อ — เลือก project ค้าง",
@@ -75,10 +88,16 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch = false) {
       // continue-button state derived purely (marker + tmux liveness) — the
       // zombie guard compares the live session's creation time to the recorded one.
       const marker = readRunMarker(p.path);
-      const live = marker
+      const live = marker?.session
         ? { alive: tmuxHasSession(marker.session), createdAt: sessionCreatedAt(marker.session) }
         : { alive: false };
       const btn = resolveButtonState(pendingSprints(p), marker, live);
+      // reuse the liveness just probed (no second has-session/created call): a run
+      // is live iff its session is up and not a zombie (reused name, created ≠ recorded).
+      const runAlive =
+        marker?.status === "running" &&
+        live.alive &&
+        !(marker.sessionCreatedAt !== undefined && live.createdAt !== undefined && live.createdAt !== marker.sessionCreatedAt);
       return {
         path: p.path,
         name: p.name,
@@ -87,6 +106,8 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch = false) {
         plannedTotal: p.plannedTotal,
         plannedDone: p.plannedDone,
         doing: p.doing,
+        // green row: is a session driving this project right now? (shared list + reused runAlive)
+        driven: projectDrivenState(p, { sessions, runAlive }).state !== "none",
         starred: starred.has(p.path),
         run: { state: btn.state, errorMsg: btn.errorMsg },
         git: { path: p.path, ...states[p.path] },
@@ -99,17 +120,39 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch = false) {
 
 // ── continue-run spin poll: re-render while any project's run is live ─────────
 let _spinPoll: ReturnType<typeof setInterval> | undefined;
+let _runningRuns = new Map<string, string>(); // path → session, for runs live on the previous tick
 function startSpinPoll(panel: vscode.WebviewPanel) {
   if (_spinPoll) return;
   _spinPoll = setInterval(async () => {
     const projs = _st?.projects ?? [];
-    const anyRunning = projs.some((p) => readRunMarker(p.path)?.status === "running");
-    // A sprint that just landed "done" → fetch so the right-hand git panel updates.
+    // Capture each live run's session WHILE it is running — the done/error marker
+    // is rewritten bare (drops .session), so this is the only chance to learn it.
+    const nowRunning = new Map<string, string>();
     for (const p of projs) {
-      if (readRunMarker(p.path)?.status === "done") await gitOps.fetchRepo(p.path);
+      const m = readRunMarker(p.path);
+      // Only a marker whose session is ACTUALLY alive counts as running. A marker
+      // stuck at "running" (session killed out-of-band, no done/error written)
+      // would otherwise pin the poll forever — treat it as finished so the poll
+      // stops and its (dead) session gets reaped once.
+      if (m?.status === "running" && m.session && tmuxHasSession(m.session))
+        nowRunning.set(p.path, m.session);
     }
-    if (_panel) await pushProjectsScreen(_panel);
-    if (!anyRunning) stopSpinPoll();
+    // A run live last tick but not this one JUST finished — `/orches-drive --once`
+    // overwrote its marker with a bare done/error (or it vanished). The extension
+    // gets no callback, so this transition is the only completion signal.
+    const someFinished = [..._runningRuns.keys()].some((path) => !nowRunning.has(path));
+    // Reap the finished headless run's tmux session — `--once` writes its marker
+    // then exits WITHOUT the Step-6 teardown, so the session (dead orchestrator +
+    // idle worker windows) lingers. This is what closes it when the run finishes.
+    for (const s of finishedSessions(_runningRuns, new Set(nowRunning.keys()))) reapSession(s);
+    // Re-scan so "ค้าง N sprint" drops, and render with fetch=true so the git panel
+    // (Commit / up-to-date) reflects what landed — no manual "fetch" click needed.
+    if (someFinished && _st) _st.projects = scanResumableProjects();
+    _runningRuns = nowRunning;
+    // finished → full render (fresh scan + git fetch + green re-probe); otherwise a
+    // cheap spin tick (spinner only, skip the owner/label probe).
+    if (_panel) await pushProjectsScreen(_panel, someFinished ? true : "spin");
+    if (nowRunning.size === 0) stopSpinPoll();
   }, 2500);
 }
 function stopSpinPoll() {
@@ -117,6 +160,7 @@ function stopSpinPoll() {
     clearInterval(_spinPoll);
     _spinPoll = undefined;
   }
+  _runningRuns = new Map();
 }
 
 function pushTeamsScreen(panel: vscode.WebviewPanel) {
@@ -236,15 +280,23 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         const p = _st.projects.find((x) => x.path === msg.path);
         if (!p) return;
         _st.project = p;
-        // Already being worked on (a live orchestrator session) → ATTACH to it
-        // instead of spawning a new session on top. Falls through to the team
-        // picker when nothing live is found to attach to.
-        if (p.doing && attachToProject(p)) {
-          vscode.window.showInformationMessage(
-            `Orchestrator: attach เข้า session ที่กำลังทำ '${p.name}' (ไม่สร้างใหม่)`,
+        // 1 project = 1 session: already being driven (worker / run / owner at a
+        // checkpoint / labeled) → ATTACH to THAT session, never spawn on top.
+        // Falls through to the team picker only when nothing live is found.
+        annotateLiveState([p]);
+        const driven = projectDrivenState(p);
+        if (driven.state !== "none") {
+          if (attachToProject(p, driven.session)) {
+            vscode.window.showInformationMessage(
+              `Orchestrator: attach เข้า session '${driven.session ?? ""}' ที่ขับ '${p.name}' อยู่ (ไม่สร้างใหม่)`,
+            );
+            panel.dispose();
+            return;
+          }
+          vscode.window.showWarningMessage(
+            `'${p.name}' กำลังถูกขับ (session ${driven.session ?? "?"}) แต่ attach ไม่ได้ — เปิด session นั้นเอง`,
           );
-          panel.dispose();
-          return;
+          return; // do NOT fall through to spawn a twin
         }
         pushTeamsScreen(panel);
         return;
@@ -278,6 +330,9 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         await pushProjectsScreen(panel);
         return;
       case "git_refresh":
+        // Full manual refresh: re-scan sprint state too (so "ค้าง N sprint"
+        // reflects reality), not just git — the one-time open snapshot is stale.
+        if (_st) _st.projects = scanResumableProjects();
         await pushProjectsScreen(panel, true);
         return;
       case "continue_run": {
@@ -288,6 +343,31 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         else if (r.attached)
           vscode.window.showInformationMessage(
             `Continue: '${p.name}' กำลังทำอยู่แล้ว — เปิด session เดิมให้ (ไม่ launch ซ้ำ)`,
+          );
+        await pushProjectsScreen(panel);
+        startSpinPoll(panel);
+        return;
+      }
+      case "continue_multi": {
+        const p = _st.projects.find((x) => x.path === msg.path);
+        if (!p) return;
+        // Count comes from the in-webview modal; clamp defensively (never trust the
+        // client value) against what's actually left.
+        const remaining = pendingSprints(p);
+        const n = clampSprintCount(String(msg.count ?? ""), remaining);
+        if (remaining < 2 || n === null) {
+          await pushProjectsScreen(panel);
+          return;
+        }
+        const r = launchContinueRun(p, n);
+        if (r.error) vscode.window.showWarningMessage(`Continue: ${r.error}`);
+        else if (r.attached)
+          vscode.window.showInformationMessage(
+            `Continue: '${p.name}' กำลังทำอยู่แล้ว — เปิด session เดิมให้ (ไม่ launch ซ้ำ)`,
+          );
+        else
+          vscode.window.showInformationMessage(
+            `Continue: '${p.name}' เริ่มทำ ${n} sprint รวด (background)`,
           );
         await pushProjectsScreen(panel);
         startSpinPoll(panel);
@@ -418,6 +498,9 @@ function renderShell(): string {
   .card .pick { flex: 1; display: flex; flex-direction: column; cursor: pointer; background: none;
     border: none; text-align: left; color: inherit; padding: 0; }
   .card:hover { background: var(--vscode-list-hoverBackground); }
+  /* project has a live session driving it right now → green (same palette as .chip.doing/.cont) */
+  .card.live { border-color: #2ea043; background: rgba(63,185,80,0.10); }
+  .card.live:hover { background: rgba(63,185,80,0.16); }
   .card .cname { font-size: 13px; font-weight: 600; }
   .card .csub { font-size: 11px; opacity: 0.65; margin-top: 2px; }
   /* team-picker cards are the main action here → bigger + button-like */
@@ -451,6 +534,8 @@ function renderShell(): string {
   .cont:hover { background: rgba(63,185,80,0.22); }
   .cont.spin, .cont.stale { border-color: #c47f1a; color: #e3a13a; background: rgba(196,127,26,0.14); }
   .cont.err { border-color: #f85149; color: #f85149; background: rgba(248,81,73,0.12); cursor: help; }
+  .cont.multi { border-color: #3f7bd0; color: #6ca6ff; background: rgba(63,123,208,0.12); }
+  .cont.multi:hover { background: rgba(63,123,208,0.22); }
   .cont-rot { display: inline-block; animation: contspin 1.1s linear infinite; }
   @keyframes contspin { to { transform: rotate(360deg); } }
   .git-editor { margin-top: 6px; }
@@ -465,15 +550,34 @@ function renderShell(): string {
      orbiting the button border via an animated conic ring on ::after */
   @property --gl { syntax: '<angle>'; inherits: false; initial-value: 0deg; }
   .glow { position: relative; }
-  .glow::after { content: ''; position: absolute; inset: -3px; border-radius: 9px; padding: 2px;
-    background: conic-gradient(from var(--gl), transparent 0deg 250deg, #ffd33d 300deg,
-      #fff8c5 330deg, #ffd33d 350deg, transparent 360deg);
+  .glow::after { content: ''; position: absolute; inset: -2px; border-radius: 8px; padding: 1.5px;
+    opacity: 0.66;
+    background: conic-gradient(from var(--gl), transparent 0deg 284deg, #ecc94b 310deg,
+      #f7e59a 332deg, #ecc94b 350deg, transparent 360deg);
     -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
     -webkit-mask-composite: xor;
     mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
     mask-composite: exclude;
-    animation: glspin 1.1s linear infinite; pointer-events: none; }
+    animation: glspin 1.2s linear infinite; pointer-events: none; }
   @keyframes glspin { to { --gl: 360deg; } }
+  /* "ทำหลาย sprint" — centered floating modal (host showInputBox can't center). */
+  .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+    display: flex; align-items: center; justify-content: center; z-index: 100; }
+  .modal-card { background: var(--vscode-editor-background);
+    border: 1px solid var(--vscode-panel-border); border-radius: 8px;
+    padding: 18px 20px; width: 320px; max-width: 86vw;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.5); }
+  .modal-card .mt { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+  .modal-card .mh { font-size: 11px; opacity: 0.65; margin-bottom: 12px; line-height: 1.4; }
+  .modal-card input { width: 100%; box-sizing: border-box; font-size: 15px; padding: 7px 9px;
+    background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius: 4px; }
+  .modal-card .merr { font-size: 11px; color: #f85149; min-height: 14px; margin-top: 6px; }
+  .modal-card .mact { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+  .modal-card .mbtn { font-size: 12px; padding: 5px 14px; border-radius: 5px; cursor: pointer;
+    border: 1px solid var(--vscode-panel-border); background: transparent; color: var(--vscode-foreground); }
+  .modal-card .mbtn.primary { border-color: #3f7bd0; color: #fff; background: #1f6feb; }
+  .modal-card .mbtn.primary:hover { background: #388bfd; }
 </style></head>
 <body>
   <div class="topbar">
@@ -481,6 +585,18 @@ function renderShell(): string {
     <div class="actions" id="actions"></div>
   </div>
   <div class="content" id="content"><div class="empty">Loading…</div></div>
+  <div id="multimodal" class="modal-backdrop" style="display:none">
+    <div class="modal-card" role="dialog" aria-modal="true">
+      <div class="mt" id="mm-title">ทำหลาย sprint</div>
+      <div class="mh" id="mm-hint"></div>
+      <input id="mm-input" type="number" min="1" step="1" />
+      <div class="merr" id="mm-err"></div>
+      <div class="mact">
+        <button class="mbtn" id="mm-cancel">ยกเลิก</button>
+        <button class="mbtn primary" id="mm-ok">ทำ</button>
+      </div>
+    </div>
+  </div>
 <script>
   const vscode = acquireVsCodeApi();
   var COLOR = { commit:'#c47f1a', push:'#1f6feb', pull:'#1b9aaa', 'create-push':'#238636' };
@@ -488,6 +604,33 @@ function renderShell(): string {
     .replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
   function el(id){ return document.getElementById(id); }
   function post(t,x){ vscode.postMessage(Object.assign({type:t}, x||{})); }
+
+  // "ทำหลาย sprint" centered modal (in-webview so it floats center, not the
+  // top command-palette bar that host showInputBox is stuck in). Confirm posts
+  // continue_multi{path,count}; host clamps + launches N sprints headless.
+  var _mmPath=null, _mmMax=2;
+  function openMultiModal(path, name, pending){
+    _mmPath=path; _mmMax=Math.max(2, pending||2);
+    el('mm-title').textContent='ทำหลาย sprint — '+(name||'');
+    el('mm-hint').textContent='จะทำกี่ sprint รวดเดียว (headless, ไม่ attach)? เหลือ '+pending;
+    el('mm-err').textContent='';
+    var inp=el('mm-input'); inp.max=String(pending); inp.value=String(pending);
+    el('multimodal').style.display='flex'; inp.focus(); inp.select();
+  }
+  function closeMultiModal(){ el('multimodal').style.display='none'; _mmPath=null; }
+  function mmConfirm(){
+    var v=parseInt(el('mm-input').value,10);
+    if(!(v>=1)){ el('mm-err').textContent='ใส่ตัวเลข 1-'+_mmMax; return; }
+    if(v>_mmMax){ el('mm-err').textContent='เหลือแค่ '+_mmMax+' sprint'; return; }
+    var p=_mmPath; var c=cardOf(p); if(c) c.classList.add('live'); // optimistic: green now
+    closeMultiModal(); post('continue_multi',{path:p, count:v});
+  }
+  el('mm-cancel').addEventListener('click', closeMultiModal);
+  el('mm-ok').addEventListener('click', mmConfirm);
+  el('multimodal').addEventListener('click', function(e){ if(e.target===el('multimodal')) closeMultiModal(); });
+  el('mm-input').addEventListener('keydown', function(e){
+    if(e.key==='Enter'){ e.preventDefault(); mmConfirm(); }
+    else if(e.key==='Escape'){ e.preventDefault(); closeMultiModal(); } });
 
   // "โหมดถาม" toggle — persists across screen re-renders (this script runs once).
   // On: the launch post carries askMode:true → kickoff gets the grilling+scrutinize trigger.
@@ -581,11 +724,17 @@ function renderShell(): string {
         run.state === 'idle'     ? '<button class="cont" title="ทำต่อ 1 sprint ด้วยทีมล่าสุด (auto, background)">▶ ทำต่อ</button>' :
         run.state === 'stale'    ? '<button class="cont stale" title="run หลุด — คลิกเพื่อเริ่มใหม่">⚠ ทำต่อ</button>' :
         run.state === 'error'    ? '<button class="cont err" title="'+esc(run.errorMsg||'error')+'">⚠ error</button>' : '';
-      return '<div class="card" data-path="'+esc(it.path)+'">'
+      // "ทำหลาย sprint": only when idle AND ≥2 sprint left. Opens a "how many?"
+      // input box; host runs N sprints headless in ONE detached run (no attach,
+      // no checkpoint between them). Class 'cont' so the row-select guard skips it.
+      var multiBtn = (run.state === 'idle' && pending >= 2)
+        ? '<button class="cont multi" data-pending="'+pending+'" data-name="'+esc(it.name)+'" title="ทำหลาย sprint รวดเดียว (auto, background) — เลือกจำนวน">▶▶ ทำหลาย sprint</button>'
+        : '';
+      return '<div class="card'+(it.driven?' live':'')+'" data-path="'+esc(it.path)+'">'
         +'<span class="star'+(it.starred?' on':'')+'" role="button" title="ปักดาว / เอาดาวออก">'+(it.starred?'★':'☆')+'</span>'
         +'<div style="flex:1"><button class="pick"><span class="cname">'+esc(it.name)+chip+'</span>'
         +'<span class="csub">'+sub+'</span></button>'+gitEditor(it.git)+'</div>'
-        +contBtn
+        +contBtn+multiBtn
         +'<span class="git-cell">'+gitCell(it.git)+'</span></div>';
     }).join('') : '<div class="empty">'+esc(m.subtitle)+'</div>';
     el("content").querySelectorAll('.card').forEach(function(card){
@@ -601,11 +750,14 @@ function renderShell(): string {
       });
       var starEl=card.querySelector('.star');
       if(starEl) starEl.addEventListener('click',function(e){ e.stopPropagation(); post('toggle_star',{path:path}); });
-      var contEl=card.querySelector('.cont');
+      var contEl=card.querySelector('.cont:not(.multi)');
       if(contEl) contEl.addEventListener('click',function(e){ e.stopPropagation();
         // spinning → this click CANCELS the live run; any other state → start one.
         if(contEl.classList.contains('spin')) post('cancel_run',{path:path});
-        else post('continue_run',{path:path}); });
+        else { card.classList.add('live'); post('continue_run',{path:path}); } }); // optimistic: green now
+      var multiEl=card.querySelector('.cont.multi');
+      if(multiEl) multiEl.addEventListener('click',function(e){ e.stopPropagation();
+        openMultiModal(path, multiEl.dataset.name||'', Number(multiEl.dataset.pending)||2); });
       wireGit(card, path);
     });
     // DOM เพิ่งถูกสร้างใหม่ทั้งจอ (host re-render หลังทุก git action) — สถานะ arm/แสง
@@ -681,7 +833,12 @@ function renderShell(): string {
   function execArmed(p){ var st=ast(p); st.execTimer=null;
     if(!st.armed || !st.msg) return;
     var withPush=(st.armed===2), msg=st.msg;
-    st.armed=0; st.armedAt=0; st.msg=null; applyAutoUi(p);
+    st.armed=0; st.armedAt=0; st.msg=null;
+    // ปิดฟอร์มทันทีที่ยิง commit — ไม่รอ host re-render กลับมา กัน user มือเร็วกด auto/commit/push
+    // ในเสี้ยววิระหว่าง commit→push (ตอนนั้นงานยิงไปแล้ว กดซ้ำ = commit/แกล้งซ้อน)
+    st.edOpen=false; st.draft=null; _edCloseAt=Date.now();
+    applyAutoUi(p);
+    var card=cardOf(p), ed=card&&card.querySelector('.git-editor'); if(ed) ed.style.display='none';
     post(withPush?'git_commit_push':'git_commit',{path:p,message:msg}); }
   function applyAutoUi(p){ var card=cardOf(p); if(!card) return;
     var st=ast(p), ed=card.querySelector('.git-editor');
@@ -693,7 +850,11 @@ function renderShell(): string {
     // ฟื้น message ที่พิมพ์ค้าง/auto เติมไว้ หลังจอถูก re-render (host refresh ทุก git action)
     var bx=card.querySelector('.git-msg'); if(bx && st.draft && !bx.value) bx.value=st.draft;
     go.classList.toggle('glow', st.armed>0);
-    if(px){ px.style.display = st.armed>0 ? '' : 'none'; px.classList.toggle('glow', st.armed===2); } }
+    if(px){ px.style.display = st.armed>0 ? '' : 'none';
+      // sync: ตอนแสง push เพิ่งติด ให้ restart แสง commit ในเฟรมเดียวกัน → จุดวิ่งออกจาก 0° พร้อมกัน (เฟสตรงกันตลอด grace)
+      var pxOn = st.armed===2, pxWas = px.classList.contains('glow');
+      if(pxOn && !pxWas){ go.classList.remove('glow'); void go.offsetWidth; go.classList.add('glow'); }
+      px.classList.toggle('glow', pxOn); } }
   // คืน msg ที่ค้างเข้า textarea ตอนปลด arm ระหว่าง grace — จะได้ไม่หายไปเฉยๆ
   function disarmToBox(p, ed){ var m=disarm(p); applyAutoUi(p);
     if(m){ var st=ast(p); st.draft=m; st.edOpen=true;

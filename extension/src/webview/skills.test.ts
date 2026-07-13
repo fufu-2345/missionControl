@@ -37,4 +37,40 @@ describe("listSkills grouping", () => {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
+
+  test("generated skills can be toggled off/on (rename SKILL.md <-> .disabled); system skills cannot", async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mc-skills-"));
+    process.env.MC_SKILLS_DIR = tmp;
+    try {
+      writeSkill(tmp, "gen-x",
+        "name: gen-x\ndescription: a generated one\ninstaller: auto-skill");
+      writeSkill(tmp, "sys-x", "name: sys-x\ndescription: a system one");
+
+      const { listSkills, toggleSkill } = await import("./skills");
+
+      // generated → toggle off
+      let list = listSkills();
+      expect(toggleSkill("gen-x", list).ok).toBe(true);
+      expect(fs.existsSync(path.join(tmp, "gen-x", "SKILL.md.disabled"))).toBe(true);
+      expect(fs.existsSync(path.join(tmp, "gen-x", "SKILL.md"))).toBe(false);
+
+      // still listed as generated but now disabled
+      list = listSkills();
+      const off = list.find((s) => s.name === "gen-x")!;
+      expect(off.group).toBe("generated");
+      expect(off.enabled).toBe(false);
+
+      // toggle back on
+      expect(toggleSkill("gen-x", list).ok).toBe(true);
+      expect(fs.existsSync(path.join(tmp, "gen-x", "SKILL.md"))).toBe(true);
+      expect(listSkills().find((s) => s.name === "gen-x")!.enabled).toBe(true);
+
+      // system skills refuse to toggle
+      const res = toggleSkill("sys-x", listSkills());
+      expect(res.ok).toBe(false);
+    } finally {
+      delete process.env.MC_SKILLS_DIR;
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 });

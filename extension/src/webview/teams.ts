@@ -12,13 +12,13 @@ import {
 } from "../commands/teamsOps";
 import {
   COLOR_OPTIONS,
-  DEFAULT_MODEL,
   DEFAULT_ROLE,
   ROLE_OPTIONS,
   isSafeTeamName,
   normalizeOracle,
   type TeamMember,
 } from "../commands/teamsModel";
+import { getDefaultMemberModel } from "../commands/settingsOps";
 import { teamUp } from "../commands/teamUp";
 
 // Editor-area panel for browsing + editing maw oracle-teams. Mirrors skills.ts:
@@ -33,8 +33,14 @@ const OPTIONS = {
   roleOptions: [...ROLE_OPTIONS],
   colorOptions: [...COLOR_OPTIONS],
   defaultRole: DEFAULT_ROLE,
-  defaultModel: DEFAULT_MODEL,
 };
+
+// defaultModel is resolved fresh each push (not baked into OPTIONS) so a change
+// on the Settings page takes effect without reopening the panel. The Settings
+// knob default_member_model drives what a new/empty member row pre-selects.
+function panelOptions() {
+  return { ...OPTIONS, defaultModel: getDefaultMemberModel() };
+}
 
 function pushList(panel: vscode.WebviewPanel) {
   panel.webview.postMessage({ type: "team_list", teams: listTeamSummaries() });
@@ -48,7 +54,7 @@ async function pushDetail(panel: vscode.WebviewPanel, name: string) {
     type: "team_detail",
     team,
     candidates,
-    ...OPTIONS,
+    ...panelOptions(),
     modelOptions,
   });
 }
@@ -106,7 +112,7 @@ export function openTeamsPanel(_projectId: string | null = null): vscode.Webview
         panel.webview.postMessage({
           type: "team_new",
           candidates: oracleCandidates([]),
-          ...OPTIONS,
+          ...panelOptions(),
           modelOptions,
         });
         return;

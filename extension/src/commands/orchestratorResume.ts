@@ -129,3 +129,34 @@ export function partitionStarred(
   for (const p of list) (starred.has(p.path) ? top : rest).push(p);
   return [...top, ...rest];
 }
+
+export type DrivenState = "worker" | "run" | "owner" | "labeled" | "none";
+
+/** Which live signal (if any) proves a project is being driven RIGHT NOW, by
+ *  priority: worker (a pane grinding under agents/) > run (this button's headless
+ *  run) > owner (.orches-state owner-session still in tmux — the ONE signal that
+ *  survives a between-sprint checkpoint pause) > labeled (@orches_label session) >
+ *  none. Pure: the caller probes the four booleans. */
+export function classifyDriven(a: {
+  workerLive: boolean;
+  runAlive: boolean;
+  ownerAlive: boolean;
+  labelMatch: boolean;
+}): DrivenState {
+  if (a.workerLive) return "worker";
+  if (a.runAlive) return "run";
+  if (a.ownerAlive) return "owner";
+  if (a.labelMatch) return "labeled";
+  return "none";
+}
+
+/** Read a single `key: value` from `.orches-state` (orches-drive's atomic KV file).
+ *  First ':' splits key/value so a value with ':' (e.g. an ISO heartbeat) survives.
+ *  Trims; null if the key is absent or its value is blank. Pure. */
+export function parseStateValue(raw: string, key: string): string | null {
+  for (const line of raw.split(/\r?\n/)) {
+    const i = line.indexOf(":");
+    if (i > 0 && line.slice(0, i).trim() === key) return line.slice(i + 1).trim() || null;
+  }
+  return null;
+}

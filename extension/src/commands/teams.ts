@@ -130,13 +130,20 @@ export function buildContinueKickoff(
   team: string,
   orch: string,
   workers: string[],
+  sprints = 1, // >1 → "▶▶ ทำหลาย sprint": N sprints headless, no checkpoint between
 ): string {
+  const n = Math.max(1, Math.floor(sprints));
+  const flag = n > 1 ? `--once ${n}` : `--once`;
+  const scope =
+    n > 1
+      ? `ทำ ${n} sprint ถัดไปใน docs/plan.md รวดเดียว (เหลือน้อยกว่านั้น = ทำเท่าที่เหลือ) — ⛔ ไม่จอด checkpoint ระหว่างทาง ไม่โชว์ปุ่ม. `
+      : `ทำ sprint ถัดไปใน docs/plan.md อันเดียวแล้วหยุด — ห้ามวน sprint ต่อ ไม่โชว์ปุ่ม checkpoint. `;
   return (
-    `/orches-drive --once ` +
+    `/orches-drive ${flag} ` +
     `resume project "${projectName}" ที่ ${projectPath} (team ${team}, ผม=${orch}). ` +
-    `ทำ sprint ถัดไปใน docs/plan.md อันเดียวแล้วหยุด — ห้ามวน sprint ต่อ ไม่โชว์ปุ่ม checkpoint. ` +
+    scope +
     `MERGE_MODE อ่านจาก Settings (อย่าถาม). worker: ${workers.join(", ") || "(none)"}. ` +
-    `เมื่อจบ 1 sprint เขียน .orches-run.json {"status":"done"} แล้ว exit; ` +
+    `เมื่อจบ${n > 1 ? "ครบ" : " 1 sprint"} เขียน .orches-run.json {"status":"done"} แล้ว exit; ` +
     `ถ้าล้ม เขียน {"status":"error","errorMsg":"<เหตุผล>"} แล้ว exit.`
   );
 }

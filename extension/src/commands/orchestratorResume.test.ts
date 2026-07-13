@@ -2,17 +2,37 @@ import { expect, test } from "bun:test";
 
 import { buildResumeKickoff } from "./teams";
 import {
+  classifyDriven,
   defaultTeamForProject,
   isProjectLive,
   isResumable,
   parseOrchesMeta,
   parsePlan,
+  parseStateValue,
   partitionStarred,
   type ResumableProject,
   serializeOrchesMeta,
   sortResumable,
   toggleStar,
 } from "./orchestratorResume";
+
+test("classifyDriven: priority worker > run > owner > labeled > none", () => {
+  const base = { workerLive: false, runAlive: false, ownerAlive: false, labelMatch: false };
+  expect(classifyDriven({ workerLive: true, runAlive: true, ownerAlive: true, labelMatch: true })).toBe("worker");
+  expect(classifyDriven({ ...base, runAlive: true, ownerAlive: true, labelMatch: true })).toBe("run");
+  expect(classifyDriven({ ...base, ownerAlive: true, labelMatch: true })).toBe("owner");
+  expect(classifyDriven({ ...base, labelMatch: true })).toBe("labeled");
+  expect(classifyDriven(base)).toBe("none");
+});
+
+test("parseStateValue: read a key from .orches-state colon format (trim; null if absent)", () => {
+  const raw = "owner-session: 09-foreman\nteam: brew\nstatus: in-progress\n";
+  expect(parseStateValue(raw, "owner-session")).toBe("09-foreman");
+  expect(parseStateValue(raw, "team")).toBe("brew");
+  expect(parseStateValue(raw, "sprint")).toBeNull(); // absent
+  expect(parseStateValue("", "owner-session")).toBeNull();
+  expect(parseStateValue("owner-session:    05-bob   ", "owner-session")).toBe("05-bob"); // trims
+});
 
 test("parsePlan: counts total + done from checkbox lines", () => {
   const raw = [

@@ -7,10 +7,12 @@ import {
   type SettingEntry,
 } from "../commands/settingsOps";
 import { deriveEnabled, writeIntent, modelPrimaryCollections } from "../commands/searchOps";
-import { patchConfig, startIndex, stopIndex } from "../commands/oracleVectorClient";
+import { OracleOfflineError, patchConfig, startIndex, stopIndex } from "../commands/oracleVectorClient";
+import { writeBackendIntent } from "../commands/vectorConfigFile";
 import { pullModel } from "../commands/ollamaPull";
 import {
-  buildSearchState,
+  buildSearchStateEnriched,
+  buildSearchStateFast,
   searchSectionBody,
   searchSectionScript,
   searchSectionStyle,
@@ -23,7 +25,7 @@ import {
 let _panel: vscode.WebviewPanel | undefined;
 
 // Group render order — anything not listed falls to the end.
-const GROUP_ORDER = ["Orchestration", "Build", "Skills", "Other"];
+const GROUP_ORDER = ["Orchestration", "Build", "Teams", "Skills", "Other"];
 
 function grouped(entries: SettingEntry[]): { group: string; fields: SettingEntry[] }[] {
   const byGroup = new Map<string, SettingEntry[]>();
@@ -50,15 +52,21 @@ function pushList(panel: vscode.WebviewPanel): void {
 }
 
 async function pushSearch(panel: vscode.WebviewPanel): Promise<void> {
-  const state = await buildSearchState();
-  panel.webview.postMessage({ type: "searchState", state });
+  // Stale-while-revalidate: paint the instant file-only view first (works
+  // offline, never hangs on the :47778 timeout), then enrich from the server
+  // if it happens to be up (real model status + live index progress).
+  panel.webview.postMessage({ type: "searchState", state: buildSearchStateFast() });
+  const enriched = await buildSearchStateEnriched();
+  if (enriched) panel.webview.postMessage({ type: "searchState", state: enriched });
 }
 
 let _indexPoll: ReturnType<typeof setInterval> | undefined;
 function pollSearchWhileIndexing(panel: vscode.WebviewPanel): void {
   if (_indexPoll) return;
   _indexPoll = setInterval(async () => {
-    const state = await buildSearchState();
+    // Progress is live server state — use the enriched view. If the server
+    // vanished mid-run, fall back to the file view and stop polling.
+    const state = (await buildSearchStateEnriched()) ?? buildSearchStateFast();
     panel.webview.postMessage({ type: "searchState", state });
     if (state.index.status !== "indexing" && state.index.status !== "stopping") {
       clearInterval(_indexPoll);
@@ -116,6 +124,10 @@ export function openSettingsPanel(): vscode.WebviewPanel {
         return;
 
       case "searchSet": {
+        // Write vector-server.json directly first (offline-safe source of truth
+        // the server reads on boot), then best-effort PATCH so a running server
+        // applies it live. A down server is expected — swallow it; only surface
+        // errors the server actually returned.
         try {
           if (msg.field === "hybrid" || msg.field === "mode") {
             const intent = writeIntent(
@@ -123,15 +135,20 @@ export function openSettingsPanel(): vscode.WebviewPanel {
                 ? { hybridEnabled: msg.value === true }
                 : { mode: msg.value === "graph" ? "graph" : "vector" },
             );
-            await patchConfig({ enabled: deriveEnabled(intent) });
+            const enabled = deriveEnabled(intent);
+            writeBackendIntent({ enabled });
+            await patchConfig({ enabled });
           } else if (msg.field === "model" && typeof msg.value === "string") {
             // Set the chosen model primary AND unset the others — the oracle keeps
             // the first of multiple primaries, so a lone {primary:true} won't switch.
+            writeBackendIntent({ primaryModel: msg.value });
             await patchConfig({ collections: modelPrimaryCollections(msg.value) });
           }
         } catch (err) {
-          const m = err instanceof Error ? err.message : String(err);
-          vscode.window.showErrorMessage(`Search: ${m}`);
+          if (!(err instanceof OracleOfflineError)) {
+            const m = err instanceof Error ? err.message : String(err);
+            vscode.window.showErrorMessage(`Search: ${m}`);
+          }
         }
         await pushSearch(panel);
         return;
@@ -148,8 +165,13 @@ export function openSettingsPanel(): vscode.WebviewPanel {
           await startIndex();
           pollSearchWhileIndexing(panel);
         } catch (err) {
-          const m = err instanceof Error ? err.message : String(err);
-          vscode.window.showErrorMessage(`Index: ${m}`);
+          // Indexing is the one action that genuinely needs the server running.
+          if (err instanceof OracleOfflineError) {
+            vscode.window.showWarningMessage("เปิด oracle server (:47778) ก่อนถึงจะ index ได้");
+          } else {
+            const m = err instanceof Error ? err.message : String(err);
+            vscode.window.showErrorMessage(`Index: ${m}`);
+          }
         }
         await pushSearch(panel);
         return;

@@ -8,7 +8,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import type { ResumableProject } from "./orchestratorResume";
+import type { DrivenState, ResumableProject } from "./orchestratorResume";
 import type { OracleTeam } from "./teams";
 
 export type RunStatus = "running" | "done" | "error" | "cancelled";
@@ -16,10 +16,10 @@ export type RunStatus = "running" | "done" | "error" | "cancelled";
 export interface RunMarker {
   status: RunStatus;
   sprint?: number;
-  session: string;
+  session?: string; // present for a live run; the bare terminal marker orches-drive
   sessionCreatedAt?: number; // tmux #{session_created}, epoch seconds
   baseMainSha?: string;
-  startedAt: string; // ISO 8601
+  startedAt?: string; // writes ({"status":"done"|"error"}) omits session/startedAt
   errorMsg?: string;
 }
 
@@ -31,7 +31,12 @@ export function parseRunMarker(raw: string): RunMarker | null {
     const o = JSON.parse(raw);
     if (!o || typeof o !== "object" || Array.isArray(o)) return null;
     if (!STATUSES.includes(o.status)) return null;
-    if (typeof o.session !== "string" || typeof o.startedAt !== "string") return null;
+    // Only a live run must identify its tmux session + start time (the zombie
+    // guard needs them). Terminal markers written by `/orches-drive --once` are
+    // bare — `{"status":"done"}` / `{"status":"error","errorMsg":"…"}` — and must
+    // still parse, else the extension never learns the sprint finished.
+    if (o.status === "running" && (typeof o.session !== "string" || typeof o.startedAt !== "string"))
+      return null;
     return o as RunMarker;
   } catch {
     return null;
@@ -125,25 +130,44 @@ export function resolveContinueTarget(
 
 export type ContinueAction = "already-running" | "attach" | "launch";
 
-/** What the inline "▶ ทำต่อ" button should do, decided from the live signals so
- *  it NEVER spawns a second orchestrator twin on a project that is already being
- *  driven (the double-launch bug):
- *   - `already-running` — this button's own run is live (running marker + its
- *     session alive) → leave it; the spinner already reflects it.
- *   - `attach` — a worker pane is grinding this project (`doing`) but there is no
- *     live run marker (it's driven by a full `/orches-drive`, which writes no
- *     `.orches-run.json`) → re-enter that session instead of forking a twin.
- *   - `launch` — nothing live → start a fresh detached one-sprint run.
- *  `markerSessionAlive` is supplied by the caller (a tmux `has-session` check on
- *  `marker.session`) so this stays pure and unit-testable. */
-export function decideContinueAction(
-  doing: boolean,
-  marker: RunMarker | null,
-  markerSessionAlive: boolean,
-): ContinueAction {
-  if (marker?.status === "running" && markerSessionAlive) return "already-running";
-  if (doing) return "attach";
-  return "launch";
+/** What the "▶ ทำต่อ" / "▶▶ ทำหลาย sprint" button should do, decided from the ONE
+ *  detector's `DrivenState`, so it NEVER forks a second orchestrator onto a project
+ *  already being driven (the 1-project-1-session rule):
+ *   - `run` → `already-running`: this button's own headless run is live; the
+ *     spinner already reflects it — don't relaunch or reopen a terminal.
+ *   - `worker | owner | labeled` → `attach`: a session already drives it (incl. a
+ *     checkpoint-paused orchestrator = `owner`) → re-enter it, never spawn a twin.
+ *   - `none` → `launch`: nothing live → start a fresh detached run. */
+export function decideContinueAction(state: DrivenState): ContinueAction {
+  if (state === "run") return "already-running";
+  if (state === "none") return "launch";
+  return "attach";
+}
+
+/** Parse the "ทำหลาย sprint" popup input into a sprint count, clamped to what's
+ *  actually left (`remaining`). Returns null for junk / <1 so the InputBox can
+ *  reject it (or the caller can cancel). parseInt floors "2.5" → 2. */
+export function clampSprintCount(raw: string, remaining: number): number | null {
+  const n = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(n) || n < 1) return null;
+  return Math.min(n, Math.max(1, remaining));
+}
+
+/** Sessions of headless runs that left "running" since the previous poll tick —
+ *  i.e. their `.orches-run.json` flipped to done/error (or vanished). The done
+ *  marker is rewritten bare (no `.session`), so the caller captured each run's
+ *  session name WHILE it was live; this returns the ones to reap now. Blank
+ *  sessions are skipped (nothing safe to kill). Pure — the tmux kill is the
+ *  caller's job. */
+export function finishedSessions(
+  prev: ReadonlyMap<string, string>,
+  nowRunningPaths: ReadonlySet<string>,
+): string[] {
+  const out: string[] = [];
+  for (const [path, session] of prev) {
+    if (!nowRunningPaths.has(path) && session) out.push(session);
+  }
+  return out;
 }
 
 /** Cancel precedence: if the sprint finished/merged in the race between the

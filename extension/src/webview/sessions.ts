@@ -121,3 +121,15 @@ export function computeSessionLabel(args: {
   }
   return args.rawName;
 }
+
+/** True when an @orches_label names this project — exact basename or
+ *  "<basename> / <team>". The " / " in the prefix check means "foo" never
+ *  matches "foobar". Pure. */
+export function labelNamesProject(orchesLabel: string | undefined, basename: string): boolean {
+  return !!orchesLabel && (orchesLabel === basename || orchesLabel.startsWith(basename + " / "));
+}
+
+/** First live session whose @orches_label names this project. Pure. */
+export function sessionForProjectLabel(basename: string, sessions: TmuxSession[]): TmuxSession | null {
+  return sessions.find((s) => labelNamesProject(s.orchesLabel, basename)) ?? null;
+}

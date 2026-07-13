@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
-import { deriveEnabled, readIntent, writeIntent, reconcile, UI_MODELS, modelPrimaryCollections } from "./searchOps";
+import { deriveEnabled, fileToPayload, readIntent, writeIntent, reconcile, UI_MODELS, modelPrimaryCollections } from "./searchOps";
 import { readConfig } from "./settingsOps";
 
 let tmp: string;
@@ -91,6 +91,30 @@ describe("reconcile", () => {
   test("offline → banner, controls flagged offline", () => {
     const vm = reconcile({ online: false, config: null, health: null, docs: 0, index: IDLE_INDEX, intent: intentOff });
     expect(vm.oracleOnline).toBe(false);
+  });
+
+  test("offline reconciles from disk file: enabled + primary reflect vector-server.json", () => {
+    const payload = fileToPayload({ enabled: true, collections: { "bge-m3": { primary: false }, nomic: { primary: true } } });
+    const vm = reconcile({ online: false, config: payload, health: null, docs: 0, index: IDLE_INDEX, intent: intentOff });
+    expect(vm.oracleOnline).toBe(false);
+    expect(vm.hybridEnabled).toBe(true); // enabled=true in file wins over intent
+    expect(vm.mode).toBe("vector");
+    expect(vm.selectedModel).toBe("nomic");
+  });
+
+  test("fileToPayload(null) → null (no file yet)", () => {
+    expect(fileToPayload(null)).toBe(null);
+  });
+
+  test("readiness derives from docs count: enabled + docs>0 → ready", () => {
+    const on = fileToPayload({ enabled: true, collections: { "bge-m3": { primary: true } } }, 482);
+    const vmReady = reconcile({ online: false, config: on, health: null, docs: 482, index: IDLE_INDEX, intent: intentOff });
+    expect(vmReady.readiness.ready).toBe(true);
+
+    const notYet = fileToPayload({ enabled: true, collections: { "bge-m3": { primary: true } } }, 0);
+    const vmNot = reconcile({ online: false, config: notYet, health: null, docs: 0, index: IDLE_INDEX, intent: intentOff });
+    expect(vmNot.readiness.ready).toBe(false);
+    expect(vmNot.readiness.reason).toContain("index");
   });
 
   test("enabled=true → shows ON + Vector regardless of stored mode", () => {

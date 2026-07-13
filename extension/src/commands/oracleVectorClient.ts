@@ -63,9 +63,28 @@ export function indexStatus(): Promise<any | null> {
 
 export type PatchBody = { enabled?: boolean; collections?: Record<string, { primary?: boolean }> };
 
-/** Mutating calls throw on non-2xx so the host can toast the error. */
+/** Thrown when a mutating call can't reach the server (connection refused /
+ *  timeout), as opposed to the server answering with an HTTP error. Lets the
+ *  host fall back to a direct file write instead of surfacing an error. */
+export class OracleOfflineError extends Error {
+  constructor(cause?: unknown) {
+    super("oracle offline");
+    this.name = "OracleOfflineError";
+    (this as { cause?: unknown }).cause = cause;
+  }
+}
+
+/** Mutating calls throw OracleOfflineError when the server is unreachable, or a
+ *  plain Error carrying the server's message on a non-2xx response. */
 async function mutate(path: string, method: string, body?: unknown): Promise<any> {
-  const res = await req(path, { method, body: body === undefined ? undefined : JSON.stringify(body) });
+  let res: Response;
+  try {
+    res = await req(path, { method, body: body === undefined ? undefined : JSON.stringify(body) });
+  } catch (e) {
+    // fetch rejects (ECONNREFUSED) or the AbortController fires on timeout →
+    // the server isn't there. Distinct from an HTTP error the server returned.
+    throw new OracleOfflineError(e);
+  }
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
     const m = (json && (json as any).error) || ("HTTP " + res.status);

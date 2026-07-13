@@ -3,7 +3,13 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
-import { listSettings, readConfig, setSetting } from "./settingsOps";
+import {
+  getDefaultMemberModel,
+  listSettings,
+  readConfig,
+  setSetting,
+} from "./settingsOps";
+import { DEFAULT_MODEL } from "./teamsModel";
 
 // Point MC_CONFIG_PATH at a throwaway file so nothing touches the real
 // ~/.mission-control/config.json.
@@ -32,14 +38,22 @@ describe("listSettings", () => {
     expect(merge?.value).toBe("online"); // the remembered default
     expect(merge?.known).toBe(true);
     // every schema field is present even with no file
-    expect(s.some((e) => e.key === "build_model")).toBe(true);
+    expect(s.some((e) => e.key === "default_member_model")).toBe(true);
+    // the removed dead knob must not resurface
+    expect(s.some((e) => e.key === "build_model")).toBe(false);
+    // default_member_model falls back to the shared DEFAULT_MODEL constant
+    expect(s.find((e) => e.key === "default_member_model")?.value).toBe(
+      DEFAULT_MODEL,
+    );
   });
 
   test("file value overrides the default", () => {
-    writeCfg({ merge_mode: "local", build_model: "claude-opus-4-8" });
+    writeCfg({ merge_mode: "local", default_member_model: "claude-opus-4-8" });
     const s = listSettings();
     expect(s.find((e) => e.key === "merge_mode")?.value).toBe("local");
-    expect(s.find((e) => e.key === "build_model")?.value).toBe("claude-opus-4-8");
+    expect(s.find((e) => e.key === "default_member_model")?.value).toBe(
+      "claude-opus-4-8",
+    );
   });
 
   test("unknown on-disk key surfaces under Other, typed from its value", () => {
@@ -92,5 +106,24 @@ describe("setSetting", () => {
     process.env.MC_CONFIG_PATH = deep;
     setSetting("merge_mode", "online");
     expect(JSON.parse(fs.readFileSync(deep, "utf8")).merge_mode).toBe("online");
+  });
+
+  test("default_member_model accepts a known model, rejects a bogus one", () => {
+    setSetting("default_member_model", "claude-opus-4-8");
+    expect(readConfig().default_member_model).toBe("claude-opus-4-8");
+    expect(() => setSetting("default_member_model", "gpt-9")).toThrow();
+  });
+});
+
+describe("getDefaultMemberModel", () => {
+  test("falls back to DEFAULT_MODEL when unset or blank", () => {
+    expect(getDefaultMemberModel()).toBe(DEFAULT_MODEL); // no file
+    writeCfg({ default_member_model: "   " });
+    expect(getDefaultMemberModel()).toBe(DEFAULT_MODEL);
+  });
+
+  test("returns the configured model when set", () => {
+    writeCfg({ default_member_model: "claude-haiku-4-5" });
+    expect(getDefaultMemberModel()).toBe("claude-haiku-4-5");
   });
 });

@@ -32,7 +32,7 @@ export const AUTO_SKILL_BLOCK = [
   "",
   "Trigger on ANY of: (1) a complex task over several tool steps that is worth repeating, (2) you recovered from a real error/dead-end via a non-obvious working path, (3) the user corrected HOW you did something, (4) you discovered a reusable multi-step workflow.",
   "",
-  "Quality bar (most turns save nothing): it must be a PROCEDURE (steps/commands), not a fact — facts go to /rrr or oracle_learn, never here. Ask \"would a specific future task actually load and follow this?\" If unsure, skip.",
+  "Quality bar (most turns save nothing): it must be a PROCEDURE (steps/commands), not a fact — facts go to /rrr or oracle_learn, never here. Write it GENERIC — not tied to one team/oracle/project; use placeholders (e.g. <proj>/<role>, NN-foreman) instead of literal names so any team or project can follow it. Ask \"would a specific future task actually load and follow this?\" If unsure, skip.",
   "",
   "On a hit, save NON-BLOCKING (never stop to ask). Write the skill body to a temp file, then run: python3 ~/.claude/skills/auto-skill/scripts/auto_skill.py create --name <kebab-name> --desc \"one line: what + when\" --trigger <complex-task|error-recovery|user-correction|reusable-workflow> --source <your identity: your oracle id if you are an oracle, else your handle> [--category <one-word area>] --body-file /tmp/<name>.SKILL.md",
   "",

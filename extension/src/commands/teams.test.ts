@@ -18,6 +18,14 @@ test("buildContinueKickoff: names the project path + drives ONE sprint via --onc
   expect(k).toContain("/p/demo");
   expect(k).toContain("--once");
   expect(k).toContain("/orches-drive");
+  expect(k).not.toMatch(/--once \d/); // default (1) → bare --once, no count
+});
+
+test("buildContinueKickoff: sprints>1 → '--once N' + multi-sprint scope (no checkpoint)", () => {
+  const k = buildContinueKickoff("demo", "/p/demo", "brew", "foreman", ["mike"], 3);
+  expect(k).toContain("--once 3");
+  expect(k).toContain("/p/demo");
+  expect(k).toContain("3 sprint");
 });
 
 test("buildTmuxLaunchCommand: attach=false omits the trailing tmux attach", () => {

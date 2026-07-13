@@ -25,15 +25,25 @@ import {
   writeRunMarker,
 } from "./continueRun";
 import {
+  classifyDriven,
   defaultTeamForProject,
+  type DrivenState,
   isProjectLive,
   isResumable,
   parseOrchesMeta,
   parsePlan,
+  parseStateValue,
   type ResumableProject,
   serializeOrchesMeta,
   sortResumable,
 } from "./orchestratorResume";
+import {
+  labelNamesProject,
+  parseTmuxSessions,
+  sessionForProjectLabel,
+  TMUX_FMT,
+  type TmuxSession,
+} from "../webview/sessions";
 
 const ORACLES_JSON = path.join(os.homedir(), ".maw", "oracles.json");
 const MAW_CONFIG_DIR = path.join(os.homedir(), ".config", "maw");
@@ -286,17 +296,18 @@ function runInTerminal(term: vscode.Terminal, command: string): void {
  *  when nothing live is found → caller runs the normal team → orchestrator →
  *  launch flow. This is what makes clicking a "doing" project re-enter its
  *  running session instead of spawning a conflicting one on top. */
-export function attachToProject(project: ResumableProject): boolean {
+export function attachToProject(project: ResumableProject, preferSession?: string): boolean {
   const meta = readMeta(project.path);
-  if (!meta?.team) return false;
-  const team = readTeams().find((t) => t.name === meta.team);
+  const team = meta?.team ? readTeams().find((t) => t.name === meta.team) : undefined;
   const orch = team?.orchestrators[0];
-  if (!orch || !isSafeOracleName(orch)) return false;
-  // Prefer the exact session stamped when this project was driven (twin-aware);
-  // fall back to the pin / default. Attach to the first one actually alive.
+  // `preferSession` (the authoritative session the detector picked — owner/labeled/
+  // run) wins, so we attach even when .orches-meta.json has no team (the gap where
+  // the old guard returned false → caller spawned a twin). Then the stamped meta
+  // session, then the orchestrator's pin/default.
   const candidates = [
-    ...(meta.session ? [meta.session] : []),
-    readSessionPin(orch)?.trim() || `claude-${orch}`,
+    ...(preferSession ? [preferSession] : []),
+    ...(meta?.session ? [meta.session] : []),
+    ...(orch && isSafeOracleName(orch) ? [readSessionPin(orch)?.trim() || `claude-${orch}`] : []),
   ];
   const session = candidates.find((s) => /^[\w.-]+$/.test(s) && tmuxHasSession(s));
   if (!session) return false; // nothing awake → let the caller launch fresh
@@ -306,7 +317,7 @@ export function attachToProject(project: ResumableProject): boolean {
     return true;
   }
   const term = vscode.window.createTerminal({
-    name: `orchestrator: ${orch}`,
+    name: orch ? `orchestrator: ${orch}` : `orchestrator: ${session}`,
     location: vscode.TerminalLocation.Editor,
   });
   _orchTerminals.set(session, term);
@@ -321,6 +332,98 @@ export function tmuxHasSession(session: string): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/** owner-session recorded in <project>/.orches-state (fs read, NO subprocess). */
+export function ownerSessionFromState(projectPath: string): string | null {
+  try {
+    return parseStateValue(
+      fs.readFileSync(path.join(projectPath, ".orches-state"), "utf8"),
+      "owner-session",
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** Every live tmux session (name + @orches_label + …). ONE `tmux list-sessions`;
+ *  [] if tmux is absent. Callers share one list across rows (avoid N subprocesses). */
+export function listTmuxSessionsSafe(): TmuxSession[] {
+  try {
+    return parseTmuxSessions(
+      cp.execFileSync("tmux", ["list-sessions", "-F", TMUX_FMT], { timeout: 1500 }).toString(),
+    );
+  } catch {
+    return [];
+  }
+}
+
+/** THE single "is project X being driven right now?" detector — reused by every
+ *  spawn path AND the green-row render, so enforcement + display never disagree.
+ *  Priority worker > run > owner > labeled (see classifyDriven). `owner`
+ *  (.orches-state owner-session still in tmux) is the signal that catches a
+ *  checkpoint-paused orchestrator (worker + run both dead then). Returns the
+ *  winning session so the caller attaches the RIGHT one.
+ *  PRECOND: caller ran annotateLiveState([project]) so project.doing is fresh.
+ *  Pass a shared `sessions` list to avoid a tmux call per row; `cheap:true` skips
+ *  the owner/labeled probe (spin-poll tick — a live run already short-circuits). */
+export function projectDrivenState(
+  project: ResumableProject,
+  ctx?: { sessions?: TmuxSession[]; runAlive?: boolean },
+): { state: DrivenState; session?: string } {
+  const workerLive = project.doing ?? false;
+  const marker = readRunMarker(project.path);
+  // runAlive may be precomputed by the render (which already probed the marker's
+  // session for the button state) → avoids a duplicate has-session/created probe.
+  let runAlive = ctx?.runAlive;
+  if (runAlive === undefined) {
+    runAlive = false;
+    if (marker?.status === "running" && marker.session && tmuxHasSession(marker.session)) {
+      const created = sessionCreatedAt(marker.session);
+      const zombie =
+        marker.sessionCreatedAt !== undefined && created !== undefined && created !== marker.sessionCreatedAt;
+      runAlive = !zombie;
+    }
+  }
+  let ownerAlive = false;
+  let ownerSess: string | undefined;
+  let labeled: TmuxSession | null = null;
+  if (!workerLive && !runAlive) {
+    const sessions = ctx?.sessions ?? listTmuxSessionsSafe();
+    const os = ownerSessionFromState(project.path);
+    // The owner-session must ALSO be @orches_label'd for THIS project. An
+    // orchestrator reuses ONE base session name across every project it drives,
+    // so name-only matching would light up project A on project B's live session
+    // (false "owner" → attach to the wrong project, block A's real resume).
+    const ownerS = os
+      ? sessions.find((s) => s.name === os && labelNamesProject(s.orchesLabel, project.name))
+      : undefined;
+    if (ownerS) {
+      ownerAlive = true;
+      ownerSess = ownerS.name;
+    } else {
+      labeled = sessionForProjectLabel(project.name, sessions);
+    }
+  }
+  const state = classifyDriven({ workerLive, runAlive, ownerAlive, labelMatch: !!labeled });
+  const session =
+    state === "run" ? marker!.session : state === "owner" ? ownerSess : state === "labeled" ? labeled!.name : undefined;
+  return { state, session };
+}
+
+/** Best-effort teardown of a finished headless run's tmux session. Exact-match
+ *  (`=`) so it can NEVER hit another run's / a prefix-matched session, and a safe
+ *  name guard so a junk value can't turn into an unexpected target. A `--once`
+ *  button-run has no one attached, so once its done/error marker lands the
+ *  session is just a husk (dead orchestrator window + maybe idle worker windows)
+ *  — reaping it is what actually "closes the session when the run finishes". */
+export function reapSession(session: string): void {
+  if (!/^[\w.-]+$/.test(session)) return;
+  try {
+    cp.execFileSync("tmux", ["kill-session", "-t", `=${session}`], { stdio: "ignore" });
+  } catch {
+    /* already gone / no tmux server */
   }
 }
 
@@ -359,24 +462,26 @@ export function sessionCreatedAt(session: string): number | undefined {
  *  a no-op that returns the existing session. */
 export function launchContinueRun(
   project: ResumableProject,
+  sprints = 1, // >1 → "▶▶ ทำหลาย sprint": N sprints headless in one detached run
 ): { error?: string; session?: string; attached?: boolean } {
   const teams = readTeams();
   const target = resolveContinueTarget(project, teams);
   if ("error" in target) return { error: target.error };
 
-  // 1-session-1-run collision guard (same intent as launchOrchestrator): decide
-  // from the CURRENT live signals whether this project is already being driven.
-  // The old guard only saw THIS button's own run marker; a project driven by a
-  // full `/orches-drive` (no `.orches-run.json`) slipped through and got a second
-  // orchestrator twin forked onto the same repo. `doing` is refreshed here.
+  // 1-project-1-session guard: ONE detector decides if this project is already
+  // being driven (worker / run / owner-at-checkpoint / labeled). NEVER fork a
+  // twin onto a repo a session already drives — attach to the winning session.
   annotateLiveState([project]);
-  const existing = readRunMarker(project.path);
-  const existingAlive =
-    existing?.status === "running" && !!existing.session && tmuxHasSession(existing.session);
-  const action = decideContinueAction(project.doing ?? false, existing, existingAlive);
-  if (action === "already-running") return { session: existing!.session };
-  if (action === "attach" && attachToProject(project)) return { attached: true };
-  // action === "launch" (or attach found no live session to re-enter) → spawn below.
+  const driven = projectDrivenState(project);
+  const action = decideContinueAction(driven.state);
+  if (action === "already-running") return { session: driven.session };
+  if (action === "attach") {
+    if (attachToProject(project, driven.session)) return { attached: true };
+    return {
+      error: `'${project.name}' กำลังถูกขับอยู่ (session ${driven.session ?? "?"}) — เปิด session นั้น ไม่ launch ซ้ำ`,
+    };
+  }
+  // action === "launch" (state none) → spawn below.
 
   // The orchestrator runs in ITS OWN oracle repo (loads its CLAUDE.md + ψ), not
   // the project repo — the project path travels in the kickoff. Same resolution
@@ -406,6 +511,7 @@ export function launchContinueRun(
     target.team.name,
     target.orch,
     workers,
+    sprints,
   );
   const command = buildTmuxLaunchCommand(
     target.orch,
@@ -514,15 +620,21 @@ export async function launchOrchestrator(opts: {
     };
   }
 
-  // 1 session = 1 team instance: a resume of a project that is ACTUALLY live
-  // right now (a worker pane under its own agents/) re-attaches to its running
-  // session. Gate on `doing` (refreshed from live panes) — NOT merely "the
-  // team's orchestrator has some live session", which would wrongly attach into
-  // a DIFFERENT project the same orchestrator happens to be driving (its
-  // .orches-meta.json session can be stale/shared across projects).
+  // 1 project = 1 session: a resume of a project ALREADY being driven (worker /
+  // headless run / owner-session live at a checkpoint / @orches_label) re-attaches
+  // to THAT session instead of forking a twin. Uses the same detector as the
+  // button, so the project's own owner-session is resolved precisely (not merely
+  // "the orchestrator has some live session" that might be another project).
+  // mode:"new" is NOT gated → a fresh build still mints its own instance.
   if (mode === "resume" && project) {
     annotateLiveState([project]);
-    if (project.doing && attachToProject(project)) return {};
+    const driven = projectDrivenState(project);
+    if (driven.state !== "none") {
+      if (attachToProject(project, driven.session)) return {};
+      return {
+        error: `'${project.name}' กำลังถูกขับโดย session '${driven.session ?? "?"}' อยู่แล้ว — เข้า session นั้นแทน (ไม่สร้างซ้ำ)`,
+      };
+    }
   }
 
   const workers = team.members

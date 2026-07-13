@@ -23,14 +23,14 @@ describe("asset strings", () => {
     expect(s).toContain("searchState"); // listens for the host push
   });
 
-  test("offline state offers a retry control wired to reloadSearch (no dead-end)", () => {
-    // When the oracle is offline the section renders only a message and returns.
-    // Without a way to re-fetch, starting the oracle afterwards leaves the panel
-    // stuck (singleton + retainContextWhenHidden). A retry button re-triggers the
-    // host's reloadSearch so the section recovers in one click.
+  test("renders controls unconditionally — no offline gating / dead-end", () => {
+    // The section is a file-backed config editor: the toggle/mode/model always
+    // render (server or not). There is no offline branch, banner, or retry —
+    // the server is only consulted to enrich status, never to gate the UI.
     const s = searchSectionScript();
-    expect(s).toContain('data-so="retry"');
-    expect(s).toContain("act==='retry') post('reloadSearch')");
+    expect(s).toContain('data-so="hybrid"'); // toggle always emitted
+    expect(s).not.toContain('data-so="retry"');
+    expect(s).not.toContain("oracleOnline");
   });
 });
 
