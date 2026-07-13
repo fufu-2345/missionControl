@@ -473,10 +473,15 @@ function short(p: string): string {
   return p.split("/").pop() || p;
 }
 function notify(ok: boolean, what: string, r: gitOps.RunResult): void {
-  vscode.window[ok ? "showInformationMessage" : "showErrorMessage"](
-    ok
-      ? `Orchestrator: ${what} สำเร็จ`
-      : `Orchestrator: ${what} ล้มเหลว — ${(r.stderr || r.stdout).split("\n")[0]}`,
+  if (ok) {
+    // สำเร็จ = แจ้งชั่วคราวใน status bar หายเองใน 5 วิ — ไม่ค้างเป็น toast ให้กดปิดเอง
+    // (showInformationMessage ไม่การันตี auto-hide → ค้างเต็มจอตอน commit/push บ่อยๆ)
+    vscode.window.setStatusBarMessage(`Orchestrator: ${what} สำเร็จ`, 5000);
+    return;
+  }
+  // ล้มเหลว = toast ค้างไว้ให้เห็นชัด (ต้องรู้ว่า commit/push พัง)
+  vscode.window.showErrorMessage(
+    `Orchestrator: ${what} ล้มเหลว — ${(r.stderr || r.stdout).split("\n")[0]}`,
   );
 }
 
