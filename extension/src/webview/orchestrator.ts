@@ -18,6 +18,7 @@ import {
   tmuxHasSession,
 } from "../commands/startOrchestrator";
 import { partitionStarred, toggleStar, type ResumableProject } from "../commands/orchestratorResume";
+import { confirmNameMatches, removeProjectDir } from "../commands/deleteProject";
 import {
   clampSprintCount,
   finishedSessions,
@@ -161,6 +162,38 @@ function stopSpinPoll() {
     _spinPoll = undefined;
   }
   _runningRuns = new Map();
+}
+
+/** โปรเจคนี้กำลัง run จริงไหม (marker running + session live + ไม่ zombie) —
+ *  reuse resolveButtonState ให้ตรงกับปุ่ม ▶ ทำต่อ ที่ user เห็น (delete guard ชั้น extension). */
+function isRunning(p: ResumableProject): boolean {
+  const marker = readRunMarker(p.path);
+  const live = marker?.session
+    ? { alive: tmuxHasSession(marker.session), createdAt: sessionCreatedAt(marker.session) }
+    : { alive: false };
+  return resolveButtonState(pendingSprints(p), marker, live).state === "spinning";
+}
+
+/** ลบโปรเจค: กัน running → confirm modal → พิมพ์ชื่อยืนยัน → ลบโฟลเดอร์ local.
+ *  ⛔ ไม่แตะ GitHub. คืน {deleted:false} เงียบเมื่อ user ยกเลิก. */
+async function deleteProjectFlow(p: ResumableProject): Promise<{ deleted: boolean; reason?: string }> {
+  if (isRunning(p)) return { deleted: false, reason: `'${p.name}' กำลัง run อยู่ — กด stop ก่อนถึงจะลบได้` };
+  const yes = await vscode.window.showWarningMessage(
+    `ลบโปรเจค '${p.name}' ออกจากเครื่องถาวร?`,
+    { modal: true, detail: `ลบโฟลเดอร์ ${p.path} (รวม git + worktrees ข้างใน) · ไม่แตะ GitHub` },
+    "ลบถาวร",
+  );
+  if (yes !== "ลบถาวร") return { deleted: false };
+  const typed = await vscode.window.showInputBox({
+    title: `ยืนยันการลบ '${p.name}'`,
+    prompt: `พิมพ์ชื่อโปรเจคให้ตรงเพื่อยืนยัน: ${p.name}`,
+    ignoreFocusOut: true,
+    validateInput: (v) => (confirmNameMatches(v, p.name) ? null : "ชื่อไม่ตรง"),
+  });
+  if (!confirmNameMatches(typed ?? "", p.name)) return { deleted: false };
+  const r = removeProjectDir(p.path);
+  if (r.deleted) vscode.window.showInformationMessage(`ลบ '${p.name}' แล้ว`);
+  return r;
 }
 
 function pushTeamsScreen(panel: vscode.WebviewPanel) {
@@ -385,6 +418,18 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         await pushProjectsScreen(panel);
         return;
       }
+      case "delete_project": {
+        const p = _st.projects.find((x) => x.path === msg.path);
+        if (!p) return;
+        const r = await deleteProjectFlow(p);
+        if (r.deleted) {
+          _st.projects = scanResumableProjects(); // re-scan → การ์ดหลุดจาก list
+          await pushProjectsScreen(panel);
+        } else if (r.reason) {
+          vscode.window.showWarningMessage(r.reason);
+        }
+        return;
+      }
       case "git_auto": {
         const p = typeof msg.path === "string" ? msg.path : "";
         if (!p) return;
@@ -520,6 +565,13 @@ function renderShell(): string {
   .card.default { border-color: #3fb950; background: rgba(63,185,80,0.12); }
   .card.default:hover { background: rgba(63,185,80,0.18); }
   .card.default .cname { color: #56d364; }
+  .del { display:none; background:none; border:none; cursor:pointer; font-size:14px;
+         padding:2px 6px; border-radius:5px; color:#f85149; }
+  #content.edit .del { display:inline-flex; align-items:center; }
+  .del:hover { background:rgba(248,81,73,0.15); }
+  .del.disabled { color:#6e7681; cursor:not-allowed; }
+  .del.disabled:hover { background:none; }
+  #editBtn.on { background:rgba(248,81,73,0.15); color:#f85149; border-color:#f85149; }
   .badge-last { font-size: 10px; font-weight: 700; color: #0d1117; background: #3fb950;
     padding: 1px 8px; border-radius: 8px; margin-left: 8px; vertical-align: middle; }
   .star { flex: 0 0 auto; font-size: 19px; line-height: 1; cursor: pointer; user-select: none;
@@ -656,15 +708,17 @@ function renderShell(): string {
     var ns=document.querySelectorAll('.spin'); for(var i=0;i<ns.length;i++) ns[i].textContent=f;
   }, 90);
 
-  function actionsHtml(canBack, showFetch, askable, showNew){
+  function actionsHtml(canBack, showFetch, askable, showNew, showEdit){
     // showNew = the "+ เริ่มโปรเจคใหม่" button (Projects screen only) → runs the
     // same team→orchestrator→launch flow with no project = a fresh build.
     // fetch = git-refresh of the PROJECTS screen only (dead-end elsewhere).
     // askBtn only for a new build (askable) — resume ยังไม่รองรับโหมดถาม.
+    // showEdit = "✏️ Edit" toggle (Projects screen only) → เผยปุ่มลบต่อการ์ด.
     return (canBack ? '<button id="backBtn">← กลับ</button>' : '')
       + (showNew ? '<button id="newProjBtn" style="background:#238636;color:#fff;border-color:#238636;font-weight:600;">+ เริ่มโปรเจคใหม่</button>' : '')
       + (askable ? '<button id="askBtn" title="เปิด = สัมภาษณ์ requirement ละเอียด (grilling) + รีวิวแผนก่อนลงมือ (scrutinize)" style="'+askBtnStyle()+'">'+askBtnLabel()+'</button>' : '')
-      + (showFetch ? '<button id="reloadBtn">fetch</button>' : '');
+      + (showFetch ? '<button id="reloadBtn">fetch</button>' : '')
+      + (showEdit ? '<button id="editBtn" title="เปิดเพื่อลบโปรเจคที่ไม่ใช้">✏️ Edit</button>' : '');
   }
   function wireActions(canBack){
     if (canBack){ var b=el("backBtn"); if(b) b.addEventListener('click',function(){post('back');}); }
@@ -672,6 +726,8 @@ function renderShell(): string {
     var ab=el("askBtn"); if(ab) ab.addEventListener('click',function(){
       askMode=!askMode; ab.textContent=askBtnLabel(); ab.style.cssText=askBtnStyle(); });
     var rb=el("reloadBtn"); if(rb) rb.addEventListener('click',function(){post('git_refresh');});
+    var eb=el("editBtn"); if(eb) eb.addEventListener('click',function(){
+      var c=el("content"); var on=c.classList.toggle('edit'); eb.classList.toggle('on', on); });
   }
 
   // ── git button (project rows) ────────────────────────────────────────────
@@ -705,7 +761,7 @@ function renderShell(): string {
   function renderProjects(m){
     el("title").textContent = m.title; el("subtitle").textContent = m.subtitle;
     askMode=false; // Projects list เอง ไม่มีโหมดถาม (ยกไปหน้าเลือกทีมตอนเริ่มใหม่)
-    el("actions").innerHTML = actionsHtml(false, true, false, true); wireActions(false);
+    el("actions").innerHTML = actionsHtml(false, true, false, true, true); wireActions(false);
     var items = m.items||[];
     // การ์ด project ที่หลุดจาก list (เสร็จ/หาย) ระหว่างที่ยัง arm ค้าง → เลิก arm+timer ทิ้ง (กันยิงตอนการ์ดไม่อยู่แล้ว)
     var _live={}; items.forEach(function(it){ _live[it.path]=1; });
@@ -743,11 +799,15 @@ function renderShell(): string {
       var multiBtn = (run.state === 'idle' && pending >= 2)
         ? '<button class="cont multi" data-pending="'+pending+'" data-name="'+esc(it.name)+'" title="ทำหลาย sprint รวดเดียว (auto, background) — เลือกจำนวน">▶▶ ทำหลาย sprint</button>'
         : '';
+      // ปุ่มลบ (โผล่เฉพาะ edit mode ผ่าน CSS) · running = กากบาทแดง disabled กดไม่ได้
+      var delBtn = (run.state === 'spinning')
+        ? '<button class="del disabled" title="กำลัง run — กด stop ก่อนถึงจะลบได้">✖</button>'
+        : '<button class="del" title="ลบโปรเจคออกจากเครื่อง">🗑</button>';
       return '<div class="card'+(it.driven?' live':'')+'" data-path="'+esc(it.path)+'">'
         +'<span class="star'+(it.starred?' on':'')+'" role="button" title="ปักดาว / เอาดาวออก">'+(it.starred?'★':'☆')+'</span>'
         +'<div style="flex:1"><button class="pick"><span class="cname">'+esc(it.name)+chip+'</span>'
         +'<span class="csub">'+sub+'</span></button>'+gitEditor(it.git)+'</div>'
-        +contBtn+multiBtn
+        +contBtn+multiBtn+delBtn
         +'<span class="git-cell">'+gitCell(it.git)+'</span></div>';
     }).join('') : '<div class="empty">'+esc(m.subtitle)+'</div>';
     el("content").querySelectorAll('.card').forEach(function(card){
@@ -755,7 +815,7 @@ function renderShell(): string {
       // Whole row selects the project — except clicks on the git button, its
       // inline form, or the star toggle (those do their own thing).
       card.addEventListener('click',function(e){
-        if (e.target.closest('.git-act') || e.target.closest('.git-editor') || e.target.closest('.star') || e.target.closest('.cont')) return;
+        if (e.target.closest('.git-act') || e.target.closest('.git-editor') || e.target.closest('.star') || e.target.closest('.cont') || e.target.closest('.del')) return;
         // เพิ่งมี editor หุบไป (commit/ยกเลิก) → layout เพิ่งขยับ คลิกที่ 2 ของ
         // double-click จะตกใส่แถวอื่น — เมินช่วงสั้นๆ กัน pick/attach ผิดโปรเจค
         if (Date.now() - _edCloseAt < 350) return;
@@ -771,6 +831,8 @@ function renderShell(): string {
       var multiEl=card.querySelector('.cont.multi');
       if(multiEl) multiEl.addEventListener('click',function(e){ e.stopPropagation();
         openMultiModal(path, multiEl.dataset.name||'', Number(multiEl.dataset.pending)||2); });
+      var delEl=card.querySelector('.del:not(.disabled)');
+      if(delEl) delEl.addEventListener('click',function(e){ e.stopPropagation(); post('delete_project',{path:path}); });
       wireGit(card, path);
     });
     // DOM เพิ่งถูกสร้างใหม่ทั้งจอ (host re-render หลังทุก git action) — สถานะ arm/แสง
