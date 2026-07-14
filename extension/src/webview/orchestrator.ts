@@ -709,29 +709,42 @@ function renderShell(): string {
     if(e.key==='Enter'){ e.preventDefault(); mmConfirm(); }
     else if(e.key==='Escape'){ e.preventDefault(); closeMultiModal(); } });
 
-  // ── ลบโปรเจค modal (กลางจอ) — ยืนยัน + พิมพ์ชื่อ ในกล่องเดียว (แทน native dialog) ──
-  var _delPath=null;
+  // ── ลบโปรเจค modal (กลางจอ) — 2 รอบในกล่องเดียว: (1) ถามยืนยัน → (2) พิมพ์ชื่อ ──
+  var _delPath=null, _delName='', _delPhase=1;
   function openDelModal(path, name){
-    _delPath=path;
-    el('dm-title').textContent='ลบโปรเจค '+(name||'');
-    el('dm-hint').textContent='ลบถาวรจากเครื่อง (รวม git + worktrees ข้างใน) · ไม่แตะ GitHub · พิมพ์ชื่อให้ตรงเพื่อยืนยัน: '+name;
-    el('dm-err').textContent='';
-    var inp=el('dm-input'); inp.value=''; inp.dataset.expect=name;
-    el('delmodal').style.display='flex'; inp.focus(); dmSync();
+    _delPath=path; _delName=name||''; _delPhase=1;
+    el('dm-title').textContent='ลบโปรเจค '+(name||'')+'?';
+    el('delmodal').style.display='flex';
+    renderDelPhase();
   }
-  function closeDelModal(){ el('delmodal').style.display='none'; _delPath=null; }
-  function dmSync(){ var inp=el('dm-input'); el('dm-ok').disabled = inp.value.trim()!==inp.dataset.expect; }
-  function dmConfirm(){
-    var inp=el('dm-input');
-    if(inp.value.trim()!==inp.dataset.expect){ el('dm-err').textContent='ชื่อไม่ตรง'; return; }
-    var p=_delPath; closeDelModal(); post('delete_project',{path:p});
+  function renderDelPhase(){
+    var inp=el('dm-input'); el('dm-err').textContent='';
+    if(_delPhase===1){
+      // รอบ 1: แค่ถาม "แน่ใจไหม" (ยังไม่พิมพ์ชื่อ)
+      el('dm-hint').textContent='ลบถาวรจากเครื่อง (รวม git + worktrees ข้างใน) · ไม่แตะ GitHub · แน่ใจไหม?';
+      inp.style.display='none'; inp.value='';
+      el('dm-ok').textContent='ใช่ ลบต่อ'; el('dm-ok').disabled=false; el('dm-ok').classList.remove('danger');
+    } else {
+      // รอบ 2: พิมพ์ชื่อให้ตรงถึงจะกด "ลบถาวร" ได้
+      el('dm-hint').textContent='พิมพ์ชื่อให้ตรงเพื่อยืนยัน: '+_delName;
+      inp.style.display=''; inp.value=''; inp.dataset.expect=_delName;
+      el('dm-ok').textContent='ลบถาวร'; el('dm-ok').classList.add('danger');
+      dmSync(); inp.focus();
+    }
+  }
+  function closeDelModal(){ el('delmodal').style.display='none'; _delPath=null; _delPhase=1; }
+  function dmSync(){ if(_delPhase===2) el('dm-ok').disabled = el('dm-input').value.trim()!==_delName; }
+  function dmOk(){
+    if(_delPhase===1){ _delPhase=2; renderDelPhase(); return; }      // รอบ 1 → ไปรอบ 2
+    if(el('dm-input').value.trim()!==_delName){ el('dm-err').textContent='ชื่อไม่ตรง'; return; }
+    var p=_delPath; closeDelModal(); post('delete_project',{path:p}); // รอบ 2 ผ่าน → ลบจริง
   }
   el('dm-cancel').addEventListener('click', closeDelModal);
-  el('dm-ok').addEventListener('click', dmConfirm);
+  el('dm-ok').addEventListener('click', dmOk);
   el('dm-input').addEventListener('input', dmSync);
   el('delmodal').addEventListener('click', function(e){ if(e.target===el('delmodal')) closeDelModal(); });
   el('dm-input').addEventListener('keydown', function(e){
-    if(e.key==='Enter'){ e.preventDefault(); dmConfirm(); }
+    if(e.key==='Enter'){ e.preventDefault(); dmOk(); }
     else if(e.key==='Escape'){ e.preventDefault(); closeDelModal(); } });
 
   // "โหมดถาม" toggle — persists across screen re-renders (this script runs once).
