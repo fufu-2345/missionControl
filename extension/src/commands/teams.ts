@@ -227,6 +227,19 @@ export function formatOrchesLabel(project: string, team?: string): string {
   return t ? `${project} / ${t}` : project;
 }
 
+/** The `@orches_label` to stamp at session-create, or undefined to defer to the
+ *  orchestrator's own runtime set. A known project name — a resume, OR a NEW build
+ *  whose name was chosen up-front in the dashboard name popup — gets
+ *  "<project> / <team>" immediately. A nameless new build returns undefined (the
+ *  orchestrator picks a name at runtime and sets the label itself). */
+export function resolveOrchesLabel(
+  projectName: string | undefined,
+  team: string,
+): string | undefined {
+  const n = projectName?.trim();
+  return n ? formatOrchesLabel(n, team) : undefined;
+}
+
 export function buildTmuxLaunchCommand(
   orchestrator: string,
   repoPath: string,

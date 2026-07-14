@@ -7,6 +7,7 @@ import {
   buildResumeKickoff,
   buildTmuxLaunchCommand,
   formatOrchesLabel,
+  resolveOrchesLabel,
   isSafeOracleName,
   parseOraclePath,
   parseSessionPin,
@@ -68,6 +69,17 @@ test("formatOrchesLabel: '<project> / <team>', or bare project when no team", ()
   expect(formatOrchesLabel("rpn", "brew")).toBe("rpn / brew");
   expect(formatOrchesLabel("rpn")).toBe("rpn");
   expect(formatOrchesLabel("rpn", "  ")).toBe("rpn"); // blank team ignored, not "rpn / "
+});
+
+test("resolveOrchesLabel: a known name (resume OR name-popup new build) → '<project> / <team>'", () => {
+  expect(resolveOrchesLabel("rpn", "brew")).toBe("rpn / brew");
+  expect(resolveOrchesLabel("  rpn  ", "brew")).toBe("rpn / brew"); // trimmed
+});
+
+test("resolveOrchesLabel: no name (nameless new build) → undefined (defer to orchestrator's runtime set)", () => {
+  expect(resolveOrchesLabel(undefined, "brew")).toBeUndefined();
+  expect(resolveOrchesLabel("", "brew")).toBeUndefined();
+  expect(resolveOrchesLabel("   ", "brew")).toBeUndefined();
 });
 
 test("buildTmuxLaunchCommand: orchesLabel → session-scoped @orches_label set-option (NO '=' prefix)", () => {

@@ -11,6 +11,7 @@ import {
   buildResumeKickoff,
   buildTmuxLaunchCommand,
   formatOrchesLabel,
+  resolveOrchesLabel,
   isSafeOracleName,
   type OracleTeam,
   parseOraclePath,
@@ -682,11 +683,14 @@ export async function launchOrchestrator(opts: {
       /* best-effort — still attach so the user lands in the session */
     }
   }
-  // On resume the project is known → stamp "<project> / <team>" as the session
-  // label at create-time (new builds name the project at runtime, so their
-  // orchestrator sets @orches_label itself once it picks a name).
-  const orchesLabel =
-    mode === "resume" && project ? formatOrchesLabel(project.name, team.name) : undefined;
+  // Stamp "<project> / <team>" as the session label at create-time whenever the
+  // name is already known: a resume (project loaded) OR a new build named up-front
+  // in the dashboard popup (projectName). Only a nameless new build defers to the
+  // orchestrator's own runtime @orches_label set (it picks a name at runtime).
+  const orchesLabel = resolveOrchesLabel(
+    mode === "resume" && project ? project.name : projectName,
+    team.name,
+  );
   // Safe: session = maw pin (NN-oracle) / claude-<safe-orch> (+ "-N" twin suffix).
   const command = inject
     ? `tmux attach -t '=${session}'`
