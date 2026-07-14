@@ -53,6 +53,37 @@ test("buildTeamUpCommand: bootstrap, sequential per-member wake, rename short, a
   );
 });
 
+test("buildTeamUpCommand: per-member models → /model sent into each pane after wake, before attach", () => {
+  const cmd = buildTeamUpCommand("brew", "brew", "/home/u/soulbrew", ["bob", "john"], {
+    bob: "claude-sonnet-5",
+    john: "claude-haiku-4-5",
+  });
+  expect(cmd).toContain("tmux send-keys -t '=brew:bob' '/model claude-sonnet-5' Enter");
+  expect(cmd).toContain("tmux send-keys -t '=brew:john' '/model claude-haiku-4-5' Enter");
+  expect(cmd.indexOf("/model")).toBeLessThan(cmd.indexOf("tmux attach")); // set before the user lands
+});
+
+test("buildTeamUpCommand: member without a configured model gets no /model", () => {
+  const cmd = buildTeamUpCommand("brew", "brew", "/home/u/soulbrew", ["bob", "mike"], {
+    bob: "claude-sonnet-5",
+  });
+  expect(cmd).toContain("'=brew:bob' '/model claude-sonnet-5'");
+  expect(cmd).not.toContain("=brew:mike");
+});
+
+test("buildTeamUpCommand: unsafe model string is dropped (no injection)", () => {
+  const cmd = buildTeamUpCommand("brew", "brew", "/home/u/soulbrew", ["bob"], {
+    bob: "x; rm -rf /",
+  });
+  expect(cmd).not.toContain("/model");
+  expect(cmd).not.toContain("rm -rf");
+});
+
+test("buildTeamUpCommand: no models arg → unchanged command (backward compatible)", () => {
+  const cmd = buildTeamUpCommand("brew", "brew", "/home/u/soulbrew", ["bob"]);
+  expect(cmd).not.toContain("/model");
+});
+
 test("buildTeamUpCommand: empty roster → single plain up (charter decides)", () => {
   expect(buildTeamUpCommand("brew", "brew", "/home/u/soulbrew", [])).toBe(
     "tmux new-session -A -d -s 'brew' -n _boot -c '/home/u/soulbrew' && { " +

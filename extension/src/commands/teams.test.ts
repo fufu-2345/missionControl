@@ -40,6 +40,27 @@ test("buildTmuxLaunchCommand: default still attaches (unchanged behavior)", () =
   expect(cmd).toContain("tmux attach");
 });
 
+test("buildTmuxLaunchCommand: model → 'claude --model <model>' before --dangerously-skip-permissions", () => {
+  const cmd = buildTmuxLaunchCommand(
+    "foreman", "/x", "hi", "claude-foreman", [], false, undefined, "claude-sonnet-5",
+  );
+  expect(cmd).toContain("claude --model claude-sonnet-5 --dangerously-skip-permissions");
+});
+
+test("buildTmuxLaunchCommand: no model → bare claude, no --model (unchanged)", () => {
+  const cmd = buildTmuxLaunchCommand("foreman", "/x", "hi", "claude-foreman", [], false);
+  expect(cmd).toContain("claude --dangerously-skip-permissions");
+  expect(cmd).not.toContain("--model");
+});
+
+test("buildTmuxLaunchCommand: unsafe model string is ignored (no injection)", () => {
+  const cmd = buildTmuxLaunchCommand(
+    "foreman", "/x", "hi", "claude-foreman", [], false, undefined, "sonnet; rm -rf /",
+  );
+  expect(cmd).not.toContain("--model");
+  expect(cmd).not.toContain("rm -rf");
+});
+
 test("parseSessionPin: finds pinned session for an oracle", () => {
   const cfg = JSON.stringify({ sessions: { foreman: "09-foreman", bob: "05-bob" } });
   expect(parseSessionPin(cfg, "foreman")).toBe("09-foreman");

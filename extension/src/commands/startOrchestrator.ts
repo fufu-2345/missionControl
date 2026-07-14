@@ -18,6 +18,7 @@ import {
   parseSessionPin,
   parseTeamRoster,
 } from "./teams";
+import { readTeamDetailSync } from "./teamsOps";
 import {
   decideCancelOutcome,
   decideContinueAction,
@@ -48,6 +49,18 @@ import {
 
 const ORACLES_JSON = path.join(os.homedir(), ".maw", "oracles.json");
 const MAW_CONFIG_DIR = path.join(os.homedir(), ".config", "maw");
+
+/** The orchestrator's configured model from the Team Config picker
+ *  (~/.claude/teams/<team>/config.json members[].model), or undefined when unset
+ *  / unreadable → orchestrator inherits the global default model. This is the
+ *  bridge the picker was missing: the value the panel writes now reaches launch. */
+function orchestratorModel(teamName: string, orch: string): string | undefined {
+  try {
+    return readTeamDetailSync(teamName).members.find((m) => m.oracle === orch)?.model || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 // Same rule as maw itself (src/config/load.ts CONFIG_FILE_REGEX): weighted
 // numbered files, NOT newest-mtime — a touched legacy maw.config.json must not
@@ -522,6 +535,7 @@ export function launchContinueRun(
     workers,
     false,
     formatOrchesLabel(project.name, target.team.name),
+    orchestratorModel(target.team.name, target.orch),
   );
 
   let baseMainSha = "";
@@ -694,7 +708,10 @@ export async function launchOrchestrator(opts: {
   // Safe: session = maw pin (NN-oracle) / claude-<safe-orch> (+ "-N" twin suffix).
   const command = inject
     ? `tmux attach -t '=${session}'`
-    : buildTmuxLaunchCommand(orch, repoPath, kickoff, session, workers, true, orchesLabel);
+    : buildTmuxLaunchCommand(
+        orch, repoPath, kickoff, session, workers, true, orchesLabel,
+        orchestratorModel(team.name, orch),
+      );
 
   // One editor tab per SESSION (twin gets its own) — never touch other tabs.
   const prevTerm = _orchTerminals.get(session);

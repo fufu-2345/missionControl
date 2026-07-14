@@ -105,10 +105,13 @@ export function teamUp(team: string): TeamUpResult {
 
   // Roster → sequential per-member `--only` wakes (see buildTeamUpCommand).
   // Only shell-safe oracle names; unsafe ones are dropped rather than injected.
-  const members = readTeamDetailSync(team)
-    .members.map((m) => m.oracle)
-    .filter((o) => isSafeTeamName(o));
-  const command = buildTeamUpCommand(team, session, SOULBREW_DIR, members);
+  const detail = readTeamDetailSync(team);
+  const members = detail.members.map((m) => m.oracle).filter((o) => isSafeTeamName(o));
+  // Per-member model from the Team Config picker → applied via /model after wake
+  // (maw team up can't carry it). Only safe names; buildTeamUpCommand re-guards the value.
+  const models: Record<string, string> = {};
+  for (const m of detail.members) if (m.oracle && m.model) models[m.oracle] = m.model;
+  const command = buildTeamUpCommand(team, session, SOULBREW_DIR, members, models);
 
   // One editor tab per SESSION (a minted instance gets its own) — never touch
   // another instance's tab.

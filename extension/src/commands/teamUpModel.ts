@@ -65,17 +65,32 @@ export function buildTeamUpCommand(
   session: string,
   cwd: string,
   members: string[],
+  models: Record<string, string> = {}, // member → Team Config model (config.json members[].model)
 ): string {
   const up = members.length
     ? members
         .map((m) => `maw team up '${team}' --session '${session}' --force --only '${m}'`)
         .join(" ; ")
     : `maw team up '${team}' --session '${session}' --force`;
+  // maw team up has NO --model and this setup uses the legacy "commands" config
+  // (no engine mechanism), so every member otherwise inherits the global
+  // ~/.claude/settings.json default (e.g. opus[1m]) — the reason the picker never
+  // took effect. After the wake+rename (windows are now the bare member name),
+  // switch each member to its configured model via the `/model` slash command.
+  // Best-effort: one settle wait for the last sequential wake to reach its prompt,
+  // then a send per member with a SAFE configured model (reject, don't sanitize, so
+  // a tampered config.json can't smuggle shell into the command).
+  const SAFE_MODEL = /^[A-Za-z0-9._-]+$/;
+  const sends = members
+    .filter((m) => models[m] && SAFE_MODEL.test(models[m]))
+    .map((m) => `tmux send-keys -t '=${session}:${m}' '/model ${models[m]}' Enter`);
+  const modelStep = sends.length ? `sleep 5 ; ${sends.join(" ; ")} ; ` : "";
   return (
     `tmux new-session -A -d -s '${session}' -n _boot -c '${cwd}' && { ` +
     `${up} ; ` +
     `for w in $(tmux list-windows -t '=${session}' -F '#{window_name}'); do ` +
     `tmux rename-window -t "=${session}:$w" "\${w#*-}" 2>/dev/null ; done ; ` +
+    `${modelStep}` +
     `tmux kill-window -t '=${session}:_boot' 2>/dev/null ; ` +
     `tmux attach -t '=${session}' ; }`
   );

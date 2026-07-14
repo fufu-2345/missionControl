@@ -4,6 +4,7 @@ import * as path from "node:path";
 
 import { run, type RunResult } from "./gitOps";
 import { parseOraclePath } from "./teams";
+import { readTeamModels, writeTeamModels } from "./teamModels";
 import {
   createArgs,
   deleteArgs,
@@ -193,7 +194,13 @@ export function readTeamDetailSync(name: string): TeamDetail {
     path.join(MAW_TEAMS_DIR, name, "oracle-members.json"),
   );
   const tool = readJson<ToolConfig>(path.join(TOOL_TEAMS_DIR, name, "config.json"));
-  const members = mergeTeamStores(oracle?.members ?? [], tool?.members ?? []);
+  const merged = mergeTeamStores(oracle?.members ?? [], tool?.members ?? []);
+  // Overlay the durable model sidecar (models.json). config.json's model is
+  // unreliable — `maw team up` clobbers members[] with live-worker entries — so the
+  // sidecar is the source of truth for a member's picked model. This makes the panel
+  // AND every launch reader (teamUp, orchestrator) see the model that survives a Team up.
+  const models = readTeamModels(name);
+  const members = merged.map((m) => (models[m.oracle] ? { ...m, model: models[m.oracle] } : m));
   return { name, description: tool?.description ?? "", members };
 }
 
@@ -292,6 +299,15 @@ export async function saveTeam(
   }
   // Keep the yaml charter (what `maw team up` reads) matching the saved roster.
   syncCharter(name, edited, errors);
+  // Durable model sidecar — the ONE store `maw team up` won't clobber. Written
+  // from the FULL edited roster so every member's pick survives a Team up.
+  try {
+    const modelMap: Record<string, string> = {};
+    for (const m of edited) if (m.oracle && m.model) modelMap[m.oracle] = m.model;
+    writeTeamModels(name, modelMap);
+  } catch (e) {
+    errors.push(`models sidecar: ${String(e)}`);
+  }
   return { ok: errors.length === 0, errors };
 }
 
@@ -314,6 +330,14 @@ export async function createTeam(
   }
   // Seed the yaml charter so `maw team up <team>` works immediately after create.
   syncCharter(name, members, errors);
+  // Durable model sidecar (see saveTeam) — survives `maw team up` clobbering config.json.
+  try {
+    const modelMap: Record<string, string> = {};
+    for (const m of members) if (m.oracle && m.model) modelMap[m.oracle] = m.model;
+    writeTeamModels(name, modelMap);
+  } catch (e) {
+    errors.push(`models sidecar: ${String(e)}`);
+  }
   return { ok: errors.length === 0, errors };
 }
 

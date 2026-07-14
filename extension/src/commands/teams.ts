@@ -248,6 +248,7 @@ export function buildTmuxLaunchCommand(
   workers: string[] = [],
   attach = true, // continue-button passes false → detached, no attach
   orchesLabel?: string, // set @orches_label at create so the Sessions panel shows "<project> / <team>", not the raw NN-<oracle> pin
+  model?: string, // per-member model from the Team Config picker (config.json members[].model); omitted → inherits global default
 ): string {
   const session = sessionName?.trim() || `claude-${orchestrator}`;
   // -n names the initial window after the repo (e.g. foreman-oracle): maw wake
@@ -255,9 +256,13 @@ export function buildTmuxLaunchCommand(
   // foreman -p` sees no foreman window and opens a SECOND claude (twin) on the
   // same repo/conversation instead of injecting into this one.
   const window = repoPath.replace(/\/+$/, "").split("/").pop() || orchestrator;
+  // Per-member model from the Team Config picker. Guard against injection: real
+  // model ids are alnum/dot/hyphen plus the [1m] window suffix — anything else is
+  // dropped so a tampered config.json can't smuggle shell into the launch command.
+  const modelFlag = model && /^[A-Za-z0-9.\-[\]]+$/.test(model) ? `--model ${model} ` : "";
   const inner =
     `cd ${shSingleQuote(repoPath)} && ` +
-    `claude --dangerously-skip-permissions ${shSingleQuote(kickoff)}`;
+    `claude ${modelFlag}--dangerously-skip-permissions ${shSingleQuote(kickoff)}`;
   // Detached create → lay out → attach (mirrors buildTeamUpCommand). A plain
   // attached `new-session` blocks until the user detaches, so the layout could
   // only run afterward. `-A -d` creates (or no-ops if the session is already
