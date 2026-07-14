@@ -603,8 +603,9 @@ export async function launchOrchestrator(opts: {
   mode: "new" | "resume";
   project?: ResumableProject;
   askMode?: boolean;
+  projectName?: string;
 }): Promise<{ error?: string; cancelled?: boolean }> {
-  const { orch, team, mode, project, askMode = false } = opts;
+  const { orch, team, mode, project, askMode = false, projectName } = opts;
   if (!isSafeOracleName(orch)) return { error: `ชื่อ orchestrator ไม่ปลอดภัย: ${orch}` };
   if (mode === "resume" && !project) return { error: "resume แต่ไม่มี project" };
 
@@ -645,6 +646,8 @@ export async function launchOrchestrator(opts: {
     mode === "resume" && project
       ? buildResumeKickoff(project.name, project.path, team.name, orch, workers, askMode)
       : buildKickoffPrompt(team.name, orch, workers, askMode);
+  if (mode === "new" && projectName && projectName.trim())
+    kickoff += `\n\nโปรเจคชื่อ '${projectName.trim()}' — ใช้ชื่อนี้เป๊ะเป็นชื่อ project/repo (ผ่านการเช็คว่างแล้ว) · ⛔ ห้ามตั้งชื่อใหม่/ห้าม bump -vN เอง`;
 
   const baseSession = readSessionPin(orch)?.trim() || `claude-${orch}`;
   let session = baseSession;

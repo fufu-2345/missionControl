@@ -17,7 +17,7 @@ import {
   sessionCreatedAt,
   tmuxHasSession,
 } from "../commands/startOrchestrator";
-import { partitionStarred, toggleStar, type ResumableProject } from "../commands/orchestratorResume";
+import { partitionStarred, sortResumable, toggleStar, type ResumableProject } from "../commands/orchestratorResume";
 import { removeProjectDir } from "../commands/deleteProject";
 import {
   clampSprintCount,
@@ -27,6 +27,10 @@ import {
   resolveButtonState,
 } from "../commands/continueRun";
 import type { OracleTeam } from "../commands/teams";
+import { ORG, checkProjectName, suggestDefaultName, sanitizeName, type NameCheck } from "../commands/projectName";
+import * as cp from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 // Single "Projects" webview panel (its OWN editor tab, mirroring teams.ts) — the
 // one entry point for both continuing a project and starting a new build:
@@ -41,6 +45,7 @@ interface WizState {
   project?: ResumableProject; // set → resume that project; unset → fresh build
   team?: OracleTeam;
   askMode?: boolean; // "โหมดถาม" toggle — grilling interview + scrutinize plan review
+  newName?: string; // ชื่อ project ที่ user ตั้งใน name-popup (mode "new") → ส่งเข้า kickoff
 }
 let _st: WizState | undefined;
 
@@ -67,6 +72,46 @@ async function computeGitStates(
     }),
   );
   return out;
+}
+
+// ── name-popup: local + github availability probes (impure; pure logic = projectName.ts) ──
+// รายชื่อโฟลเดอร์ทั้งหมดใต้ projects root (local-taken = ทุกโฟลเดอร์ ไม่ใช่แค่ resumable)
+function localProjectNames(): string[] {
+  const first = scanResumableProjects()[0];
+  if (!first) return [];
+  try {
+    return fs
+      .readdirSync(path.dirname(first.path), { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name);
+  } catch {
+    return scanResumableProjects().map((p) => p.name);
+  }
+}
+let _ghOk: boolean | undefined;
+function ghAvailable(): boolean {
+  if (_ghOk === undefined) {
+    try {
+      cp.execFileSync("gh", ["auth", "status"], { stdio: "ignore", timeout: 4000 });
+      _ghOk = true;
+    } catch {
+      _ghOk = false;
+    }
+  }
+  return _ghOk;
+}
+// true = repo exists (taken) · false = 404 (free) · null = gh ไม่พร้อม/ตรวจไม่ได้
+function ghView(name: string): boolean | null {
+  if (!ghAvailable()) return null;
+  try {
+    cp.execFileSync("gh", ["repo", "view", `${ORG}/${name}`, "--json", "name"], {
+      stdio: "ignore",
+      timeout: 6000,
+    });
+    return true;
+  } catch {
+    return false; // non-zero = 404 (free) · ensure-remote ยัง guard org ตอน push (safety net)
+  }
 }
 
 async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch: boolean | "spin" = false) {
@@ -250,6 +295,7 @@ async function doLaunch(panel: vscode.WebviewPanel, orch: string, askMode = fals
     mode: _st.project ? "resume" : "new",
     project: _st.project,
     askMode,
+    projectName: _st.newName,
   });
   if (r.cancelled) return; // user backed out of the twin/inject choice — keep the wizard
   if (r.error) {
@@ -298,13 +344,33 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
       case "ready":
         await pushProjectsScreen(panel);
         return;
-      case "start_new":
-        // "+ เริ่มโปรเจคใหม่" ในหน้า Projects → flow เริ่มใหม่เดิม: เลือกทีม → launch
-        // แบบไม่มี project (mode "new"). ใช้ team-picker ตัวเดียวกับ resume.
+      case "start_new": {
+        // "+ เริ่มโปรเจคใหม่" → เปิด name popup ก่อน (ตั้งชื่อ + เช็คว่าง local+github)
+        // → ยืนยันแล้วค่อยไป team-picker (mode "new"). default ระบบคิดให้.
         _st.project = undefined;
         _st.team = undefined;
+        _st.newName = undefined;
+        const def = suggestDefaultName(
+          sortResumable(scanResumableProjects()).map((p) => p.name),
+          localProjectNames(),
+          ghView,
+        );
+        panel.webview.postMessage({ type: "open_namemodal", default: def });
+        return;
+      }
+      case "check_name": {
+        const name = sanitizeName(typeof msg.name === "string" ? msg.name : "");
+        const check: NameCheck = checkProjectName(name, localProjectNames(), ghView);
+        panel.webview.postMessage({ type: "name_result", name, check });
+        return;
+      }
+      case "name_confirmed": {
+        const name = sanitizeName(typeof msg.name === "string" ? msg.name : "");
+        if (!checkProjectName(name, localProjectNames(), ghView).valid) return;
+        _st.newName = name;
         await pushTeamsScreen(panel);
         return;
+      }
       case "pick_project": {
         const p = _st.projects.find((x) => x.path === msg.path);
         if (!p) return;
@@ -575,6 +641,9 @@ function renderShell(): string {
   .modal-card .mbtn.danger { border-color:#f85149; color:#fff; background:#da3633; }
   .modal-card .mbtn.danger:hover { background:#f85149; }
   .modal-card .mbtn.danger:disabled { background:rgba(218,54,51,0.35); border-color:transparent; color:rgba(255,255,255,0.5); cursor:not-allowed; }
+  .modal-card .merr.ok { color:#3fb950; }
+  .modal-card .merr.bad { color:#f85149; }
+  .modal-card .merr.warn { color:#e3a13a; }
   .badge-last { font-size: 10px; font-weight: 700; color: #0d1117; background: #3fb950;
     padding: 1px 8px; border-radius: 8px; margin-left: 8px; vertical-align: middle; }
   .star { flex: 0 0 auto; font-size: 19px; line-height: 1; cursor: pointer; user-select: none;
@@ -674,6 +743,18 @@ function renderShell(): string {
       </div>
     </div>
   </div>
+  <div id="namemodal" class="modal-backdrop" style="display:none">
+    <div class="modal-card" role="dialog" aria-modal="true">
+      <div class="mt">ตั้งชื่อโปรเจคใหม่</div>
+      <div class="mh">พิมพ์ชื่อ (เช็คว่างทั้งในเครื่องและ GitHub org) — แก้ได้</div>
+      <input id="nm-input" type="text" placeholder="ชื่อโปรเจค" />
+      <div class="merr" id="nm-status"></div>
+      <div class="mact">
+        <button class="mbtn" id="nm-cancel">ยกเลิก</button>
+        <button class="mbtn primary" id="nm-ok">ถัดไป</button>
+      </div>
+    </div>
+  </div>
 <script>
   const vscode = acquireVsCodeApi();
   var COLOR = { commit:'#c47f1a', push:'#1f6feb', pull:'#1b9aaa', 'create-push':'#238636' };
@@ -746,6 +827,40 @@ function renderShell(): string {
   el('dm-input').addEventListener('keydown', function(e){
     if(e.key==='Enter'){ e.preventDefault(); dmOk(); }
     else if(e.key==='Escape'){ e.preventDefault(); closeDelModal(); } });
+
+  // ── ตั้งชื่อโปรเจคใหม่ modal — พิมพ์ + เช็คว่าง (local+github) debounce 400ms ──
+  var _nmTimer=null;
+  function openNameModal(def){
+    el('nm-input').value=def||''; el('nm-ok').disabled=true;
+    el('nm-status').textContent=''; el('nm-status').className='merr';
+    el('namemodal').style.display='flex'; el('nm-input').focus(); el('nm-input').select();
+    nmSchedule();
+  }
+  function closeNameModal(){ el('namemodal').style.display='none'; if(_nmTimer) clearTimeout(_nmTimer); }
+  function nmSchedule(){
+    el('nm-ok').disabled=true; el('nm-status').textContent='กำลังเช็ค…'; el('nm-status').className='merr';
+    if(_nmTimer) clearTimeout(_nmTimer);
+    _nmTimer=setTimeout(function(){ post('check_name',{name:el('nm-input').value}); }, 400);
+  }
+  function nmResult(m){
+    var c=m.check||{}, s=el('nm-status');
+    if(!c.valid){ s.textContent='ชื่อไม่ถูกต้อง (ใช้ A-Z a-z 0-9 . _ - เท่านั้น)'; s.className='merr bad'; el('nm-ok').disabled=true; return; }
+    var free = !c.localTaken && !(c.githubChecked && c.githubTaken);
+    var used = (m.name && m.name!==el('nm-input').value) ? ' (จะใช้ชื่อ "'+m.name+'")' : '';
+    if(c.localTaken){ s.textContent='ซ้ำ: มีในเครื่องแล้ว'+used; s.className='merr bad'; }
+    else if(c.githubChecked && c.githubTaken){ s.textContent='ซ้ำ: มีบน GitHub org แล้ว'+used; s.className='merr bad'; }
+    else if(!c.githubChecked){ s.textContent='ว่างในเครื่อง · เช็ค GitHub ไม่ได้ (gh ไม่พร้อม)'+used; s.className='merr warn'; }
+    else { s.textContent='ว่าง ใช้ได้'+used; s.className='merr ok'; }
+    el('nm-ok').disabled=!free;
+  }
+  function nmConfirm(){ if(el('nm-ok').disabled) return; var n=el('nm-input').value; closeNameModal(); post('name_confirmed',{name:n}); }
+  el('nm-cancel').addEventListener('click', closeNameModal);
+  el('nm-ok').addEventListener('click', nmConfirm);
+  el('nm-input').addEventListener('input', nmSchedule);
+  el('namemodal').addEventListener('click', function(e){ if(e.target===el('namemodal')) closeNameModal(); });
+  el('nm-input').addEventListener('keydown', function(e){
+    if(e.key==='Enter'){ e.preventDefault(); nmConfirm(); }
+    else if(e.key==='Escape'){ e.preventDefault(); closeNameModal(); } });
 
   // "โหมดถาม" toggle — persists across screen re-renders (this script runs once).
   // On: the launch post carries askMode:true → kickoff gets the grilling+scrutinize trigger.
@@ -1039,6 +1154,8 @@ function renderShell(): string {
     else if(m.type==="screen_orch") renderOrch(m);
     else if(m.type==="disarm_all") disarmAll();  // panel ถูกซ่อน/สลับ tab (backend แจ้งมา) → เลิก arm ค้าง
     else if(m.type==="git_auto_result") handleAutoResult(m.path,m.message,m.gen);
+    else if(m.type==="open_namemodal") openNameModal(m.default);
+    else if(m.type==="name_result") nmResult(m);
   });
   post("ready");
 </script></body></html>`;
