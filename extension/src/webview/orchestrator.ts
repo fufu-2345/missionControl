@@ -18,7 +18,7 @@ import {
   tmuxHasSession,
 } from "../commands/startOrchestrator";
 import { partitionStarred, toggleStar, type ResumableProject } from "../commands/orchestratorResume";
-import { confirmNameMatches, removeProjectDir } from "../commands/deleteProject";
+import { removeProjectDir } from "../commands/deleteProject";
 import {
   clampSprintCount,
   finishedSessions,
@@ -176,38 +176,29 @@ function isRunning(p: ResumableProject): boolean {
 
 /** ลบโปรเจค: กัน running → confirm modal → พิมพ์ชื่อยืนยัน → ลบโฟลเดอร์ local.
  *  ⛔ ไม่แตะ GitHub. คืน {deleted:false} เงียบเมื่อ user ยกเลิก. */
-async function deleteProjectFlow(p: ResumableProject): Promise<{ deleted: boolean; reason?: string }> {
+function deleteProjectFlow(p: ResumableProject): { deleted: boolean; reason?: string } {
+  // ยืนยัน + พิมพ์ชื่อ ทำใน webview modal แล้ว → host แค่ guard ซ้ำ (running + path) แล้วลบ.
   if (isRunning(p)) return { deleted: false, reason: `'${p.name}' กำลัง run อยู่ — กด stop ก่อนถึงจะลบได้` };
-  const yes = await vscode.window.showWarningMessage(
-    `ลบโปรเจค '${p.name}' ออกจากเครื่องถาวร?`,
-    { modal: true, detail: `ลบโฟลเดอร์ ${p.path} (รวม git + worktrees ข้างใน) · ไม่แตะ GitHub` },
-    "ลบถาวร",
-  );
-  if (yes !== "ลบถาวร") return { deleted: false };
-  const typed = await vscode.window.showInputBox({
-    title: `ยืนยันการลบ '${p.name}'`,
-    prompt: `พิมพ์ชื่อโปรเจคให้ตรงเพื่อยืนยัน: ${p.name}`,
-    ignoreFocusOut: true,
-    validateInput: (v) => (confirmNameMatches(v, p.name) ? null : "ชื่อไม่ตรง"),
-  });
-  if (!confirmNameMatches(typed ?? "", p.name)) return { deleted: false };
   const r = removeProjectDir(p.path);
   if (r.deleted) vscode.window.showInformationMessage(`ลบ '${p.name}' แล้ว`);
   return r;
 }
 
-function pushTeamsScreen(panel: vscode.WebviewPanel) {
+async function pushTeamsScreen(panel: vscode.WebviewPanel) {
   const teams = listOrchestratorTeams();
   const def = _st?.project ? defaultTeamFor(_st.project, teams) : null;
   // Last-used team floats to the top; the rest keep their existing order.
   const ordered = def
     ? [...teams.filter((t) => t.name === def), ...teams.filter((t) => t.name !== def)]
     : teams;
+  // "เปิดใน GitHub" link — only when resuming a project that has a github origin.
+  const githubUrl = _st?.project ? await gitOps.getGithubWebUrl(_st.project.path) : null;
   panel.webview.postMessage({
     type: "screen_teams",
     title: (_st?.project ? "⏮ ทำต่อ" : "▶ เริ่มใหม่") + " — เลือกทีม",
     subtitle: _st?.project ? `project: ${_st.project.name}` : "เลือก oracle-team",
     canBack: true, // มาจากหน้า Projects เสมอ → กลับได้ตลอด
+    githubUrl, // null → the client hides the GitHub button
     // โหมดถาม toggle เฉพาะ build ใหม่ (ยังไม่ได้เลือก project) — resume ยังไม่รองรับ
     askable: !_st?.project,
     items: ordered.map((t) => ({
@@ -312,7 +303,7 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         // แบบไม่มี project (mode "new"). ใช้ team-picker ตัวเดียวกับ resume.
         _st.project = undefined;
         _st.team = undefined;
-        pushTeamsScreen(panel);
+        await pushTeamsScreen(panel);
         return;
       case "pick_project": {
         const p = _st.projects.find((x) => x.path === msg.path);
@@ -336,7 +327,16 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
           );
           return; // do NOT fall through to spawn a twin
         }
-        pushTeamsScreen(panel);
+        await pushTeamsScreen(panel);
+        return;
+      }
+      case "open_github": {
+        // เปิด repo ของ project นี้ใน browser จริง. Re-resolve host-side (don't trust
+        // the client URL) so we only ever open this project's github origin.
+        if (!_st.project) return;
+        const url = await gitOps.getGithubWebUrl(_st.project.path);
+        if (url) void vscode.env.openExternal(vscode.Uri.parse(url));
+        else vscode.window.showWarningMessage(`'${_st.project.name}' ไม่มี GitHub remote (origin)`);
         return;
       }
       case "toggle_star": {
@@ -421,7 +421,7 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
       case "delete_project": {
         const p = _st.projects.find((x) => x.path === msg.path);
         if (!p) return;
-        const r = await deleteProjectFlow(p);
+        const r = deleteProjectFlow(p);
         if (r.deleted) {
           _st.projects = scanResumableProjects(); // re-scan → การ์ดหลุดจาก list
           await pushProjectsScreen(panel);
@@ -565,13 +565,16 @@ function renderShell(): string {
   .card.default { border-color: #3fb950; background: rgba(63,185,80,0.12); }
   .card.default:hover { background: rgba(63,185,80,0.18); }
   .card.default .cname { color: #56d364; }
-  .del { display:none; background:none; border:none; cursor:pointer; font-size:14px;
-         padding:2px 6px; border-radius:5px; color:#f85149; }
+  .del { display:none; background:none; border:1px solid #f85149; cursor:pointer; font-size:11px;
+         font-weight:600; padding:3px 12px; border-radius:6px; color:#f85149; margin:0 6px; white-space:nowrap; }
   #content.edit .del { display:inline-flex; align-items:center; }
   .del:hover { background:rgba(248,81,73,0.15); }
-  .del.disabled { color:#6e7681; cursor:not-allowed; }
+  .del.disabled { color:#6e7681; border-color:#6e7681; cursor:not-allowed; }
   .del.disabled:hover { background:none; }
   #editBtn.on { background:rgba(248,81,73,0.15); color:#f85149; border-color:#f85149; }
+  .modal-card .mbtn.danger { border-color:#f85149; color:#fff; background:#da3633; }
+  .modal-card .mbtn.danger:hover { background:#f85149; }
+  .modal-card .mbtn.danger:disabled { background:rgba(218,54,51,0.35); border-color:transparent; color:rgba(255,255,255,0.5); cursor:not-allowed; }
   .badge-last { font-size: 10px; font-weight: 700; color: #0d1117; background: #3fb950;
     padding: 1px 8px; border-radius: 8px; margin-left: 8px; vertical-align: middle; }
   .star { flex: 0 0 auto; font-size: 19px; line-height: 1; cursor: pointer; user-select: none;
@@ -659,6 +662,18 @@ function renderShell(): string {
       </div>
     </div>
   </div>
+  <div id="delmodal" class="modal-backdrop" style="display:none">
+    <div class="modal-card" role="dialog" aria-modal="true">
+      <div class="mt" id="dm-title">ลบโปรเจค</div>
+      <div class="mh" id="dm-hint"></div>
+      <input id="dm-input" type="text" placeholder="พิมพ์ชื่อโปรเจค" />
+      <div class="merr" id="dm-err"></div>
+      <div class="mact">
+        <button class="mbtn" id="dm-cancel">ยกเลิก</button>
+        <button class="mbtn danger" id="dm-ok">ลบถาวร</button>
+      </div>
+    </div>
+  </div>
 <script>
   const vscode = acquireVsCodeApi();
   var COLOR = { commit:'#c47f1a', push:'#1f6feb', pull:'#1b9aaa', 'create-push':'#238636' };
@@ -694,6 +709,31 @@ function renderShell(): string {
     if(e.key==='Enter'){ e.preventDefault(); mmConfirm(); }
     else if(e.key==='Escape'){ e.preventDefault(); closeMultiModal(); } });
 
+  // ── ลบโปรเจค modal (กลางจอ) — ยืนยัน + พิมพ์ชื่อ ในกล่องเดียว (แทน native dialog) ──
+  var _delPath=null;
+  function openDelModal(path, name){
+    _delPath=path;
+    el('dm-title').textContent='ลบโปรเจค '+(name||'');
+    el('dm-hint').textContent='ลบถาวรจากเครื่อง (รวม git + worktrees ข้างใน) · ไม่แตะ GitHub · พิมพ์ชื่อให้ตรงเพื่อยืนยัน: '+name;
+    el('dm-err').textContent='';
+    var inp=el('dm-input'); inp.value=''; inp.dataset.expect=name;
+    el('delmodal').style.display='flex'; inp.focus(); dmSync();
+  }
+  function closeDelModal(){ el('delmodal').style.display='none'; _delPath=null; }
+  function dmSync(){ var inp=el('dm-input'); el('dm-ok').disabled = inp.value.trim()!==inp.dataset.expect; }
+  function dmConfirm(){
+    var inp=el('dm-input');
+    if(inp.value.trim()!==inp.dataset.expect){ el('dm-err').textContent='ชื่อไม่ตรง'; return; }
+    var p=_delPath; closeDelModal(); post('delete_project',{path:p});
+  }
+  el('dm-cancel').addEventListener('click', closeDelModal);
+  el('dm-ok').addEventListener('click', dmConfirm);
+  el('dm-input').addEventListener('input', dmSync);
+  el('delmodal').addEventListener('click', function(e){ if(e.target===el('delmodal')) closeDelModal(); });
+  el('dm-input').addEventListener('keydown', function(e){
+    if(e.key==='Enter'){ e.preventDefault(); dmConfirm(); }
+    else if(e.key==='Escape'){ e.preventDefault(); closeDelModal(); } });
+
   // "โหมดถาม" toggle — persists across screen re-renders (this script runs once).
   // On: the launch post carries askMode:true → kickoff gets the grilling+scrutinize trigger.
   var askMode=false;
@@ -708,20 +748,23 @@ function renderShell(): string {
     var ns=document.querySelectorAll('.spin'); for(var i=0;i<ns.length;i++) ns[i].textContent=f;
   }, 90);
 
-  function actionsHtml(canBack, showFetch, askable, showNew, showEdit){
+  function actionsHtml(canBack, showFetch, askable, showNew, showEdit, githubUrl){
     // showNew = the "+ เริ่มโปรเจคใหม่" button (Projects screen only) → runs the
     // same team→orchestrator→launch flow with no project = a fresh build.
     // fetch = git-refresh of the PROJECTS screen only (dead-end elsewhere).
     // askBtn only for a new build (askable) — resume ยังไม่รองรับโหมดถาม.
-    // showEdit = "✏️ Edit" toggle (Projects screen only) → เผยปุ่มลบต่อการ์ด.
+    // showEdit = "Edit" toggle (Projects screen only) → เผยปุ่มลบต่อการ์ด.
+    // githubUrl (teams screen, resume only) → "เปิดใน GitHub" opens the repo in the browser.
     return (canBack ? '<button id="backBtn">← กลับ</button>' : '')
-      + (showNew ? '<button id="newProjBtn" style="background:#238636;color:#fff;border-color:#238636;font-weight:600;">+ เริ่มโปรเจคใหม่</button>' : '')
+      + (githubUrl ? '<button id="ghBtn" title="เปิด repo นี้ใน GitHub (browser)">🔗 GitHub</button>' : '')
+      + (showNew ? '<button id="newProjBtn" title="เริ่ม build โปรเจคใหม่" style="border-color:#2ea043;color:#3fb950;">+ เริ่มโปรเจคใหม่</button>' : '')
       + (askable ? '<button id="askBtn" title="เปิด = สัมภาษณ์ requirement ละเอียด (grilling) + รีวิวแผนก่อนลงมือ (scrutinize)" style="'+askBtnStyle()+'">'+askBtnLabel()+'</button>' : '')
       + (showFetch ? '<button id="reloadBtn">fetch</button>' : '')
-      + (showEdit ? '<button id="editBtn" title="เปิดเพื่อลบโปรเจคที่ไม่ใช้">✏️ Edit</button>' : '');
+      + (showEdit ? '<button id="editBtn" title="เปิดเพื่อลบโปรเจคที่ไม่ใช้">Edit</button>' : '');
   }
   function wireActions(canBack){
     if (canBack){ var b=el("backBtn"); if(b) b.addEventListener('click',function(){post('back');}); }
+    var gh=el("ghBtn"); if(gh) gh.addEventListener('click',function(){post('open_github');});
     var nb=el("newProjBtn"); if(nb) nb.addEventListener('click',function(){post('start_new');});
     var ab=el("askBtn"); if(ab) ab.addEventListener('click',function(){
       askMode=!askMode; ab.textContent=askBtnLabel(); ab.style.cssText=askBtnStyle(); });
@@ -801,8 +844,8 @@ function renderShell(): string {
         : '';
       // ปุ่มลบ (โผล่เฉพาะ edit mode ผ่าน CSS) · running = กากบาทแดง disabled กดไม่ได้
       var delBtn = (run.state === 'spinning')
-        ? '<button class="del disabled" title="กำลัง run — กด stop ก่อนถึงจะลบได้">✖</button>'
-        : '<button class="del" title="ลบโปรเจคออกจากเครื่อง">🗑</button>';
+        ? '<button class="del disabled" title="กำลัง run — กด stop ก่อนถึงจะลบได้">ลบ</button>'
+        : '<button class="del" data-name="'+esc(it.name)+'" title="ลบโปรเจคออกจากเครื่อง">ลบ</button>';
       return '<div class="card'+(it.driven?' live':'')+'" data-path="'+esc(it.path)+'">'
         +'<span class="star'+(it.starred?' on':'')+'" role="button" title="ปักดาว / เอาดาวออก">'+(it.starred?'★':'☆')+'</span>'
         +'<div style="flex:1"><button class="pick"><span class="cname">'+esc(it.name)+chip+'</span>'
@@ -832,7 +875,7 @@ function renderShell(): string {
       if(multiEl) multiEl.addEventListener('click',function(e){ e.stopPropagation();
         openMultiModal(path, multiEl.dataset.name||'', Number(multiEl.dataset.pending)||2); });
       var delEl=card.querySelector('.del:not(.disabled)');
-      if(delEl) delEl.addEventListener('click',function(e){ e.stopPropagation(); post('delete_project',{path:path}); });
+      if(delEl) delEl.addEventListener('click',function(e){ e.stopPropagation(); openDelModal(path, delEl.dataset.name||''); });
       wireGit(card, path);
     });
     // DOM เพิ่งถูกสร้างใหม่ทั้งจอ (host re-render หลังทุก git action) — สถานะ arm/แสง
@@ -954,7 +997,7 @@ function renderShell(): string {
   function renderTeams(m){ disarmAll();  // ออกจากหน้า projects → เลิก arm/timer ที่ค้างทั้งหมด
     el("title").textContent=m.title; el("subtitle").textContent=m.subtitle;
     var askable=m.askable===true; if(!askable) askMode=false;
-    el("actions").innerHTML=actionsHtml(m.canBack, false, askable); wireActions(m.canBack);
+    el("actions").innerHTML=actionsHtml(m.canBack, false, askable, false, false, m.githubUrl); wireActions(m.canBack);
     var items=m.items||[];
     el("content").innerHTML = items.length ? items.map(function(it){
       return '<div class="card teamcard'+(it.isDefault?' default':'')+'" data-name="'+esc(it.name)+'"><button class="pick">'

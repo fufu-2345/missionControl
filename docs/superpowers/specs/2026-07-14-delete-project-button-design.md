@@ -92,3 +92,13 @@
 ## ผลลัพธ์ที่คาดหวัง
 
 ผู้ใช้เก็บกวาดโปรเจคเวอร์ชันเก่า/ทำเสร็จออกจากเครื่องได้จาก UI อย่างปลอดภัย โดยไม่กระทบ GitHub และลบ project ที่กำลังทำงานอยู่ไม่ได้
+
+## Revision 2026-07-14 (หลัง F5 รอบแรก — UX feedback)
+
+จาก F5: ฟีเจอร์ทำงานถูก แต่ปรับ 3 อย่างตามที่ user เห็นแล้วไม่ถูกใจ:
+
+1. **เลิกใช้ native VS Code dialog → in-webview modal กลางจอ** (ตัวเดิม `showWarningMessage` เด้ง + `showInputBox` ไปโผล่บน command-palette แยกกล่อง = แย่) · ตอนนี้ **ยืนยัน + พิมพ์ชื่อ อยู่ใน popup เดียว** (`#delmodal`, reuse `.modal-card` เดียวกับ "ทำหลาย sprint") · ปุ่ม "ลบถาวร" (danger) enable เฉพาะเมื่อพิมพ์ชื่อตรง · client post `delete_project` หลังยืนยัน → host `deleteProjectFlow` เหลือแค่ **running re-check + guard + rm** (confirm ย้ายมา client)
+2. **เลิกใช้ emoji → ข้อความล้วน** (เครื่อง user render emoji เป็นกล่อง tofu — กฎที่มีอยู่แล้ว) · ปุ่มลบ = **ปุ่มขอบแดง "ลบ"** (running = greyed disabled) · ปุ่ม toggle = "Edit" (ไม่มี ✏️)
+3. **ปุ่ม "+ เริ่มโปรเจคใหม่" ทำให้ subtle** (เดิมเขียวใหญ่ตัวหนา → เขียวขอบ/ตัวอักษรเขียว เข้าชุดกับ fetch/Edit)
+
+guard ฝั่ง extension (path + running) คงเดิม — type-to-confirm client-side = UX friction, ความปลอดภัยจริงอยู่ที่ guard + running re-check
