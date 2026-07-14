@@ -1023,10 +1023,6 @@ function renderHtml(): string {
         <div class="title">Accounts</div>
         <div class="sub">สลับ subscription login หลาย provider · usage หมดสลับได้</div>
       </button>
-      <button class="tile" type="button" onclick="run('missioncontrol.openCodeGraph')">
-        <div class="title">Open code graph</div>
-        <div class="sub">เปิด graphify graph.html ในเบราว์เซอร์ (ต้องมีเน็ต) · จาก ~/.oracle/graphify/</div>
-      </button>
     </div>
   </div>
 

@@ -165,6 +165,29 @@ export function defaultRepoName(dir: string): string {
   return path.basename(dir.replace(/\/+$/, ""));
 }
 
+/** Normalize a git remote URL (ssh or https, github.com) into a browsable
+ *  https://github.com/<owner>/<repo> page URL. Returns null for a non-github
+ *  remote or an unrecognized form so callers can hide the "open on GitHub" UI. */
+export function toGithubWebUrl(remote: string): string | null {
+  const r = remote.trim();
+  if (!r) return null;
+  // scp-like ssh:  git@github.com:owner/repo(.git)
+  let m = /^git@github\.com:(.+?)(?:\.git)?\/?$/.exec(r);
+  if (m) return `https://github.com/${m[1]}`;
+  // ssh://git@github.com/owner/repo(.git)  or  https://github.com/owner/repo(.git)
+  m = /^(?:ssh:\/\/git@|https?:\/\/(?:[^@/]+@)?)github\.com\/(.+?)(?:\.git)?\/?$/.exec(r);
+  if (m) return `https://github.com/${m[1]}`;
+  return null;
+}
+
+/** Browsable GitHub URL for a project's `origin` remote, or null if the repo
+ *  has no origin / a non-github remote. Best-effort; never throws. */
+export async function getGithubWebUrl(dir: string): Promise<string | null> {
+  const res = await git(dir, ["remote", "get-url", "origin"]);
+  if (!res.ok) return null;
+  return toGithubWebUrl(res.stdout);
+}
+
 /** Ask `claude -p` to READ the diff and propose ONE commit-message line — used
  *  only to draft the message a human then reviews. Diff is bounded to keep the
  *  token cost tiny. Returns "" if claude is unavailable or produced nothing. */

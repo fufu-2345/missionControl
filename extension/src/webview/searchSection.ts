@@ -82,10 +82,6 @@ export function searchSectionStyle(): string {
     ".so-switch .kn{position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:var(--vscode-foreground);opacity:.7;transition:left .16s ease}",
     ".so-switch.on{border-color:var(--vscode-charts-green,#3fb950);background:rgba(63,185,80,.18)}",
     ".so-switch.on .kn{left:40px;background:var(--vscode-charts-green,#3fb950);opacity:1}",
-    // segmented slide (2 cells)
-    ".so-seg{display:inline-flex;border:1px solid var(--vscode-panel-border,rgba(128,128,128,.4));border-radius:8px;overflow:hidden}",
-    ".so-seg button{background:transparent;color:var(--vscode-foreground);border:0;padding:6px 16px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:inherit}",
-    ".so-seg button.sel{background:var(--vscode-focusBorder);color:#fff}",
     ".so-model{display:flex;justify-content:space-between;align-items:center;padding:8px 0;font-size:12.5px}",
     ".so-badge{font-size:9.5px;font-weight:700;padding:1px 6px;border-radius:4px;margin-left:8px}",
     ".so-badge.ok{background:rgba(63,185,80,.18);color:var(--vscode-charts-green,#3fb950)}",
@@ -112,11 +108,6 @@ const _script = [
   "  function render(v){",
   "    var el = document.getElementById('search-oracle'); if(!el) return;",
   "    var sw = '<div class=\"so-switch'+(v.hybridEnabled?' on':'')+'\" data-so=\"hybrid\" data-next=\"'+(v.hybridEnabled?'0':'1')+'\"><div class=\"kn\"></div></div>';",
-  // Mode is binary → the whole segmented control is one toggle: click anywhere
-  // flips to the other value (data-next), like the hybrid switch.
-  "    var modeNext = v.mode==='vector' ? 'graph' : 'vector';",
-  "    var seg = '<div class=\"so-seg\" data-so=\"mode\" data-next=\"'+modeNext+'\"><button class=\"'+(v.mode==='vector'?'sel':'')+'\">Vector</button>'",
-  "      + '<button class=\"'+(v.mode==='graph'?'sel':'')+'\">Graph</button></div>';",
   // Model picker = dropdown (change → make it primary). Install/Choose + status
   // show below only for the selected model and only when the server told us its
   // state (offline → unknown → hidden).
@@ -125,17 +116,16 @@ const _script = [
   "    var mLine = (selM && selM.status!=='unknown' && selM.status!=='ready') ? '<div class=\"so-rh\" style=\"margin-top:6px\">'+esc(selM.label)+': '+esc(selM.reason||selM.status)+' <button class=\"so-btn\" data-so=\"install\" data-model=\"'+esc(selM.key)+'\">Install</button><button class=\"so-btn\" data-so=\"choose\" data-model=\"'+esc(selM.key)+'\">Choose file</button></div>' : ((selM&&selM.status==='ready')?'<div class=\"so-rh\" style=\"margin-top:6px\">'+esc(selM.label)+': ready</div>':'');",
   "    var pct = v.index.total>0 ? Math.round(100*v.index.current/v.index.total) : 0;",
   "    var indexing = v.index.status==='indexing';",
-  "    var statusLine = indexing ? ('Indexing… '+v.index.current+'/'+v.index.total+' ('+pct+'%)') : (v.readiness.ready ? ('พร้อม · '+v.docs+' docs') : ('ยังไม่พร้อม: '+esc(v.readiness.reason||'ยังไม่ได้ index')));",
+  "    var statusLine = indexing ? ('Indexing… '+v.index.current+'/'+v.index.total+' ('+pct+'%)') : (v.readiness.ready ? ('พร้อม · '+v.docs+' chunks') : ('ยังไม่พร้อม: '+esc(v.readiness.reason||'ยังไม่ได้ index')));",
   "    var idxBtn = indexing ? '<button class=\"so-btn\" data-so=\"stop\">Stop</button>' : '<button class=\"so-btn\" data-so=\"index\">Index now</button>';",
   "    var statusRow = '<div class=\"so-status\">'+esc(statusLine)+' '+idxBtn+'</div>';",
   "    var sub = '<div class=\"so-sub'+(v.hybridEnabled?'':' so-disabled')+'\">'",
-  "      + '<div class=\"so-row\"><div><div class=\"so-rl\">Mode</div><div class=\"so-rh\">Vector: FTS5 + LanceDB vector · Graph: coming soon (=FTS5)</div></div>'+seg+'</div>'",
   "      + '<div class=\"so-row\"><div><div class=\"so-rl\">Embedding model</div><div class=\"so-rh\">BGE-M3 = default</div>'+mLine+'</div>'+modelSel+'</div>'",
   "      + (v.modelPath?'<div class=\"so-rh\">model path: '+esc(v.modelPath)+'</div>':'')",
   "      + '</div>';",
   "    var note = v.envOverrideNote ? '<div class=\"so-note\">'+esc(v.envOverrideNote)+'</div>' : '';",
   "    el.innerHTML = '<h2>Search / Oracle</h2>'",
-  "      + '<div class=\"so-row\"><div><div class=\"so-rl\">Hybrid search</div><div class=\"so-rh\">ปิด = FTS5 อย่างเดียว · เปิด = ค้นแบบ hybrid</div></div>'+sw+'</div>'",
+  "      + '<div class=\"so-row\"><div><div class=\"so-rl\">Hybrid search</div><div class=\"so-rh\">ปิด = FTS5 อย่างเดียว · เปิด = FTS5 + LanceDB vector</div></div>'+sw+'</div>'",
   "      + sub + note + statusRow;",
   "  }",
   "  document.addEventListener('click', function(e){",
@@ -143,7 +133,6 @@ const _script = [
   "    var host = t.closest ? t.closest('[data-so]') : null; if(!host) return;",
   "    var act = host.getAttribute('data-so');",
   "    if(act==='hybrid') post('searchSet',{field:'hybrid',value:host.getAttribute('data-next')==='1'});",
-  "    else if(act==='mode') post('searchSet',{field:'mode',value:host.getAttribute('data-next')});",
   "    else if(act==='index') post('indexStart',{});",
   "    else if(act==='stop') post('indexStop',{});",
   "    else if(act==='install') post('installModel',{model:host.getAttribute('data-model')});",
