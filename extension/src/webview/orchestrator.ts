@@ -224,6 +224,11 @@ function isRunning(p: ResumableProject): boolean {
 function deleteProjectFlow(p: ResumableProject): { deleted: boolean; reason?: string } {
   // ยืนยัน + พิมพ์ชื่อ ทำใน webview modal แล้ว → host แค่ guard ซ้ำ (running + path) แล้วลบ.
   if (isRunning(p)) return { deleted: false, reason: `'${p.name}' กำลัง run อยู่ — กด stop ก่อนถึงจะลบได้` };
+  // นอกจาก headless run: interactive session ที่ขับโปรเจคนี้อยู่ (การ์ดเขียว) ก็ห้ามลบ —
+  // ลบโฟลเดอร์ทั้งที่ session ใช้อยู่ = พัง session นั้น. UI เทาปุ่มไว้แล้ว; นี่คือ guard ซ้ำ.
+  annotateLiveState([p]);
+  if (projectDrivenState(p).state !== "none")
+    return { deleted: false, reason: `'${p.name}' กำลังถูกขับโดย session อยู่ — ปิด session ก่อนถึงจะลบได้` };
   const r = removeProjectDir(p.path);
   if (r.deleted) vscode.window.showInformationMessage(`ลบ '${p.name}' แล้ว`);
   return r;
@@ -668,6 +673,10 @@ function renderShell(): string {
   .cont:hover { background: rgba(63,185,80,0.22); }
   .cont.spin, .cont.stale { border-color: #c47f1a; color: #e3a13a; background: rgba(196,127,26,0.14); }
   .cont.err { border-color: #f85149; color: #f85149; background: rgba(248,81,73,0.12); cursor: help; }
+  /* driven by a live INTERACTIVE session → spinning "กำลังทำ"; click OPENS that
+     session (no headless run to cancel), so green (not amber like .spin). */
+  .cont.busy { border-color: #2ea043; color: #56d364; background: rgba(63,185,80,0.14); cursor: pointer; }
+  .cont.busy:hover { background: rgba(63,185,80,0.24); }
   .cont.multi { border-color: #3f7bd0; color: #6ca6ff; background: rgba(63,123,208,0.12); }
   .cont.multi:hover { background: rgba(63,123,208,0.22); }
   .cont-rot { display: inline-block; animation: contspin 1.1s linear infinite; }
@@ -959,20 +968,29 @@ function renderShell(): string {
       // continue button: run 1 sprint headless with the last-used team (state
       // resolved host-side). spinning = คลิกเพื่อยกเลิก · stale = run หลุด, คลิกเริ่มใหม่.
       var run = it.run || { state: 'hidden' };
+      // "busy" = a session is driving this project right now (green card). The
+      // .orches-run.json marker only exists for THIS dashboard's own headless runs,
+      // so an INTERACTIVE orchestrator session (the ▶ เริ่มใหม่ / popup path) leaves
+      // run.state at 'idle' even while a build is live. Gate every start-action on
+      // !busy so a green card never shows ▶ ทำต่อ / ▶▶ ทำหลาย sprint / ลบ — it offers
+      // an attach affordance instead. (spinning = own headless run; keeps cancel.)
+      var busy = run.state === 'spinning' || !!it.driven;
       var contBtn =
         run.state === 'spinning' ? '<button class="cont spin" title="กำลังทำต่อ — คลิกเพื่อยกเลิก"><span class="cont-rot">⟳</span> กำลังทำ</button>' :
+        it.driven                ? '<button class="cont busy" title="กำลังทำอยู่ (มี session ขับโปรเจคนี้) — คลิกเพื่อเปิด/เข้า session"><span class="cont-rot">⟳</span> กำลังทำ</button>' :
         run.state === 'idle'     ? '<button class="cont" title="ทำต่อ 1 sprint ด้วยทีมล่าสุด (auto, background)">▶ ทำต่อ</button>' :
         run.state === 'stale'    ? '<button class="cont stale" title="run หลุด — คลิกเพื่อเริ่มใหม่">⚠ ทำต่อ</button>' :
         run.state === 'error'    ? '<button class="cont err" title="'+esc(run.errorMsg||'error')+'">⚠ error</button>' : '';
-      // "ทำหลาย sprint": only when idle AND ≥2 sprint left. Opens a "how many?"
-      // input box; host runs N sprints headless in ONE detached run (no attach,
-      // no checkpoint between them). Class 'cont' so the row-select guard skips it.
-      var multiBtn = (run.state === 'idle' && pending >= 2)
+      // "ทำหลาย sprint": only when NOT busy, idle, AND ≥2 sprint left. Opens a "how
+      // many?" input box; host runs N sprints headless in ONE detached run (no
+      // attach, no checkpoint). Class 'cont' so the row-select guard skips it.
+      var multiBtn = (!busy && run.state === 'idle' && pending >= 2)
         ? '<button class="cont multi" data-pending="'+pending+'" data-name="'+esc(it.name)+'" title="ทำหลาย sprint รวดเดียว (auto, background) — เลือกจำนวน">▶▶ ทำหลาย sprint</button>'
         : '';
-      // ปุ่มลบ (โผล่เฉพาะ edit mode ผ่าน CSS) · running = กากบาทแดง disabled กดไม่ได้
-      var delBtn = (run.state === 'spinning')
-        ? '<button class="del disabled" title="กำลัง run — กด stop ก่อนถึงจะลบได้">ลบ</button>'
+      // ปุ่มลบ (โผล่เฉพาะ edit mode ผ่าน CSS) · busy (running/ถูกขับ) = กากบาทเทา กดไม่ได้
+      // (กันลบโฟลเดอร์ที่ session กำลังใช้อยู่ — host ก็ guard ซ้ำอีกชั้น)
+      var delBtn = busy
+        ? '<button class="del disabled" title="กำลังทำอยู่ — กด stop / ปิด session ก่อนถึงจะลบได้">ลบ</button>'
         : '<button class="del" data-name="'+esc(it.name)+'" title="ลบโปรเจคออกจากเครื่อง">ลบ</button>';
       return '<div class="card'+(it.driven?' live':'')+'" data-path="'+esc(it.path)+'">'
         +'<span class="star'+(it.starred?' on':'')+'" role="button" title="ปักดาว / เอาดาวออก">'+(it.starred?'★':'☆')+'</span>'
