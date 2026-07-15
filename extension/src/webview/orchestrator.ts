@@ -19,7 +19,7 @@ import {
 } from "../commands/startOrchestrator";
 import { partitionStarred, sortResumable, toggleStar, type ResumableProject } from "../commands/orchestratorResume";
 import { removeProjectDir } from "../commands/deleteProject";
-import { listProjectDocs, resolveDocPath, renderMarkdown } from "../commands/projectDocs";
+import { listProjectTree, resolveProjectFile, renderMarkdown } from "../commands/projectDocs";
 import {
   isPreviewAvailable,
   isPreviewRunning,
@@ -305,9 +305,10 @@ async function pushTeamsScreen(panel: vscode.WebviewPanel) {
   });
 }
 
-/** Project Detail screen — the hub for one project: docs (wiki/plan/sprints) rendered
- *  inline + nav (back / close / localhost / ▶ ทำต่อ / GitHub). Reached by picking any
- *  project card; ▶ ทำต่อ carries the old attach-or-team-picker logic. */
+/** Project Detail screen — the hub for one project: a file-explorer of the project's
+ *  markdown (folders + .md only; click a folder to drill in, click a file to open it as
+ *  a full page over the explorer) + nav (back / close / localhost / ▶ ทำต่อ / GitHub).
+ *  Reached by picking any project card; ▶ ทำต่อ carries the attach-or-team-picker logic. */
 async function pushDetailScreen(panel: vscode.WebviewPanel) {
   const p = _st?.project;
   if (!p) return;
@@ -320,7 +321,7 @@ async function pushDetailScreen(panel: vscode.WebviewPanel) {
     path: p.path,
     githubUrl, // null → client hides the GitHub button
     preview: { available: isPreviewAvailable(p.path), running: isPreviewRunning(p.path) },
-    docs: listProjectDocs(p.path),
+    tree: listProjectTree(p.path),
   });
 }
 
@@ -474,11 +475,11 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         return;
       }
       case "open_doc": {
-        // Detail accordion expanded a doc → read + render markdown, send HTML back.
+        // Detail explorer opened a file → read + render markdown, send HTML back.
         const p = _st.project;
         const rel = typeof msg.rel === "string" ? msg.rel : "";
         if (!p || !rel) return;
-        const abs = resolveDocPath(p.path, rel); // guards against traversal outside docs/
+        const abs = resolveProjectFile(p.path, rel); // guards traversal + .md-only, project-rooted
         if (!abs) {
           panel.webview.postMessage({ type: "doc_html", rel, error: "ไม่พบไฟล์" });
           return;
@@ -707,7 +708,7 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
 }
 
 function titleFor(): string {
-  return "Orchestrator — Projects";
+  return "Projects";
 }
 function short(p: string): string {
   return p.split("/").pop() || p;
@@ -845,18 +846,19 @@ function renderShell(): string {
     border: 1px solid var(--vscode-panel-border); background: transparent; color: var(--vscode-foreground); }
   .modal-card .mbtn.primary { border-color: #3f7bd0; color: #fff; background: #1f6feb; }
   .modal-card .mbtn.primary:hover { background: #388bfd; }
-  /* ── Project Detail: doc accordion + rendered markdown ── */
-  .doc-group { margin-bottom: 18px; }
-  .doc-group-t { font-size: 12px; font-weight: 700; opacity: 0.7; margin: 4px 0 8px; }
-  .doc { border: 1px solid var(--vscode-panel-border); border-radius: 6px; margin-bottom: 6px; overflow: hidden; }
-  .doc-head { width: 100%; text-align: left; background: var(--vscode-editor-inactiveSelectionBackground);
-    border: none; color: inherit; padding: 8px 12px; font-size: 12px; cursor: pointer;
-    display: flex; gap: 6px; align-items: center; }
-  .doc-head:hover { background: var(--vscode-list-hoverBackground); }
-  .doc-caret { width: 1ch; display: inline-block; opacity: 0.7; }
-  .doc-body { padding: 6px 16px 12px; font-size: 13px; line-height: 1.55;
-    border-top: 1px solid var(--vscode-panel-border); }
-  .doc-empty { opacity: 0.55; font-size: 12px; padding: 8px 12px; }
+  /* ── Project Detail: markdown file-explorer ── */
+  .fx { display: flex; flex-direction: column; gap: 2px; }
+  .fx-row { display: flex; align-items: center; gap: 9px; padding: 8px 12px; border-radius: 6px;
+    cursor: pointer; user-select: none; }
+  .fx-row:hover { background: var(--vscode-list-hoverBackground); }
+  .fx-ic { flex: 0 0 auto; font-size: 14px; line-height: 1; width: 1.3em; text-align: center; }
+  .fx-name { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fx-dir .fx-name { font-weight: 600; }
+  .fx-arrow { flex: 0 0 auto; opacity: 0.5; font-size: 15px; }
+  /* ── Project Detail: a single doc opened as a full page ── */
+  .doc-page { padding: 4px 2px 24px; }
+  .doc-body { font-size: 13px; line-height: 1.55; }
+  .doc-empty { opacity: 0.55; font-size: 12px; padding: 8px 2px; }
   .doc-body h1, .doc-body h2, .doc-body h3 { margin: 12px 0 6px; line-height: 1.3; }
   .doc-body h1 { font-size: 18px; } .doc-body h2 { font-size: 16px; } .doc-body h3 { font-size: 14px; }
   .doc-body p { margin: 6px 0; }
@@ -1090,9 +1092,13 @@ function renderShell(): string {
     return '';
   }
 
-  // ── Project Detail screen ────────────────────────────────────────────────
+  // ── Project Detail screen (markdown file-explorer) ───────────────────────
   var _docCache = {};        // rel → rendered HTML (or error markup), cached per open
   var _previewRunning = false, _previewAvail = false;
+  var _detail = {};          // {title, subtitle, githubUrl} — kept so we can re-render the explorer header
+  var _tree = [];            // root TreeNode[] for this project (folders + .md only)
+  var _navStack = [];        // folder names from root → current folder ([] = root)
+  var _viewingDoc = null;    // rel of the .md open as a full page, or null while in the explorer
 
   function detailActionsHtml(githubUrl){
     var lh = _previewAvail
@@ -1106,60 +1112,87 @@ function renderShell(): string {
       + (githubUrl ? '<button id="ghBtn" title="เปิด repo นี้ใน GitHub (browser)">🔗 GitHub</button>' : '');
   }
   function wireDetailActions(){
-    var b=el("backBtn"); if(b) b.addEventListener('click',function(){post('to_projects');});
+    // Explorer back: inside a subfolder → up one level; at the root → out to Projects.
+    var b=el("backBtn"); if(b) b.addEventListener('click',function(){
+      if(_navStack.length){ _navStack.pop(); renderExplorer(); } else { post('to_projects'); } });
     var c=el("closeBtn"); if(c) c.addEventListener('click',function(){post('close');});
     var lh=el("lhBtn"); if(lh && _previewAvail) lh.addEventListener('click',function(){
       lh.disabled=true; lh.textContent='⏳ …'; post('run_localhost'); });
     var ct=el("contBtn"); if(ct) ct.addEventListener('click',function(){post('continue_to_team');});
     var gh=el("ghBtn"); if(gh) gh.addEventListener('click',function(){post('open_github');});
   }
-  function docRow(d){
-    return '<div class="doc" data-rel="'+esc(d.rel)+'">'
-      +'<button class="doc-head"><span class="doc-caret">▸</span> '+esc(d.label)+'</button>'
-      +'<div class="doc-body" style="display:none"></div></div>';
-  }
-  function docGroup(title, rowsHtml){
-    return '<div class="doc-group"><div class="doc-group-t">'+title+'</div>'
-      +(rowsHtml || '<div class="doc-empty">ยังไม่มี</div>')+'</div>';
-  }
   function renderDetail(m){
     disarmAll();                       // leaving the projects screen → drop any armed git action
     _lastProjKey = null;               // invalidate skip-guard → a return to projects re-renders
-    el("title").textContent=m.title; el("subtitle").textContent=m.subtitle;
+    _detail = { title:m.title, subtitle:m.subtitle, githubUrl:m.githubUrl };
     _previewRunning = !!(m.preview && m.preview.running);
     _previewAvail   = !!(m.preview && m.preview.available);
     _docCache = {};                    // fresh project → fresh cache
-    el("actions").innerHTML = detailActionsHtml(m.githubUrl); wireDetailActions();
-    var d = m.docs || {wiki:[], plan:null, sprints:[]};
-    var wiki = (d.wiki||[]).map(docRow).join('');
-    var plan = d.plan ? docRow(d.plan) : '';
-    var sprints = (d.sprints||[]).map(docRow).join('');
-    el("content").innerHTML =
-      docGroup('📖 Wiki', wiki)
-      + docGroup('📋 แผน (plan.md)', plan)
-      + docGroup('🏃 Sprint docs', sprints);
-    el("content").querySelectorAll('.doc').forEach(function(row){
-      var rel=row.dataset.rel;
-      row.querySelector('.doc-head').addEventListener('click',function(){ toggleDoc(row, rel); });
+    _tree = m.tree || [];
+    _navStack = [];                    // always start at the project root
+    _viewingDoc = null;
+    renderExplorer();
+  }
+  // Walk _navStack into _tree → the child list of the folder we're currently in.
+  // A stale path (folder vanished between renders) clamps back to where it still resolves.
+  function currentFolder(){
+    var nodes = _tree;
+    for (var i=0;i<_navStack.length;i++){
+      var found=null;
+      for (var j=0;j<nodes.length;j++){ if(nodes[j].kind==='dir' && nodes[j].name===_navStack[i]){ found=nodes[j]; break; } }
+      if(!found){ _navStack = _navStack.slice(0,i); break; }
+      nodes = found.children||[];
+    }
+    return nodes;
+  }
+  function explorerRow(n){
+    // Folder: 📁 + trailing "/" + chevron. File: 📄 + name. Name/"/" carry the
+    // dir-vs-file distinction on their own so it survives terminals that drop emoji.
+    var isDir = n.kind==='dir';
+    return '<div class="fx-row'+(isDir?' fx-dir':'')+'" data-kind="'+n.kind+'"'
+      +' data-name="'+esc(n.name)+'" data-rel="'+esc(n.rel)+'">'
+      +'<span class="fx-ic">'+(isDir?'📁':'📄')+'</span>'
+      +'<span class="fx-name">'+esc(n.name)+(isDir?'/':'')+'</span>'
+      +(isDir?'<span class="fx-arrow">›</span>':'')+'</div>';
+  }
+  function renderExplorer(){
+    _viewingDoc = null;
+    el("title").textContent = _detail.title;
+    el("subtitle").textContent = _navStack.length ? ('/' + _navStack.join('/')) : _detail.subtitle;
+    el("actions").innerHTML = detailActionsHtml(_detail.githubUrl); wireDetailActions();
+    var nodes = currentFolder();
+    var rows = nodes.map(explorerRow).join('');
+    var emptyMsg = _navStack.length ? 'โฟลเดอร์นี้ไม่มีไฟล์ .md' : 'โปรเจคนี้ไม่มีไฟล์ .md';
+    el("content").innerHTML = '<div class="fx">'
+      + (rows || '<div class="empty">'+emptyMsg+'</div>') + '</div>';
+    el("content").querySelectorAll('.fx-row').forEach(function(row){
+      row.addEventListener('click',function(){
+        if(row.dataset.kind==='dir'){ _navStack.push(row.dataset.name); renderExplorer(); }
+        else { openDocView(row.dataset.rel, row.dataset.name); }
+      });
     });
   }
-  function toggleDoc(row, rel){
-    var body=row.querySelector('.doc-body'), caret=row.querySelector('.doc-caret');
-    if(body.style.display!=='none'){ body.style.display='none'; caret.textContent='▸'; return; }
-    body.style.display='block'; caret.textContent='▾';
-    if(_docCache[rel]!==undefined){ body.innerHTML=_docCache[rel]; return; }
-    body.innerHTML='<div class="doc-empty">กำลังโหลด…</div>';
-    post('open_doc',{rel:rel});
-  }
-  function detailRow(rel){
-    return el("content").querySelector('.doc[data-rel="'+(window.CSS&&CSS.escape?CSS.escape(rel):rel)+'"]');
+  // Open one .md as a full page over the explorer: its own header + back button.
+  // Back returns to the explorer at the same folder (renderExplorer, wired here).
+  function openDocView(rel, name){
+    _viewingDoc = rel;
+    el("title").textContent = '📄 ' + name;
+    el("subtitle").textContent = rel;
+    el("actions").innerHTML = '<button id="backBtn">← กลับ</button><button id="closeBtn">✕ ปิด</button>';
+    el("backBtn").addEventListener('click',function(){ renderExplorer(); });
+    el("closeBtn").addEventListener('click',function(){ post('close'); });
+    var cached = _docCache[rel];
+    el("content").innerHTML = '<div class="doc-page doc-body">'
+      + (cached!==undefined ? cached : '<div class="doc-empty">กำลังโหลด…</div>') + '</div>';
+    if(cached===undefined) post('open_doc',{rel:rel});
   }
   function handleDocHtml(rel, html, error){
     var out = error ? '<div class="doc-empty">'+esc(error)+'</div>' : (html||'');
     _docCache[rel]=out;
-    var row=detailRow(rel); if(!row) return;
-    var body=row.querySelector('.doc-body');
-    if(body && body.style.display!=='none') body.innerHTML=out;
+    if(_viewingDoc===rel){                 // still on this doc's page → paint it
+      var page=el("content").querySelector('.doc-page');
+      if(page) page.innerHTML=out;
+    }
   }
   function handlePreviewState(running){
     _previewRunning=!!running;
