@@ -24,6 +24,7 @@ import {
   decideContinueAction,
   readRunMarker,
   resolveContinueTarget,
+  runSessionLiveForProject,
   writeRunMarker,
 } from "./continueRun";
 import {
@@ -393,7 +394,10 @@ export function projectDrivenState(
   let runAlive = ctx?.runAlive;
   if (runAlive === undefined) {
     runAlive = false;
-    if (marker?.status === "running" && marker.session && tmuxHasSession(marker.session)) {
+    // liveness scoped to THIS project by @orches_label (not bare session-name): a
+    // cold-launch base-name collision must NOT let project B's live session light A.
+    const sess = ctx?.sessions ?? listTmuxSessionsSafe();
+    if (marker?.session && runSessionLiveForProject(marker, sess, project.name)) {
       const created = sessionCreatedAt(marker.session);
       const zombie =
         marker.sessionCreatedAt !== undefined && created !== undefined && created !== marker.sessionCreatedAt;
@@ -462,6 +466,7 @@ export function sessionCreatedAt(session: string): number | undefined {
         encoding: "utf8",
       })
       .trim();
+    if (!out) return undefined; // empty output → undefined, NOT Number("")===0 (a bogus 0 poisons the zombie-guard: 0===0 makes stale runs read as live)
     const n = Number(out);
     return Number.isFinite(n) ? n : undefined;
   } catch {

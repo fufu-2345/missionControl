@@ -104,12 +104,14 @@
     "watch": "tsc -watch -p ./"
   },
   "devDependencies": {
+    "@types/marked": "^4.3.2",
     "@types/node": "^20",
     "@types/vscode": "^1.85.0",
     "@types/ws": "^8.18.1",
     "typescript": "^5.4.0"
   },
   "dependencies": {
+    "marked": "^4.3.0",
     "ws": "^8.21.0"
   }
 }

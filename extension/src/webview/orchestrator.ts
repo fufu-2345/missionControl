@@ -19,12 +19,20 @@ import {
 } from "../commands/startOrchestrator";
 import { partitionStarred, sortResumable, toggleStar, type ResumableProject } from "../commands/orchestratorResume";
 import { removeProjectDir } from "../commands/deleteProject";
+import { listProjectDocs, resolveDocPath, renderMarkdown } from "../commands/projectDocs";
+import {
+  isPreviewAvailable,
+  isPreviewRunning,
+  togglePreview,
+  waitForPreviewUrl,
+} from "../commands/previewOps";
 import {
   clampSprintCount,
   finishedSessions,
   pendingSprints,
   readRunMarker,
   resolveButtonState,
+  runSessionLiveForProject,
 } from "../commands/continueRun";
 import type { OracleTeam } from "../commands/teams";
 import { ORG, checkProjectName, suggestDefaultName, sanitizeName, type NameCheck } from "../commands/projectName";
@@ -48,6 +56,10 @@ interface WizState {
   newName?: string; // ชื่อ project ที่ user ตั้งใน name-popup (mode "new") → ส่งเข้า kickoff
 }
 let _st: WizState | undefined;
+// Which screen is currently showing. The spin-poll only re-renders the projects list
+// when it is the visible screen — otherwise a running project's 2.5s tick would clobber
+// the Detail / teams / orch screen the user navigated to.
+let _screen: "projects" | "detail" | "teams" | "orch" = "projects";
 
 const STARRED_KEY = "missioncontrol.starredProjects";
 let _ctx: vscode.ExtensionContext | undefined;
@@ -115,6 +127,7 @@ function ghView(name: string): boolean | null {
 }
 
 async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch: boolean | "spin" = false) {
+  _screen = "projects";
   const projects = _st?.projects ?? [];
   annotateLiveState(projects); // refresh the live "doing" flag each render (cheap: one tmux call)
   const starred = new Set(starredList());
@@ -134,16 +147,19 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch: boolean | "
       // continue-button state derived purely (marker + tmux liveness) — the
       // zombie guard compares the live session's creation time to the recorded one.
       const marker = readRunMarker(p.path);
+      // liveness scoped to THIS project by @orches_label (not bare session-name):
+      // a cold-launch records the base pin as the session, so two projects can
+      // share a session name — name-only match cross-lights both cards green.
+      const aliveForThis = runSessionLiveForProject(marker, sessions, p.name);
       const live = marker?.session
-        ? { alive: tmuxHasSession(marker.session), createdAt: sessionCreatedAt(marker.session) }
+        ? { alive: aliveForThis, createdAt: sessionCreatedAt(marker.session) }
         : { alive: false };
       const btn = resolveButtonState(pendingSprints(p), marker, live);
-      // reuse the liveness just probed (no second has-session/created call): a run
-      // is live iff its session is up and not a zombie (reused name, created ≠ recorded).
+      // a run is live iff its session is up, labeled for this project, and not a
+      // zombie (reused name, created ≠ recorded).
       const runAlive =
-        marker?.status === "running" &&
-        live.alive &&
-        !(marker.sessionCreatedAt !== undefined && live.createdAt !== undefined && live.createdAt !== marker.sessionCreatedAt);
+        aliveForThis &&
+        !(marker?.sessionCreatedAt !== undefined && live.createdAt !== undefined && live.createdAt !== marker.sessionCreatedAt);
       return {
         path: p.path,
         name: p.name,
@@ -197,7 +213,10 @@ function startSpinPoll(panel: vscode.WebviewPanel) {
     _runningRuns = nowRunning;
     // finished → full render (fresh scan + git fetch + green re-probe); otherwise a
     // cheap spin tick (spinner only, skip the owner/label probe).
-    if (_panel) await pushProjectsScreen(_panel, someFinished ? true : "spin");
+    // Only re-render when the projects list is the visible screen — otherwise the tick
+    // would clobber the Detail / teams / orch screen the user navigated to. Reaping +
+    // rescan above still run; the render resumes when they return to the list.
+    if (_panel && _screen === "projects") await pushProjectsScreen(_panel, someFinished ? true : "spin");
     if (nowRunning.size === 0) stopSpinPoll();
   }, 2500);
 }
@@ -213,10 +232,22 @@ function stopSpinPoll() {
  *  reuse resolveButtonState ให้ตรงกับปุ่ม ▶ ทำต่อ ที่ user เห็น (delete guard ชั้น extension). */
 function isRunning(p: ResumableProject): boolean {
   const marker = readRunMarker(p.path);
+  // label-gated liveness (see render): a base-name session-collision must not make
+  // this project read as running off another project's live session.
+  const aliveForThis = runSessionLiveForProject(marker, listTmuxSessionsSafe(), p.name);
   const live = marker?.session
-    ? { alive: tmuxHasSession(marker.session), createdAt: sessionCreatedAt(marker.session) }
+    ? { alive: aliveForThis, createdAt: sessionCreatedAt(marker.session) }
     : { alive: false };
   return resolveButtonState(pendingSprints(p), marker, live).state === "spinning";
+}
+
+/** โปรเจคนี้ busy ไหม (headless run กำลัง spin หรือ session ไหนก็ตามขับอยู่) — ตรงกับ
+ *  `busy` ฝั่ง webview (run.state==='spinning' || it.driven). ใช้ guard ปุ่ม git
+ *  (commit/push/pull/create&push) เหมือนที่ deleteProjectFlow guard ปุ่มลบ. */
+function isProjectBusy(p: ResumableProject): boolean {
+  if (isRunning(p)) return true;
+  annotateLiveState([p]);
+  return projectDrivenState(p).state !== "none";
 }
 
 /** ลบโปรเจค: กัน running → confirm modal → พิมพ์ชื่อยืนยัน → ลบโฟลเดอร์ local.
@@ -234,7 +265,20 @@ function deleteProjectFlow(p: ResumableProject): { deleted: boolean; reason?: st
   return r;
 }
 
+/** guard ปุ่ม git ฝั่ง host: หา project จาก path แล้วเช็ค busy ซ้ำ (UI ซ่อนปุ่มไปแล้ว
+ *  แต่ webview state อาจ stale) — คืน project ถ้าทำต่อได้, null ถ้าต้อง bail (แจ้ง warning แล้ว). */
+function requireIdleProject(path: string): ResumableProject | null {
+  const p = _st?.projects.find((x) => x.path === path);
+  if (!p) return null;
+  if (isProjectBusy(p)) {
+    vscode.window.showWarningMessage(`'${p.name}' กำลังทำอยู่ — รอให้เสร็จก่อนถึงจะ commit/push/pull ได้`);
+    return null;
+  }
+  return p;
+}
+
 async function pushTeamsScreen(panel: vscode.WebviewPanel) {
+  _screen = "teams";
   const teams = listOrchestratorTeams();
   const def = _st?.project ? defaultTeamFor(_st.project, teams) : null;
   // Last-used team floats to the top; the rest keep their existing order.
@@ -261,7 +305,27 @@ async function pushTeamsScreen(panel: vscode.WebviewPanel) {
   });
 }
 
+/** Project Detail screen — the hub for one project: docs (wiki/plan/sprints) rendered
+ *  inline + nav (back / close / localhost / ▶ ทำต่อ / GitHub). Reached by picking any
+ *  project card; ▶ ทำต่อ carries the old attach-or-team-picker logic. */
+async function pushDetailScreen(panel: vscode.WebviewPanel) {
+  const p = _st?.project;
+  if (!p) return;
+  _screen = "detail";
+  const githubUrl = await gitOps.getGithubWebUrl(p.path);
+  panel.webview.postMessage({
+    type: "screen_detail",
+    title: `📁 ${p.name}`,
+    subtitle: `project: ${p.name}`,
+    path: p.path,
+    githubUrl, // null → client hides the GitHub button
+    preview: { available: isPreviewAvailable(p.path), running: isPreviewRunning(p.path) },
+    docs: listProjectDocs(p.path),
+  });
+}
+
 function pushOrchScreen(panel: vscode.WebviewPanel, team: OracleTeam) {
+  _screen = "orch";
   panel.webview.postMessage({
     type: "screen_orch",
     title: `${team.name} — เลือก orchestrator`,
@@ -380,9 +444,17 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         const p = _st.projects.find((x) => x.path === msg.path);
         if (!p) return;
         _st.project = p;
-        // 1 project = 1 session: already being driven (worker / run / owner at a
-        // checkpoint / labeled) → ATTACH to THAT session, never spawn on top.
-        // Falls through to the team picker only when nothing live is found.
+        // New: every card (incl. green/live) opens the Detail page first. The old
+        // attach-or-team logic now lives behind the ▶ ทำต่อ button (continue_to_team).
+        await pushDetailScreen(panel);
+        return;
+      }
+      case "continue_to_team": {
+        // The OLD pick_project behavior: 1 project = 1 session. Already being driven
+        // (worker / run / owner at a checkpoint / labeled) → ATTACH to THAT session,
+        // never spawn on top. Falls through to the team picker only when nothing live.
+        const p = _st.project;
+        if (!p) return;
         annotateLiveState([p]);
         const driven = projectDrivenState(p);
         if (driven.state !== "none") {
@@ -401,6 +473,57 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         await pushTeamsScreen(panel);
         return;
       }
+      case "open_doc": {
+        // Detail accordion expanded a doc → read + render markdown, send HTML back.
+        const p = _st.project;
+        const rel = typeof msg.rel === "string" ? msg.rel : "";
+        if (!p || !rel) return;
+        const abs = resolveDocPath(p.path, rel); // guards against traversal outside docs/
+        if (!abs) {
+          panel.webview.postMessage({ type: "doc_html", rel, error: "ไม่พบไฟล์" });
+          return;
+        }
+        try {
+          const html = renderMarkdown(fs.readFileSync(abs, "utf8"));
+          panel.webview.postMessage({ type: "doc_html", rel, html });
+        } catch {
+          panel.webview.postMessage({ type: "doc_html", rel, error: "อ่านไฟล์ไม่ได้" });
+        }
+        return;
+      }
+      case "run_localhost": {
+        // Toggle the project's dev server (background) + open the browser when it starts.
+        const p = _st.project;
+        if (!p) return;
+        if (!isPreviewAvailable(p.path)) {
+          vscode.window.showWarningMessage(
+            `'${p.name}' ไม่มี .orches-preview.sh — เปิด localhost ไม่ได้`,
+          );
+          panel.webview.postMessage({ type: "preview_state", running: false });
+          return;
+        }
+        const { started } = togglePreview(p.path);
+        if (started) {
+          const url = await waitForPreviewUrl(p.path);
+          void vscode.env.openExternal(vscode.Uri.parse(url));
+          panel.webview.postMessage({ type: "preview_state", running: true, url });
+          vscode.window.setStatusBarMessage(`Orchestrator: localhost '${p.name}' → ${url}`, 5000);
+        } else {
+          panel.webview.postMessage({ type: "preview_state", running: false });
+          vscode.window.setStatusBarMessage(`Orchestrator: หยุด localhost '${p.name}'`, 5000);
+        }
+        return;
+      }
+      case "to_projects": {
+        // Detail → back to the Projects list.
+        _st.project = undefined;
+        _st.team = undefined;
+        await pushProjectsScreen(panel);
+        return;
+      }
+      case "close":
+        panel.dispose();
+        return;
       case "open_github": {
         // เปิด repo ของ project นี้ใน browser จริง. Re-resolve host-side (don't trust
         // the client URL) so we only ever open this project's github origin.
@@ -433,10 +556,11 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
           );
         return;
       case "back":
-        // teams → back to the Projects list (single entry point → always available)
-        _st.project = undefined;
+        // From the team picker: back to Detail when resuming a project (project set),
+        // else back to the Projects list (a fresh build has no Detail page).
         _st.team = undefined;
-        await pushProjectsScreen(panel);
+        if (_st.project) await pushDetailScreen(panel);
+        else await pushProjectsScreen(panel);
         return;
       case "git_refresh":
         // Full manual refresh: re-scan sprint state too (so "ค้าง N sprint"
@@ -519,7 +643,7 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
       case "git_commit": {
         const p = typeof msg.path === "string" ? msg.path : "";
         const message = typeof msg.message === "string" ? msg.message.trim() : "";
-        if (!p || !message) return;
+        if (!p || !message || !requireIdleProject(p)) return;
         const r = await gitOps.commitAll(p, message);
         notify(r.ok, `commit ${short(p)}`, r);
         await pushProjectsScreen(panel);
@@ -527,7 +651,7 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
       }
       case "git_push": {
         const p = typeof msg.path === "string" ? msg.path : "";
-        if (!p) return;
+        if (!p || !requireIdleProject(p)) return;
         const st = await gitOps.readGitStatus(p);
         const r = await gitOps.pushRepo(p, st.hasUpstream);
         notify(r.ok, `push ${short(p)}`, r);
@@ -540,7 +664,7 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         // messages would race (both handlers start independently).
         const p = typeof msg.path === "string" ? msg.path : "";
         const message = typeof msg.message === "string" ? msg.message.trim() : "";
-        if (!p || !message) return;
+        if (!p || !message || !requireIdleProject(p)) return;
         const c = await gitOps.commitAll(p, message);
         notify(c.ok, `commit ${short(p)}`, c);
         if (c.ok) {
@@ -553,7 +677,7 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
       }
       case "git_pull": {
         const p = typeof msg.path === "string" ? msg.path : "";
-        if (!p) return;
+        if (!p || !requireIdleProject(p)) return;
         const r = await gitOps.pullRepo(p);
         notify(r.ok, `pull ${short(p)}`, r);
         await pushProjectsScreen(panel);
@@ -563,7 +687,7 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         const p = typeof msg.path === "string" ? msg.path : "";
         const repoName = typeof msg.repoName === "string" ? msg.repoName.trim() : "";
         const isPrivate = msg.isPrivate !== false;
-        if (!p || !repoName) return;
+        if (!p || !repoName || !requireIdleProject(p)) return;
         const pick = await vscode.window.showWarningMessage(
           `สร้าง GitHub repo ${isPrivate ? "(private)" : "(public)"} '${repoName}' จาก ${short(
             p,
@@ -721,6 +845,34 @@ function renderShell(): string {
     border: 1px solid var(--vscode-panel-border); background: transparent; color: var(--vscode-foreground); }
   .modal-card .mbtn.primary { border-color: #3f7bd0; color: #fff; background: #1f6feb; }
   .modal-card .mbtn.primary:hover { background: #388bfd; }
+  /* ── Project Detail: doc accordion + rendered markdown ── */
+  .doc-group { margin-bottom: 18px; }
+  .doc-group-t { font-size: 12px; font-weight: 700; opacity: 0.7; margin: 4px 0 8px; }
+  .doc { border: 1px solid var(--vscode-panel-border); border-radius: 6px; margin-bottom: 6px; overflow: hidden; }
+  .doc-head { width: 100%; text-align: left; background: var(--vscode-editor-inactiveSelectionBackground);
+    border: none; color: inherit; padding: 8px 12px; font-size: 12px; cursor: pointer;
+    display: flex; gap: 6px; align-items: center; }
+  .doc-head:hover { background: var(--vscode-list-hoverBackground); }
+  .doc-caret { width: 1ch; display: inline-block; opacity: 0.7; }
+  .doc-body { padding: 6px 16px 12px; font-size: 13px; line-height: 1.55;
+    border-top: 1px solid var(--vscode-panel-border); }
+  .doc-empty { opacity: 0.55; font-size: 12px; padding: 8px 12px; }
+  .doc-body h1, .doc-body h2, .doc-body h3 { margin: 12px 0 6px; line-height: 1.3; }
+  .doc-body h1 { font-size: 18px; } .doc-body h2 { font-size: 16px; } .doc-body h3 { font-size: 14px; }
+  .doc-body p { margin: 6px 0; }
+  .doc-body ul, .doc-body ol { margin: 6px 0; padding-left: 22px; }
+  .doc-body code { background: var(--vscode-textCodeBlock-background, rgba(127,127,127,0.15));
+    padding: 1px 5px; border-radius: 4px; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
+  .doc-body pre { background: var(--vscode-textCodeBlock-background, rgba(127,127,127,0.12));
+    padding: 10px 12px; border-radius: 6px; overflow-x: auto; }
+  .doc-body pre code { background: none; padding: 0; }
+  .doc-body blockquote { margin: 6px 0; padding: 2px 12px; border-left: 3px solid var(--vscode-panel-border); opacity: 0.85; }
+  .doc-body table { border-collapse: collapse; margin: 8px 0; font-size: 12px; }
+  .doc-body th, .doc-body td { border: 1px solid var(--vscode-panel-border); padding: 4px 8px; }
+  .doc-body a { color: var(--vscode-textLink-foreground); }
+  .doc-body hr { border: none; border-top: 1px solid var(--vscode-panel-border); margin: 12px 0; }
+  button.disabled, button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.disabled:hover, button:disabled:hover { background: transparent; }
 </style></head>
 <body>
   <div class="topbar">
@@ -938,7 +1090,96 @@ function renderShell(): string {
     return '';
   }
 
+  // ── Project Detail screen ────────────────────────────────────────────────
+  var _docCache = {};        // rel → rendered HTML (or error markup), cached per open
+  var _previewRunning = false, _previewAvail = false;
+
+  function detailActionsHtml(githubUrl){
+    var lh = _previewAvail
+      ? '<button id="lhBtn" title="รัน dev server แล้วเปิด browser (กดซ้ำ = หยุด)">'
+          + (_previewRunning ? '⏹ หยุด' : '🌐 localhost') + '</button>'
+      : '<button id="lhBtn" class="disabled" disabled title="โปรเจคนี้ไม่มี .orches-preview.sh — เปิด localhost ไม่ได้">🌐 localhost</button>';
+    return '<button id="backBtn">← กลับ</button>'
+      + '<button id="closeBtn">✕ ปิด</button>'
+      + lh
+      + '<button id="contBtn" title="ไปเลือกทีม / เข้า session ที่ทำอยู่" style="border-color:#2ea043;color:#3fb950;">▶ ทำต่อ</button>'
+      + (githubUrl ? '<button id="ghBtn" title="เปิด repo นี้ใน GitHub (browser)">🔗 GitHub</button>' : '');
+  }
+  function wireDetailActions(){
+    var b=el("backBtn"); if(b) b.addEventListener('click',function(){post('to_projects');});
+    var c=el("closeBtn"); if(c) c.addEventListener('click',function(){post('close');});
+    var lh=el("lhBtn"); if(lh && _previewAvail) lh.addEventListener('click',function(){
+      lh.disabled=true; lh.textContent='⏳ …'; post('run_localhost'); });
+    var ct=el("contBtn"); if(ct) ct.addEventListener('click',function(){post('continue_to_team');});
+    var gh=el("ghBtn"); if(gh) gh.addEventListener('click',function(){post('open_github');});
+  }
+  function docRow(d){
+    return '<div class="doc" data-rel="'+esc(d.rel)+'">'
+      +'<button class="doc-head"><span class="doc-caret">▸</span> '+esc(d.label)+'</button>'
+      +'<div class="doc-body" style="display:none"></div></div>';
+  }
+  function docGroup(title, rowsHtml){
+    return '<div class="doc-group"><div class="doc-group-t">'+title+'</div>'
+      +(rowsHtml || '<div class="doc-empty">ยังไม่มี</div>')+'</div>';
+  }
+  function renderDetail(m){
+    disarmAll();                       // leaving the projects screen → drop any armed git action
+    _lastProjKey = null;               // invalidate skip-guard → a return to projects re-renders
+    el("title").textContent=m.title; el("subtitle").textContent=m.subtitle;
+    _previewRunning = !!(m.preview && m.preview.running);
+    _previewAvail   = !!(m.preview && m.preview.available);
+    _docCache = {};                    // fresh project → fresh cache
+    el("actions").innerHTML = detailActionsHtml(m.githubUrl); wireDetailActions();
+    var d = m.docs || {wiki:[], plan:null, sprints:[]};
+    var wiki = (d.wiki||[]).map(docRow).join('');
+    var plan = d.plan ? docRow(d.plan) : '';
+    var sprints = (d.sprints||[]).map(docRow).join('');
+    el("content").innerHTML =
+      docGroup('📖 Wiki', wiki)
+      + docGroup('📋 แผน (plan.md)', plan)
+      + docGroup('🏃 Sprint docs', sprints);
+    el("content").querySelectorAll('.doc').forEach(function(row){
+      var rel=row.dataset.rel;
+      row.querySelector('.doc-head').addEventListener('click',function(){ toggleDoc(row, rel); });
+    });
+  }
+  function toggleDoc(row, rel){
+    var body=row.querySelector('.doc-body'), caret=row.querySelector('.doc-caret');
+    if(body.style.display!=='none'){ body.style.display='none'; caret.textContent='▸'; return; }
+    body.style.display='block'; caret.textContent='▾';
+    if(_docCache[rel]!==undefined){ body.innerHTML=_docCache[rel]; return; }
+    body.innerHTML='<div class="doc-empty">กำลังโหลด…</div>';
+    post('open_doc',{rel:rel});
+  }
+  function detailRow(rel){
+    return el("content").querySelector('.doc[data-rel="'+(window.CSS&&CSS.escape?CSS.escape(rel):rel)+'"]');
+  }
+  function handleDocHtml(rel, html, error){
+    var out = error ? '<div class="doc-empty">'+esc(error)+'</div>' : (html||'');
+    _docCache[rel]=out;
+    var row=detailRow(rel); if(!row) return;
+    var body=row.querySelector('.doc-body');
+    if(body && body.style.display!=='none') body.innerHTML=out;
+  }
+  function handlePreviewState(running){
+    _previewRunning=!!running;
+    var lh=el("lhBtn"); if(lh){ lh.disabled=false; lh.textContent=_previewRunning?'⏹ หยุด':'🌐 localhost'; }
+  }
+
+  // Skip-guard for no-op re-renders. The spin poll (startSpinPoll, host side) resends
+  // the ENTIRE card list every ~2.5s while a run is live; renderProjects rebuilds
+  // content.innerHTML wholesale, which tears down + recreates the animated spinner
+  // nodes (.cont-rot CSS rotation + .spin glyph) so their animation restarts from 0 →
+  // the ⟳ "กำลังทำ" visibly หยุดหมุน/กระตุก every tick. When the payload is byte-identical
+  // (the common case: a stable running sprint) there is nothing to redraw, so skip the
+  // rebuild and let the spinner run continuously. A real change (git state, sprint done,
+  // worker start/stop) differs and falls through to a normal render. Reset to null when
+  // leaving the projects screen (renderDetail/Teams/Orch) so returning always re-renders.
+  var _lastProjKey = null;
   function renderProjects(m){
+    var _key = JSON.stringify([m.title, m.subtitle, m.items]);
+    if (_lastProjKey !== null && _key === _lastProjKey) return;
+    _lastProjKey = _key;
     el("title").textContent = m.title; el("subtitle").textContent = m.subtitle;
     askMode=false; // Projects list เอง ไม่มีโหมดถาม (ยกไปหน้าเลือกทีมตอนเริ่มใหม่)
     el("actions").innerHTML = actionsHtml(false, true, false, true, true); wireActions(false);
@@ -975,6 +1216,9 @@ function renderShell(): string {
       // !busy so a green card never shows ▶ ทำต่อ / ▶▶ ทำหลาย sprint / ลบ — it offers
       // an attach affordance instead. (spinning = own headless run; keeps cancel.)
       var busy = run.state === 'spinning' || !!it.driven;
+      // การ์ดสีเขียว (มี session ขับอยู่/headless run) → สถานะคือ "กำลังทำ"
+      // ไม่ใช่ "พร้อมเริ่ม" หรือ "ทำไปแล้ว X sprint" (ซึ่งสื่อว่ายังไม่ได้ทำ/หยุดแล้ว)
+      if (busy) sub = 'กำลังทำ';
       var contBtn =
         run.state === 'spinning' ? '<button class="cont spin" title="กำลังทำต่อ — คลิกเพื่อยกเลิก"><span class="cont-rot">⟳</span> กำลังทำ</button>' :
         it.driven                ? '<button class="cont busy" title="กำลังทำอยู่ (มี session ขับโปรเจคนี้) — คลิกเพื่อเปิด/เข้า session"><span class="cont-rot">⟳</span> กำลังทำ</button>' :
@@ -992,12 +1236,15 @@ function renderShell(): string {
       var delBtn = busy
         ? '<button class="del disabled" title="กำลังทำอยู่ — กด stop / ปิด session ก่อนถึงจะลบได้">ลบ</button>'
         : '<button class="del" data-name="'+esc(it.name)+'" title="ลบโปรเจคออกจากเครื่อง">ลบ</button>';
+      // busy = session กำลังขับโปรเจคนี้อยู่ → ซ่อนปุ่ม git ทั้งหมด (commit/push/pull/
+      // create&push) กัน commit/push ชนกับสิ่งที่ worker กำลังทำอยู่ (เข้าคู่กับ delBtn
+      // ที่ disable ไปแล้วด้านบน — host-side ก็ guard ซ้ำใน git_* handlers)
       return '<div class="card'+(it.driven?' live':'')+'" data-path="'+esc(it.path)+'">'
         +'<span class="star'+(it.starred?' on':'')+'" role="button" title="ปักดาว / เอาดาวออก">'+(it.starred?'★':'☆')+'</span>'
         +'<div style="flex:1"><button class="pick"><span class="cname">'+esc(it.name)+chip+'</span>'
-        +'<span class="csub">'+sub+'</span></button>'+gitEditor(it.git)+'</div>'
+        +'<span class="csub">'+sub+'</span></button>'+(busy ? '' : gitEditor(it.git))+'</div>'
         +contBtn+multiBtn+delBtn
-        +'<span class="git-cell">'+gitCell(it.git)+'</span></div>';
+        +'<span class="git-cell">'+(busy ? '' : gitCell(it.git))+'</span></div>';
     }).join('') : '<div class="empty">'+esc(m.subtitle)+'</div>';
     el("content").querySelectorAll('.card').forEach(function(card){
       var path=card.dataset.path;
@@ -1140,7 +1387,7 @@ function renderShell(): string {
     }
     applyAutoUi(p); fillAuto(p, message); }
 
-  function renderTeams(m){ disarmAll();  // ออกจากหน้า projects → เลิก arm/timer ที่ค้างทั้งหมด
+  function renderTeams(m){ disarmAll(); _lastProjKey=null;  // ออกจากหน้า projects → เลิก arm/timer ที่ค้างทั้งหมด (+invalidate skip-guard)
     el("title").textContent=m.title; el("subtitle").textContent=m.subtitle;
     var askable=m.askable===true; if(!askable) askMode=false;
     el("actions").innerHTML=actionsHtml(m.canBack, false, askable, false, false, m.githubUrl); wireActions(m.canBack);
@@ -1153,7 +1400,7 @@ function renderShell(): string {
     el("content").querySelectorAll('.card').forEach(function(c){
       c.addEventListener('click',function(){post('pick_team',{name:c.dataset.name, askMode:askMode});});});
   }
-  function renderOrch(m){ disarmAll();  // ออกจากหน้า projects → เลิก arm/timer ที่ค้างทั้งหมด
+  function renderOrch(m){ disarmAll(); _lastProjKey=null;  // ออกจากหน้า projects → เลิก arm/timer ที่ค้างทั้งหมด (+invalidate skip-guard)
     el("title").textContent=m.title; el("subtitle").textContent=m.subtitle;
     var askable=m.askable===true; if(!askable) askMode=false;
     el("actions").innerHTML=actionsHtml(false, false, askable); wireActions(false);
@@ -1170,6 +1417,9 @@ function renderShell(): string {
     if(m.type==="screen_projects") renderProjects(m);
     else if(m.type==="screen_teams") renderTeams(m);
     else if(m.type==="screen_orch") renderOrch(m);
+    else if(m.type==="screen_detail") renderDetail(m);
+    else if(m.type==="doc_html") handleDocHtml(m.rel, m.html, m.error);
+    else if(m.type==="preview_state") handlePreviewState(m.running);
     else if(m.type==="disarm_all") disarmAll();  // panel ถูกซ่อน/สลับ tab (backend แจ้งมา) → เลิก arm ค้าง
     else if(m.type==="git_auto_result") handleAutoResult(m.path,m.message,m.gen);
     else if(m.type==="open_namemodal") openNameModal(m.default);

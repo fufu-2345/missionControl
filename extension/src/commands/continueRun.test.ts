@@ -15,6 +15,7 @@ import {
   decideContinueAction,
   finishedSessions,
   clampSprintCount,
+  runSessionLiveForProject,
   type RunMarker,
 } from "./continueRun";
 import type { OracleTeam } from "./teams";
@@ -222,4 +223,37 @@ test("clampSprintCount: <1 / NaN / empty → null (invalid)", () => {
   expect(clampSprintCount("abc", 4)).toBeNull();
   expect(clampSprintCount("", 4)).toBeNull();
   expect(clampSprintCount("2.5", 4)).toBe(2); // parseInt floors
+});
+
+// --- run-liveness must be scoped to THIS project by @orches_label, not just the
+//     session name (cold-launch records the base pin, so two projects can record
+//     the SAME session name → name-only liveness cross-lights both green) ---
+
+const RUN_ON: RunMarker = { status: "running", sprint: 3, session: "09-foreman", startedAt: "x" };
+
+test("runSessionLiveForProject: session labeled for THIS project → live", () => {
+  const sessions = [{ name: "09-foreman", orchesLabel: "proj-v10 / brew" }];
+  expect(runSessionLiveForProject(RUN_ON, sessions, "proj-v10")).toBe(true);
+});
+
+test("runSessionLiveForProject: same session name but labeled for ANOTHER project → NOT live (the bug)", () => {
+  // 09-foreman is alive but driving proj-v9; proj-v10's marker names the same base
+  // session — name-only match would falsely light proj-v10 green.
+  const sessions = [{ name: "09-foreman", orchesLabel: "proj-v9 / brew" }];
+  expect(runSessionLiveForProject(RUN_ON, sessions, "proj-v10")).toBe(false);
+});
+
+test("runSessionLiveForProject: session name not live at all → NOT live", () => {
+  expect(runSessionLiveForProject(RUN_ON, [{ name: "other", orchesLabel: "proj-v10 / brew" }], "proj-v10")).toBe(false);
+});
+
+test("runSessionLiveForProject: marker not running / no session / null → NOT live", () => {
+  const s = [{ name: "09-foreman", orchesLabel: "proj-v10 / brew" }];
+  expect(runSessionLiveForProject({ status: "done" }, s, "proj-v10")).toBe(false);
+  expect(runSessionLiveForProject({ status: "running", startedAt: "x" } as RunMarker, s, "proj-v10")).toBe(false);
+  expect(runSessionLiveForProject(null, s, "proj-v10")).toBe(false);
+});
+
+test("runSessionLiveForProject: unlabeled live session → NOT live (can't prove ownership)", () => {
+  expect(runSessionLiveForProject(RUN_ON, [{ name: "09-foreman" }], "proj-v10")).toBe(false);
 });

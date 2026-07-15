@@ -13,10 +13,25 @@ export interface Bucket {
   cost: number;
   tokens: number;
 }
+// Per-project token/cost split by category. input/output/cache-read/cache-write
+// are each computed per assistant line anyway (see priceLine); we keep them per
+// cwd so the Budget page can show "where did this project's spend go" — cache-read
+// is 0.1x input, so a huge-token project can still be cheap.
+export interface Breakdown {
+  inTok: number;
+  outTok: number;
+  cacheReadTok: number;
+  cacheWriteTok: number;
+  inCost: number;
+  outCost: number;
+  cacheReadCost: number;
+  cacheWriteCost: number;
+}
 export interface UsageSummary {
   total: Bucket;
   byDay: Record<string, Bucket>; // key "YYYY-MM-DD" in LOCAL time (matches the user's clock)
   byProject: Record<string, Bucket>; // key = cwd
+  byProjectDetail: Record<string, Breakdown>; // key = cwd -> per-category token/cost split
   projectLastMs: Record<string, number>; // key = cwd -> latest touched session mtime (ms)
   fileCount: number;
   computedAt: number;
@@ -87,11 +102,81 @@ function ratesFor(model: string): Rate | null {
   };
 }
 
+// The token counts carried on one assistant line's message.usage.
+interface UsageCounts {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_creation?: {
+    ephemeral_5m_input_tokens?: number;
+    ephemeral_1h_input_tokens?: number;
+  };
+}
+
+export function emptyBreakdown(): Breakdown {
+  return {
+    inTok: 0, outTok: 0, cacheReadTok: 0, cacheWriteTok: 0,
+    inCost: 0, outCost: 0, cacheReadCost: 0, cacheWriteCost: 0,
+  };
+}
+
+export function addBreakdown(a: Breakdown, b: Breakdown): Breakdown {
+  return {
+    inTok: a.inTok + b.inTok,
+    outTok: a.outTok + b.outTok,
+    cacheReadTok: a.cacheReadTok + b.cacheReadTok,
+    cacheWriteTok: a.cacheWriteTok + b.cacheWriteTok,
+    inCost: a.inCost + b.inCost,
+    outCost: a.outCost + b.outCost,
+    cacheReadCost: a.cacheReadCost + b.cacheReadCost,
+    cacheWriteCost: a.cacheWriteCost + b.cacheWriteCost,
+  };
+}
+
+// Price ONE assistant line: total cost + total tokens + the 4-way split.
+// The four costs always sum to `cost`; the four token counts sum to `tokens`.
+// Returns null for models with no rate (synthetic / free) so callers skip them.
+// This is the single source of the budget pricing math (aggregateFile uses it).
+export function priceLine(
+  model: string,
+  u: UsageCounts,
+): { cost: number; tokens: number; bd: Breakdown } | null {
+  const rate = ratesFor(model);
+  if (!rate) return null;
+  const cc = u.cache_creation || {};
+  const c5 = cc.ephemeral_5m_input_tokens ?? 0;
+  const c1 = cc.ephemeral_1h_input_tokens ?? 0;
+  const ccTot = u.cache_creation_input_tokens ?? 0;
+  const inp = u.input_tokens ?? 0;
+  const outp = u.output_tokens ?? 0;
+  const cr = u.cache_read_input_tokens ?? 0;
+  const inCost = inp * rate.i;
+  const outCost = outp * rate.o;
+  const cacheReadCost = cr * rate.r;
+  // Prefer the 5m/1h split when present; otherwise price all cache-creation at 5m.
+  const cacheWriteCost = c5 || c1 ? c5 * rate.w5 + c1 * rate.w1 : ccTot * rate.w5;
+  const cost = inCost + outCost + cacheReadCost + cacheWriteCost;
+  const tokens = inp + outp + cr + ccTot;
+  return {
+    cost,
+    tokens,
+    bd: { inTok: inp, outTok: outp, cacheReadTok: cr, cacheWriteTok: ccTot, inCost, outCost, cacheReadCost, cacheWriteCost },
+  };
+}
+
 interface FileAgg extends Bucket {
   mtimeMs: number;
   size: number;
   byDay: Record<string, Bucket>;
   byProject: Record<string, Bucket>;
+  // Per-cwd NEWEST line timestamp (ms). Recency MUST come from the transcript's
+  // own timestamps, NOT the file's mtime: one long-lived session file (an orches
+  // foreman/worker oracle) touches many projects across many days, so its single
+  // mtime would tag every project it ever visited as "last active = now",
+  // collapsing all their recencies together and scrambling the "ล่าสุด" sort.
+  projectLastMs: Record<string, number>;
+  byProjectDetail: Record<string, Breakdown>;
 }
 
 // Per-file cache keyed by path → re-read a transcript only when its mtime/size
@@ -112,9 +197,12 @@ const SUMMARY_TTL = 15_000;
 // error just falls back to an in-memory-only cold scan.
 const CACHE_FILE = path.join(os.homedir(), ".cache", "mission-control", "usage-filecache.json");
 // Bump whenever cached numbers become wrong wholesale — e.g. the ratesFor price
-// table changes or the scan itself changes shape (v2: depth limit 4→12) — so
-// hydrate discards the stale cache and the next scan recomputes everything.
-const CACHE_VERSION = 2;
+// table changes or the scan itself changes shape (v2: depth limit 4→12; v3:
+// FileAgg gained projectLastMs — per-project recency now derives from line
+// timestamps, not file mtime; v4: FileAgg/UsageSummary gained byProjectDetail —
+// per-project input/output/cache token+cost split) — so hydrate discards the
+// stale cache and the next scan recomputes everything.
+const CACHE_VERSION = 4;
 let hydrated = false;
 
 async function hydrateFileCache(): Promise<void> {
@@ -205,7 +293,16 @@ function bump(map: Record<string, Bucket>, key: string, cost: number, tokens: nu
 }
 
 async function aggregateFile(file: string): Promise<FileAgg | null> {
-  const agg: FileAgg = { mtimeMs: 0, size: 0, cost: 0, tokens: 0, byDay: {}, byProject: {} };
+  const agg: FileAgg = {
+    mtimeMs: 0,
+    size: 0,
+    cost: 0,
+    tokens: 0,
+    byDay: {},
+    byProject: {},
+    projectLastMs: {},
+    byProjectDetail: {},
+  };
   let raw: string;
   try {
     raw = await fs.promises.readFile(file, "utf8");
@@ -253,25 +350,20 @@ async function aggregateFile(file: string): Promise<FileAgg | null> {
       if (seen.has(key)) continue;
       seen.add(key);
     }
-    const rate = ratesFor(String(msg.model ?? ""));
-    if (!rate) continue;
-    const cc = usage.cache_creation || {};
-    const c5 = cc.ephemeral_5m_input_tokens ?? 0;
-    const c1 = cc.ephemeral_1h_input_tokens ?? 0;
-    const ccTot = usage.cache_creation_input_tokens ?? 0;
-    const inp = usage.input_tokens ?? 0;
-    const outp = usage.output_tokens ?? 0;
-    const cr = usage.cache_read_input_tokens ?? 0;
-    // Prefer the 5m/1h split when present; otherwise price all cache-creation at 5m.
-    const writeCost = c5 || c1 ? c5 * rate.w5 + c1 * rate.w1 : ccTot * rate.w5;
-    const cost = inp * rate.i + outp * rate.o + cr * rate.r + writeCost;
-    const tokens = inp + outp + cr + ccTot;
-    agg.cost += cost;
-    agg.tokens += tokens;
+    const pl = priceLine(String(msg.model ?? ""), usage);
+    if (!pl) continue;
+    agg.cost += pl.cost;
+    agg.tokens += pl.tokens;
     const day = typeof d.timestamp === "string" ? localDayKey(d.timestamp) : "unknown";
-    bump(agg.byDay, day, cost, tokens);
+    bump(agg.byDay, day, pl.cost, pl.tokens);
     const proj = typeof d.cwd === "string" && d.cwd ? d.cwd : "unknown";
-    bump(agg.byProject, proj, cost, tokens);
+    bump(agg.byProject, proj, pl.cost, pl.tokens);
+    agg.byProjectDetail[proj] = addBreakdown(agg.byProjectDetail[proj] ?? emptyBreakdown(), pl.bd);
+    // Track this cwd's newest line timestamp (ms) for recency — see FileAgg.
+    const tsMs = typeof d.timestamp === "string" ? Date.parse(d.timestamp) : Number.NaN;
+    if (!Number.isNaN(tsMs) && tsMs > (agg.projectLastMs[proj] ?? 0)) {
+      agg.projectLastMs[proj] = tsMs;
+    }
   }
   return agg;
 }
@@ -330,6 +422,7 @@ async function scan(): Promise<UsageSummary> {
   const total: Bucket = { cost: 0, tokens: 0 };
   const byDay: Record<string, Bucket> = {};
   const byProject: Record<string, Bucket> = {};
+  const byProjectDetail: Record<string, Breakdown> = {};
   const projectLastMs: Record<string, number> = {};
 
   // Read/parse transcripts CONCURRENTLY (bounded) — they're independent, and a
@@ -337,7 +430,7 @@ async function scan(): Promise<UsageSummary> {
   // loop took ~6s cold). A shared index feeds a fixed pool of workers; the
   // per-file aggregates are merged serially afterwards (cheap, no map races).
   const CONCURRENCY = 48;
-  const parsed: ({ agg: FileAgg; mtimeMs: number } | null)[] = new Array(items.length).fill(null);
+  const parsed: (FileAgg | null)[] = new Array(items.length).fill(null);
   let next = 0;
   async function worker(): Promise<void> {
     for (;;) {
@@ -366,24 +459,39 @@ async function scan(): Promise<UsageSummary> {
         fileCache.set(file, fresh);
         agg = fresh;
       }
-      parsed[i] = { agg, mtimeMs: st.mtimeMs };
+      parsed[i] = agg;
     }
   }
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, items.length || 1) }, worker));
 
-  for (const r of parsed) {
-    if (!r) continue;
-    total.cost += r.agg.cost;
-    total.tokens += r.agg.tokens;
-    for (const k of Object.keys(r.agg.byDay)) bump(byDay, k, r.agg.byDay[k].cost, r.agg.byDay[k].tokens);
-    for (const k of Object.keys(r.agg.byProject)) {
-      bump(byProject, k, r.agg.byProject[k].cost, r.agg.byProject[k].tokens);
-      // "recency" = newest session file that touched this project.
-      if (r.mtimeMs > (projectLastMs[k] ?? 0)) projectLastMs[k] = r.mtimeMs;
+  for (const agg of parsed) {
+    if (!agg) continue;
+    total.cost += agg.cost;
+    total.tokens += agg.tokens;
+    for (const k of Object.keys(agg.byDay)) bump(byDay, k, agg.byDay[k].cost, agg.byDay[k].tokens);
+    for (const k of Object.keys(agg.byProject)) {
+      bump(byProject, k, agg.byProject[k].cost, agg.byProject[k].tokens);
+    }
+    for (const k of Object.keys(agg.byProjectDetail)) {
+      byProjectDetail[k] = addBreakdown(byProjectDetail[k] ?? emptyBreakdown(), agg.byProjectDetail[k]);
+    }
+    // "recency" = the newest LINE timestamp recorded for that cwd, across every
+    // file — a per-project signal, unlike the file's mtime which one shared
+    // oracle session file would smear across all the projects it ever touched.
+    for (const k of Object.keys(agg.projectLastMs)) {
+      if (agg.projectLastMs[k] > (projectLastMs[k] ?? 0)) projectLastMs[k] = agg.projectLastMs[k];
     }
   }
   const files = items.map((x) => x.file);
-  summaryCache = { total, byDay, byProject, projectLastMs, fileCount: files.length, computedAt: Date.now() };
+  summaryCache = {
+    total,
+    byDay,
+    byProject,
+    byProjectDetail,
+    projectLastMs,
+    fileCount: files.length,
+    computedAt: Date.now(),
+  };
   summaryAt = summaryCache.computedAt;
   void saveFileCache(files); // persist for the next reload (fire-and-forget)
   void saveSummary(summaryCache); // persist totals for instant paint next open

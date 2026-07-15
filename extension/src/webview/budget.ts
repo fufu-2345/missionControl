@@ -4,10 +4,14 @@ import * as path from "node:path";
 
 import * as vscode from "vscode";
 
+import { type ProjectDetail, buildDetail } from "../budget-detail";
 import {
   MONTHLY_CAP_KEY,
+  type Breakdown,
   type UsageSummary,
+  addBreakdown,
   computeUsage,
+  emptyBreakdown,
   getInstantUsage,
   localMonthKey,
   localTodayKey,
@@ -77,6 +81,7 @@ export interface ProjectRow {
   cost: number; // numeric $ — for the bar + QuickPick top-5
   tokens: number; // total tokens — client sorts by "token ที่ใช้"
   lastMs: number; // last activity (ms) — client sorts by recency + month filter
+  detail: ProjectDetail; // per-category token/$ split — powers the click-to-open pie popup
 }
 
 /** Build the full display view from a usage snapshot `u`: this-month / today /
@@ -118,14 +123,19 @@ export function buildBudgetView(context: vscode.ExtensionContext, u: UsageSummar
   // Collapse every recorded cwd onto its project under projects/, summing cost
   // and keeping the newest activity. cwds not under a projects/ folder (oracles,
   // tools, home) are skipped.
-  const byKey = new Map<string, { cost: number; tokens: number; lastMs: number; name: string }>();
+  const byKey = new Map<
+    string,
+    { cost: number; tokens: number; lastMs: number; name: string; det: Breakdown }
+  >();
   for (const cwd of Object.keys(u.byProject)) {
     const proj = resolveProject(cwd);
     if (!proj) continue;
-    const cur = byKey.get(proj.root) ?? { cost: 0, tokens: 0, lastMs: 0, name: proj.name };
+    const cur =
+      byKey.get(proj.root) ?? { cost: 0, tokens: 0, lastMs: 0, name: proj.name, det: emptyBreakdown() };
     cur.cost += u.byProject[cwd].cost;
     cur.tokens += u.byProject[cwd].tokens;
     cur.lastMs = Math.max(cur.lastMs, u.projectLastMs[cwd] ?? 0);
+    cur.det = addBreakdown(cur.det, u.byProjectDetail[cwd] ?? emptyBreakdown());
     byKey.set(proj.root, cur);
   }
   const projects: ProjectRow[] = [...byKey.entries()]
@@ -136,6 +146,7 @@ export function buildBudgetView(context: vscode.ExtensionContext, u: UsageSummar
       cost: b.cost,
       tokens: b.tokens,
       lastMs: b.lastMs,
+      detail: buildDetail(b.det),
     }))
     .sort((a, b) => b.lastMs - a.lastMs); // default order; client re-sorts
 
@@ -286,7 +297,7 @@ function renderShell(): string {
     background: var(--vscode-editor-background);
     padding: 22px 24px; margin: 0;
   }
-  .wrap { max-width: 760px; }
+  .wrap { max-width: 760px; margin: 0 auto; }
   .head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 22px; }
   .title { font-size: 13px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; opacity: 0.6; margin: 0 0 6px; }
   .hero { font-size: 40px; font-weight: 800; line-height: 1; letter-spacing: -1px; }
@@ -365,6 +376,7 @@ function renderShell(): string {
   /* fixed width so toggling "ล่าสุด" <-> "token ที่ใช้" doesn't resize the button */
   #sort-field { min-width: 96px; text-align: center; }
   #scope { min-width: 68px; text-align: center; }
+  #metric { min-width: 56px; text-align: center; }
   .b.active { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-color: transparent; font-weight: 600; }
   .pager { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 14px; font-size: 12px; }
   .pager .pinfo { opacity: 0.6; font-variant-numeric: tabular-nums; }
@@ -380,6 +392,49 @@ function renderShell(): string {
   .foot {
     margin-top: 22px; padding-top: 14px; font-size: 11.5px; line-height: 1.6; opacity: 0.6;
     border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2));
+  }
+
+  /* project row is clickable -> opens the token breakdown popup */
+  .prow { cursor: pointer; transition: border-color 0.12s; }
+  .prow:hover { border-color: var(--vscode-focusBorder); }
+
+  #modal-bg {
+    display: none; position: fixed; inset: 0; z-index: 50;
+    background: rgba(0,0,0,0.5); align-items: center; justify-content: center; padding: 24px;
+  }
+  #modal {
+    position: relative; width: 100%; max-width: 380px;
+    background: var(--vscode-editor-background);
+    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35));
+    border-radius: 12px; padding: 20px 22px; box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  }
+  #modal-x {
+    position: absolute; top: 10px; right: 12px; background: transparent;
+    color: var(--vscode-foreground); border: none; font-size: 15px; cursor: pointer; opacity: 0.6; line-height: 1;
+  }
+  #modal-x:hover { opacity: 1; }
+  #modal-head { margin-bottom: 16px; padding-right: 20px; }
+  .m-name { font-size: 15px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .m-total { font-size: 12px; opacity: 0.6; margin-top: 3px; font-variant-numeric: tabular-nums; }
+  .m-chart { display: flex; justify-content: center; margin-bottom: 16px; }
+  .pie { width: 170px; height: 170px; }
+  .pie path, .pie circle { stroke: var(--vscode-editor-background); stroke-width: 1.5; transition: opacity 0.12s; }
+  .pie path:hover, .pie circle:hover { opacity: 0.85; }
+  .m-legend { display: flex; flex-direction: column; gap: 7px; }
+  .lg { display: grid; grid-template-columns: 14px 1fr auto auto; align-items: center; gap: 9px; font-size: 12.5px; cursor: default; }
+  .lg .sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  .lg-label { opacity: 0.85; }
+  .lg-text { font-variant-numeric: tabular-nums; opacity: 0.7; }
+  .lg-pct { font-variant-numeric: tabular-nums; font-weight: 600; min-width: 42px; text-align: right; }
+  .m-empty { opacity: 0.6; font-size: 13px; padding: 12px 0; text-align: center; }
+
+  #tip {
+    display: none; position: fixed; z-index: 60; pointer-events: none; max-width: 240px;
+    padding: 7px 10px; border-radius: 6px; font-size: 11.5px; line-height: 1.45;
+    background: var(--vscode-editorHoverWidget-background, #252526);
+    color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground));
+    border: 1px solid var(--vscode-editorHoverWidget-border, rgba(128,128,128,0.4));
+    box-shadow: 0 2px 10px rgba(0,0,0,0.35);
   }
 </style>
 </head>
@@ -408,6 +463,7 @@ function renderShell(): string {
       <button class="b" id="sort-field" title="สลับเกณฑ์เรียง">ล่าสุด</button>
       <button class="b dir" id="sort-dir" title="สลับมากไปน้อย / น้อยไปมาก">↓</button>
       <button class="b" id="scope" title="สลับ เดือนนี้ / ทั้งหมด">เดือนนี้</button>
+      <button class="b" id="metric" title="สลับหน่วยที่แสดง USD / token ที่ใช้">USD</button>
     </div>
   </div>
   <div class="rows" id="projects"></div>
@@ -415,6 +471,13 @@ function renderShell(): string {
 
   <div class="foot" id="foot"></div>
 </div>
+
+<div id="modal-bg"><div id="modal">
+  <button id="modal-x" title="ปิด">✕</button>
+  <div id="modal-head"></div>
+  <div id="modal-body"></div>
+</div></div>
+<div id="tip"></div>
 
 <script>
   const vscode = acquireVsCodeApi();
@@ -437,7 +500,7 @@ function renderShell(): string {
   function fmtTokens(n) { return TOKFMT.format(n || 0) + " tok"; }
 
   var PAGE_SIZE = 10;
-  var STATE = { view: null, sortKey: "recent", sortDir: "desc", scope: "month", query: "", page: 0, maxCost: 0 };
+  var STATE = { view: null, sortKey: "recent", sortDir: "desc", scope: "month", query: "", page: 0, maxCost: 0, metric: "usd" };
 
   function renderProjects() {
     var v = STATE.view;
@@ -450,9 +513,11 @@ function renderShell(): string {
     // name search
     var q = STATE.query.trim().toLowerCase();
     if (q) list = list.filter(function (p) { return p.name.toLowerCase().indexOf(q) !== -1; });
-    // sort by chosen key + direction
+    // sort by chosen key + direction; break exact ties by name so the order is
+    // stable (never depends on Map/insertion order).
     list.sort(function (a, b) {
       var d = STATE.sortKey === "tokens" ? a.tokens - b.tokens : a.lastMs - b.lastMs;
+      if (d === 0) return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
       return STATE.sortDir === "desc" ? -d : d;
     });
     var total = list.length;
@@ -465,6 +530,7 @@ function renderShell(): string {
     document.getElementById("projects-k").textContent = "โปรเจกต์ (" + total + ")";
     document.getElementById("sort-field").textContent = STATE.sortKey === "tokens" ? "token ที่ใช้" : "ล่าสุด";
     document.getElementById("sort-dir").textContent = STATE.sortDir === "desc" ? "↓" : "↑";
+    document.getElementById("metric").textContent = STATE.metric === "tokens" ? "token" : "USD";
     var scopeBtn = document.getElementById("scope");
     scopeBtn.textContent = STATE.scope === "all" ? "ทั้งหมด" : "เดือนนี้";
     scopeBtn.classList[STATE.scope === "all" ? "add" : "remove"]("active");
@@ -479,12 +545,15 @@ function renderShell(): string {
       .map(function (p, i) {
         var pct = STATE.maxCost > 0 ? Math.max(3, Math.round((p.cost / STATE.maxCost) * 100)) : 0;
         var rank = start + i + 1;
+        // metric toggle: "usd" → cost big, tokens small (default) · "tokens" → swapped
+        var big = STATE.metric === "tokens" ? esc(fmtTokens(p.tokens)) : money(p.costFmt);
+        var small = STATE.metric === "tokens" ? money(p.costFmt) : esc(fmtTokens(p.tokens));
         return (
-          '<div class="prow"><div class="rank">' + rank + "</div>" +
+          '<div class="prow" data-key="' + esc(p.path) + '"><div class="rank">' + rank + "</div>" +
           '<div class="pth"><div class="path" title="' + esc(p.path) + '">' + esc(p.name) + "</div>" +
           '<div class="pbar"><span style="width:' + pct + '%"></span></div></div>' +
-          '<div class="cost">' + money(p.costFmt) +
-          '<div class="tok">' + esc(fmtTokens(p.tokens)) + "</div></div></div>"
+          '<div class="cost">' + big +
+          '<div class="tok">' + small + "</div></div></div>"
         );
       })
       .join("");
@@ -544,14 +613,22 @@ function renderShell(): string {
   }
 
   document.addEventListener("click", function (e) {
-    const t = e.target;
-    if (!t || !t.id) return;
+    var t = e.target;
+    if (!t) return;
+    // clicking anywhere on a project row opens its token breakdown popup
+    // (row children have no id, so this must run before the id checks)
+    var row = t.closest ? t.closest(".prow") : null;
+    if (row && row.getAttribute("data-key")) { openModal(row.getAttribute("data-key")); return; }
+    // close the popup: the X button, or a click on the dim backdrop itself
+    if (t.id === "modal-x" || t.id === "modal-bg") { closeModal(); return; }
+    if (!t.id) return;
     if (t.id === "refresh") post("reload");
     else if (t.id === "setcap") post("setCap");
     else if (t.id === "clearcap") post("clearCap");
     else if (t.id === "sort-field") { STATE.sortKey = STATE.sortKey === "recent" ? "tokens" : "recent"; STATE.page = 0; renderProjects(); }
     else if (t.id === "sort-dir") { STATE.sortDir = STATE.sortDir === "desc" ? "asc" : "desc"; STATE.page = 0; renderProjects(); }
     else if (t.id === "scope") { STATE.scope = STATE.scope === "month" ? "all" : "month"; STATE.page = 0; renderProjects(); }
+    else if (t.id === "metric") { STATE.metric = STATE.metric === "usd" ? "tokens" : "usd"; renderProjects(); }
     else if (t.id === "pg-prev") { STATE.page -= 1; renderProjects(); }
     else if (t.id === "pg-next") { STATE.page += 1; renderProjects(); }
   });
@@ -564,6 +641,110 @@ function renderShell(): string {
   window.addEventListener("message", function (ev) {
     const m = ev.data;
     if (m && m.type === "budget") render(m);
+  });
+
+  // ── Per-project token breakdown popup (pie + legend + hover tooltip) ─────────
+  var MODAL_SLICES = {}; // key -> slice, for tooltip lookup while a popup is open
+
+  function openModal(key) {
+    var v = STATE.view;
+    if (!v) return;
+    var list = v.projects || [];
+    var p = null;
+    for (var i = 0; i < list.length; i++) { if (list[i].path === key) { p = list[i]; break; } }
+    if (!p) return;
+    var d = p.detail || { slices: [], totalText: "", hasCost: false };
+    MODAL_SLICES = {};
+    for (var j = 0; j < d.slices.length; j++) MODAL_SLICES[d.slices[j].key] = d.slices[j];
+    document.getElementById("modal-head").innerHTML =
+      '<div class="m-name" title="' + esc(p.path) + '">' + esc(p.name) + "</div>" +
+      '<div class="m-total">' + esc(d.totalText) + "</div>";
+    var body = document.getElementById("modal-body");
+    if (!d.hasCost) {
+      body.innerHTML = '<div class="m-empty">ไม่มีค่าใช้จ่ายที่คิดเงินได้สำหรับโปรเจกต์นี้</div>';
+    } else {
+      body.innerHTML =
+        '<div class="m-chart">' + pieSvg(d.slices) + "</div>" +
+        '<div class="m-legend">' + legendHtml(d.slices) + "</div>";
+    }
+    document.getElementById("modal-bg").style.display = "flex";
+  }
+
+  function legendHtml(slices) {
+    return slices
+      .map(function (s) {
+        return (
+          '<div class="lg" data-k="' + esc(s.key) + '">' +
+          '<span class="sw" style="background:' + esc(s.color) + '"></span>' +
+          '<span class="lg-label">' + esc(s.label) + "</span>" +
+          '<span class="lg-text">' + esc(s.text) + "</span>" +
+          '<span class="lg-pct">' + esc(String(s.pct)) + "%</span></div>"
+        );
+      })
+      .join("");
+  }
+
+  // Hand-drawn SVG pie (no external chart lib). Slices sized by cost; each path
+  // carries data-k so hovering shows that category's meaning.
+  function pieSvg(slices) {
+    var draw = [];
+    var sum = 0;
+    for (var i = 0; i < slices.length; i++) {
+      if (slices[i].cost > 0) { draw.push(slices[i]); sum += slices[i].cost; }
+    }
+    if (!draw.length || sum <= 0) return "";
+    var svg = '<svg viewBox="0 0 200 200" class="pie">';
+    if (draw.length === 1) {
+      return (
+        svg +
+        '<circle cx="100" cy="100" r="92" fill="' + esc(draw[0].color) +
+        '" data-k="' + esc(draw[0].key) + '"></circle></svg>'
+      );
+    }
+    var ang = -90; // start at 12 o'clock
+    for (var k = 0; k < draw.length; k++) {
+      var a0 = ang;
+      var a1 = ang + (draw[k].cost / sum) * 360;
+      ang = a1;
+      var large = a1 - a0 > 180 ? 1 : 0;
+      var x0 = (100 + 92 * Math.cos((a0 * Math.PI) / 180)).toFixed(2);
+      var y0 = (100 + 92 * Math.sin((a0 * Math.PI) / 180)).toFixed(2);
+      var x1 = (100 + 92 * Math.cos((a1 * Math.PI) / 180)).toFixed(2);
+      var y1 = (100 + 92 * Math.sin((a1 * Math.PI) / 180)).toFixed(2);
+      svg +=
+        '<path d="M100 100 L' + x0 + " " + y0 + " A92 92 0 " + large + " 1 " + x1 + " " + y1 +
+        ' Z" fill="' + esc(draw[k].color) + '" data-k="' + esc(draw[k].key) + '"></path>';
+    }
+    return svg + "</svg>";
+  }
+
+  function closeModal() {
+    document.getElementById("modal-bg").style.display = "none";
+    hideTip();
+  }
+
+  function showTip(key, x, y) {
+    var s = MODAL_SLICES[key];
+    if (!s) { hideTip(); return; }
+    var tip = document.getElementById("tip");
+    tip.innerHTML = "<b>" + esc(s.label) + "</b><br>" + esc(s.meaning);
+    tip.style.display = "block";
+    tip.style.left = x + 14 + "px";
+    tip.style.top = y + 14 + "px";
+  }
+  function hideTip() { document.getElementById("tip").style.display = "none"; }
+
+  // One handler drives show/move/hide: only while a popup is open, and only when
+  // the cursor is over a slice or legend row (both tagged data-k).
+  document.addEventListener("mousemove", function (e) {
+    if (document.getElementById("modal-bg").style.display !== "flex") return;
+    var t = e.target;
+    var el = t && t.closest ? t.closest("[data-k]") : null;
+    if (el) showTip(el.getAttribute("data-k"), e.clientX, e.clientY);
+    else hideTip();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") closeModal();
   });
 
   post("ready");

@@ -216,6 +216,10 @@ export function openDashboardPanel(
       }
       case "attach_session": {
         const name = typeof msg.name === "string" ? msg.name : "";
+        // The human display label the row already showed ("<project> / <team>",
+        // from @orches_label). Used only for the editor-tab title, never a shell —
+        // so the raw name still guards attach/kill below.
+        const label = typeof msg.label === "string" ? msg.label : "";
         // Defense in depth: only attach to a name we actually listed, and that
         // passes the shell-safety whitelist.
         if (!_lastSessionNames.has(name) || !isSafeSessionName(name)) return;
@@ -243,8 +247,12 @@ export function openDashboardPanel(
           return;
         }
 
+        // Title the tab with the project (the part before " / <team>" in the
+        // label), e.g. "agentskill-marketplace-v9", instead of the raw pin
+        // "tmux: 09-foreman-2". Unlabeled sessions keep the old "tmux: <name>".
+        const proj = label.split(" / ")[0].trim();
         const term = vscode.window.createTerminal({
-          name: "tmux: " + name,
+          name: proj || "tmux: " + name,
           location: vscode.TerminalLocation.Editor,
         });
         _sessionTerminals.set(name, term);
@@ -1056,7 +1064,7 @@ function renderHtml(): string {
     }
     root.className = "";
     root.innerHTML = sessions.map((s) =>
-      '<div class="session-row" data-name="' + escapeHtml(s.name) + '">'
+      '<div class="session-row" data-name="' + escapeHtml(s.name) + '" data-label="' + escapeHtml(s.label || '') + '">'
       + '<span class="sdot ' + (s.attached ? 'on' : '') + '"></span>'
       + '<span class="smeta">'
       + '<span class="sname">' + escapeHtml(s.label || s.name) + '</span>'
@@ -1067,7 +1075,7 @@ function renderHtml(): string {
     ).join('');
     root.querySelectorAll('.session-row').forEach((el) => {
       el.addEventListener('click', () => {
-        vscode.postMessage({ type: 'attach_session', name: el.dataset.name });
+        vscode.postMessage({ type: 'attach_session', name: el.dataset.name, label: el.dataset.label });
       });
     });
     root.querySelectorAll('.session-kill').forEach((btn) => {

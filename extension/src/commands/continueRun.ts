@@ -8,6 +8,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+import { labelNamesProject } from "../webview/sessions";
 import type { DrivenState, ResumableProject } from "./orchestratorResume";
 import type { OracleTeam } from "./teams";
 
@@ -126,6 +127,23 @@ export function resolveContinueTarget(
     return { error: `ทีม '${team.name}' ไม่มี orchestrator — tag ก่อน` };
   }
   return { team, orch: team.orchestrators[0] };
+}
+
+/** A "running" marker counts as THIS project's live run only when a live tmux
+ *  session with the marker's name is @orches_label'd for this project. Name-only
+ *  liveness is wrong: a cold-tmux launch records the orchestrator's base pin (e.g.
+ *  "09-foreman") as the session, so two projects launched across cold starts both
+ *  record the SAME session name — then one live session lights every such project's
+ *  card green (the observed cross-project bug). The label is set at session-create,
+ *  so it is reliable from t0. Pure. */
+export function runSessionLiveForProject(
+  marker: RunMarker | null,
+  liveSessions: readonly { name: string; orchesLabel?: string }[],
+  basename: string,
+): boolean {
+  if (marker?.status !== "running" || !marker.session) return false;
+  const name = marker.session;
+  return liveSessions.some((s) => s.name === name && labelNamesProject(s.orchesLabel, basename));
 }
 
 export type ContinueAction = "already-running" | "attach" | "launch";
