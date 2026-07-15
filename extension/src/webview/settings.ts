@@ -82,7 +82,7 @@ export function openSettingsPanel(): vscode.WebviewPanel {
   }
   const panel = vscode.window.createWebviewPanel(
     "missioncontrol.settings",
-    "Mission Control — Settings",
+    "Settings",
     vscode.ViewColumn.One,
     { enableScripts: true, retainContextWhenHidden: true },
   );

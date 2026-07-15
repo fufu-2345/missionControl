@@ -42,7 +42,7 @@ export async function statusCommand(_context: vscode.ExtensionContext) {
     `soulbrew git:      ${git}`;
   const buttons = maw ? ["Open maw ui"] : [];
   const choice = await vscode.window.showInformationMessage(
-    "Mission Control — local status",
+    "local status",
     { modal: true, detail },
     ...buttons,
   );

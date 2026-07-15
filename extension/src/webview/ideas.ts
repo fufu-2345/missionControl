@@ -32,7 +32,7 @@ export function openIdeasPanel(
 ): vscode.WebviewPanel {
   const panel = vscode.window.createWebviewPanel(
     "missioncontrol.ideas",
-    `Mission Control — Approve ${ideas.length} Ideas`,
+    `Approve ${ideas.length} Ideas`,
     vscode.ViewColumn.One,
     { enableScripts: true, retainContextWhenHidden: true },
   );

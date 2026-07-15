@@ -78,7 +78,7 @@ async function showBudgetPopup(context: vscode.ExtensionContext): Promise<void> 
   });
 
   const qp = vscode.window.createQuickPick<Row>();
-  qp.title = "Mission Control — Claude usage: " + v.monthFmt + " this month";
+  qp.title = "Claude usage: " + v.monthFmt + " this month";
   qp.placeholder = v.sessions + " sessions · คำนวณจาก ~/.claude/projects · Anthropic list pricing";
   qp.items = items;
   qp.matchOnDescription = true;

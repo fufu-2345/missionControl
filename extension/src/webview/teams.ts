@@ -86,7 +86,7 @@ export function openTeamsPanel(_projectId: string | null = null): vscode.Webview
   }
   const panel = vscode.window.createWebviewPanel(
     "missioncontrol.teams",
-    "Mission Control — Team Config",
+    "Team Config",
     vscode.ViewColumn.One,
     { enableScripts: true, retainContextWhenHidden: true },
   );

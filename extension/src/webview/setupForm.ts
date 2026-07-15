@@ -33,7 +33,7 @@ export function openSetupForm(
   return new Promise((resolve) => {
     const panel = vscode.window.createWebviewPanel(
       "missioncontrol.setupForm",
-      "Mission Control — Setup",
+      "Setup",
       vscode.ViewColumn.One,
       { enableScripts: true, retainContextWhenHidden: false },
     );

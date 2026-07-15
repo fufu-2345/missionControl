@@ -58,7 +58,7 @@ export function openSkillsPanel(
   }
   const panel = vscode.window.createWebviewPanel(
     "missioncontrol.skills",
-    "Mission Control — Skills",
+    "Skills",
     vscode.ViewColumn.One,
     { enableScripts: true, retainContextWhenHidden: true },
   );

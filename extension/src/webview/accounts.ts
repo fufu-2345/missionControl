@@ -139,7 +139,7 @@ export function openAccountsPanel(): vscode.WebviewPanel {
   }
   const panel = vscode.window.createWebviewPanel(
     "missioncontrol.accounts",
-    "Mission Control — Accounts",
+    "Accounts",
     vscode.ViewColumn.One,
     { enableScripts: true, retainContextWhenHidden: true },
   );

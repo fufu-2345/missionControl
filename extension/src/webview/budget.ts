@@ -227,7 +227,7 @@ export function openBudgetPanel(context: vscode.ExtensionContext): vscode.Webvie
   }
   const panel = vscode.window.createWebviewPanel(
     "missioncontrol.budget",
-    "Mission Control — Budget",
+    "Budget",
     vscode.ViewColumn.One,
     { enableScripts: true, retainContextWhenHidden: true },
   );
