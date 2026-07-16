@@ -360,10 +360,9 @@ function renderShell(): string {
   .search::placeholder { color: var(--vscode-input-placeholderForeground, currentColor); opacity: 0.6; }
   .search:focus { outline: none; border-color: var(--vscode-focusBorder); }
   .dir { padding: 6px 11px; font-size: 13px; line-height: 1; }
-  /* fixed width so toggling "ล่าสุด" <-> "token ที่ใช้" doesn't resize the button */
+  /* fixed width so cycling "ล่าสุด" / "USD" / "token ที่ใช้" doesn't resize the button */
   #sort-field { min-width: 96px; text-align: center; }
   #scope { min-width: 68px; text-align: center; }
-  #metric { min-width: 56px; text-align: center; }
   .b.active { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-color: transparent; font-weight: 600; }
   .pager { display: flex; align-items: center; justify-content: center; gap: 14px; margin-top: 14px; font-size: 12px; }
   .pager .pinfo { opacity: 0.6; font-variant-numeric: tabular-nums; }
@@ -427,10 +426,9 @@ function renderShell(): string {
     <div class="section-k" id="projects-k" style="margin:0">โปรเจกต์</div>
     <div class="sortbar">
       <input class="search" id="proj-search" type="text" placeholder="ค้นหาชื่อโปรเจค…" />
-      <button class="b" id="sort-field" title="สลับเกณฑ์เรียง">ล่าสุด</button>
+      <button class="b" id="sort-field" title="สลับเกณฑ์เรียง: token ที่ใช้ → USD → ล่าสุด">ล่าสุด</button>
       <button class="b dir" id="sort-dir" title="สลับมากไปน้อย / น้อยไปมาก">↓</button>
       <button class="b" id="scope" title="สลับ เดือนนี้ / ทั้งหมด">เดือนนี้</button>
-      <button class="b" id="metric" title="สลับหน่วยที่แสดง USD / token ที่ใช้">USD</button>
     </div>
   </div>
   <div class="rows" id="projects"></div>
@@ -528,7 +526,9 @@ function renderShell(): string {
   }
 
   var PAGE_SIZE = 10;
-  var STATE = { view: null, sortKey: "recent", sortDir: "desc", scope: "month", query: "", page: 0, maxCost: 0, metric: "usd" };
+  // sortKey cycles: "tokens" (token usage) → "usd" (USD cost) → "recent" (ล่าสุด).
+  // It also drives what's shown big + the bar: "tokens" → tokens, otherwise USD cost.
+  var STATE = { view: null, sortKey: "recent", sortDir: "desc", scope: "month", query: "", page: 0, maxCost: 0, maxTokens: 0 };
 
   function renderProjects() {
     var v = STATE.view;
@@ -544,7 +544,10 @@ function renderShell(): string {
     // sort by chosen key + direction; break exact ties by name so the order is
     // stable (never depends on Map/insertion order).
     list.sort(function (a, b) {
-      var d = STATE.sortKey === "tokens" ? a.tokens - b.tokens : a.lastMs - b.lastMs;
+      var d;
+      if (STATE.sortKey === "tokens") d = a.tokens - b.tokens;
+      else if (STATE.sortKey === "usd") d = a.cost - b.cost;
+      else d = a.lastMs - b.lastMs;
       if (d === 0) return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
       return STATE.sortDir === "desc" ? -d : d;
     });
@@ -556,9 +559,9 @@ function renderShell(): string {
     var slice = list.slice(start, start + PAGE_SIZE);
 
     document.getElementById("projects-k").textContent = "โปรเจกต์ (" + total + ")";
-    document.getElementById("sort-field").textContent = STATE.sortKey === "tokens" ? "token ที่ใช้" : "ล่าสุด";
+    document.getElementById("sort-field").textContent =
+      STATE.sortKey === "tokens" ? "token ที่ใช้" : STATE.sortKey === "usd" ? "USD" : "ล่าสุด";
     document.getElementById("sort-dir").textContent = STATE.sortDir === "desc" ? "↓" : "↑";
-    document.getElementById("metric").textContent = STATE.metric === "tokens" ? "token" : "USD";
     var scopeBtn = document.getElementById("scope");
     scopeBtn.textContent = STATE.scope === "all" ? "ทั้งหมด" : "เดือนนี้";
     scopeBtn.classList[STATE.scope === "all" ? "add" : "remove"]("active");
@@ -571,11 +574,14 @@ function renderShell(): string {
     }
     el.innerHTML = slice
       .map(function (p, i) {
-        var pct = STATE.maxCost > 0 ? Math.max(3, Math.round((p.cost / STATE.maxCost) * 100)) : 0;
+        // display + bar follow the sort mode: token usage → tokens, otherwise USD cost
+        var showTokens = STATE.sortKey === "tokens";
+        var val = showTokens ? p.tokens : p.cost;
+        var max = showTokens ? STATE.maxTokens : STATE.maxCost;
+        var pct = max > 0 ? Math.max(3, Math.round((val / max) * 100)) : 0;
         var rank = start + i + 1;
-        // metric toggle: "usd" → cost big, tokens small (default) · "tokens" → swapped
-        var big = STATE.metric === "tokens" ? esc(fmtTokens(p.tokens)) : money(p.costFmt);
-        var small = STATE.metric === "tokens" ? money(p.costFmt) : esc(fmtTokens(p.tokens));
+        var big = showTokens ? esc(fmtTokens(p.tokens)) : money(p.costFmt);
+        var small = showTokens ? money(p.costFmt) : esc(fmtTokens(p.tokens));
         return (
           '<div class="prow" data-key="' + esc(p.path) + '"><div class="rank">' + rank + "</div>" +
           '<div class="pth"><div class="path" title="' + esc(p.path) + '">' + esc(p.name) + "</div>" +
@@ -601,6 +607,7 @@ function renderShell(): string {
     hideTip(); // a repaint replaces the row DOM; drop any tip anchored to it
     STATE.view = v;
     STATE.maxCost = (v.projects || []).reduce(function (m, x) { return x.cost > m ? x.cost : m; }, 0);
+    STATE.maxTokens = (v.projects || []).reduce(function (m, x) { return x.tokens > m ? x.tokens : m; }, 0);
     document.getElementById("hero").innerHTML = money(v.monthFmt);
 
     const tiles = [
@@ -663,10 +670,9 @@ function renderShell(): string {
     if (t.id === "refresh") post("reload");
     else if (t.id === "setcap") post("setCap");
     else if (t.id === "clearcap") post("clearCap");
-    else if (t.id === "sort-field") { STATE.sortKey = STATE.sortKey === "recent" ? "tokens" : "recent"; STATE.page = 0; renderProjects(); }
+    else if (t.id === "sort-field") { STATE.sortKey = STATE.sortKey === "tokens" ? "usd" : STATE.sortKey === "usd" ? "recent" : "tokens"; STATE.page = 0; renderProjects(); }
     else if (t.id === "sort-dir") { STATE.sortDir = STATE.sortDir === "desc" ? "asc" : "desc"; STATE.page = 0; renderProjects(); }
     else if (t.id === "scope") { STATE.scope = STATE.scope === "month" ? "all" : "month"; STATE.page = 0; renderProjects(); }
-    else if (t.id === "metric") { STATE.metric = STATE.metric === "usd" ? "tokens" : "usd"; renderProjects(); }
     else if (t.id === "pg-prev") { STATE.page -= 1; renderProjects(); }
     else if (t.id === "pg-next") { STATE.page += 1; renderProjects(); }
   });
