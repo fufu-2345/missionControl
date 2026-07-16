@@ -160,3 +160,40 @@ export function parseStateValue(raw: string, key: string): string | null {
   }
   return null;
 }
+
+/** The `projects/` directories to scan for resumable projects, given the owner
+ *  root (`.../github.com/<owner>`). Location-tolerant: besides `<ownerRoot>/projects`
+ *  it also derives the ghq root (strip the trailing `/github.com/<owner>`) and adds
+ *  `<ghqRoot>/projects` — so a project accidentally built in the stray
+ *  `soulbrew/projects` still shows up (the agentskill-marketplace-newFlow case),
+ *  not just ones under the canonical owner-root. Owner-root's dir comes FIRST so it
+ *  wins realpath-dedup (canonical path kept for display). Pure (no fs). */
+export function projectScanDirs(ownerRoot: string): string[] {
+  const dirs = [`${ownerRoot}/projects`];
+  const m = ownerRoot.match(/^(.*)\/github\.com\/[^/]+$/);
+  if (m && m[1] && m[1] !== ownerRoot) dirs.push(`${m[1]}/projects`);
+  return [...new Set(dirs)];
+}
+
+/** Dedupe candidate project paths by their real (symlink-resolved) location,
+ *  keeping the FIRST occurrence's path for display. Prevents a symlink that
+ *  bridges the two `projects/` dirs (e.g. a soulbrew/projects entry pointing into
+ *  owner-root/projects) from listing the same project twice. `realpath` is injected
+ *  so this stays pure/testable; if it throws (missing/broken link) we fall back to
+ *  the raw path as the key (still deduped against identical raw paths). */
+export function dedupeByRealpath(paths: string[], realpath: (p: string) => string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const p of paths) {
+    let key: string;
+    try {
+      key = realpath(p);
+    } catch {
+      key = p;
+    }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(p);
+  }
+  return out;
+}

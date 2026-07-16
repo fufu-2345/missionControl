@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import { buildResumeKickoff } from "./teams";
 import {
   classifyDriven,
+  dedupeByRealpath,
   defaultTeamForProject,
   isProjectLive,
   isResumable,
@@ -10,6 +11,7 @@ import {
   parsePlan,
   parseStateValue,
   partitionStarred,
+  projectScanDirs,
   type ResumableProject,
   serializeOrchesMeta,
   sortResumable,
@@ -137,6 +139,35 @@ test("buildResumeKickoff: names project + tells it NOT to ask a new requirement"
   expect(k).toContain("อย่าถาม build requirement ใหม่");
   expect(k).toContain("foreman");
   expect(k).toContain("bob, jack");
+});
+
+test("projectScanDirs: scans owner-root/projects AND the derived ghq-root/projects (location-tolerant)", () => {
+  // owner root = <ghqRoot>/github.com/<owner> → also scan <ghqRoot>/projects
+  // (a project built in the stray soulbrew/projects still gets surfaced)
+  expect(projectScanDirs("/home/u/soulbrew/github.com/acme")).toEqual([
+    "/home/u/soulbrew/github.com/acme/projects",
+    "/home/u/soulbrew/projects",
+  ]);
+  // no /github.com/<owner> segment → cannot derive ghq root → only own projects
+  expect(projectScanDirs("/weird/root")).toEqual(["/weird/root/projects"]);
+});
+
+test("dedupeByRealpath: a symlink and its target collapse to ONE (first occurrence kept)", () => {
+  // ghq/projects/newFlow is a symlink INTO owner/projects/newFlow → one entry, owner path kept
+  const realpath = (p: string) =>
+    p === "/ghq/projects/newFlow" ? "/owner/projects/newFlow" : p;
+  expect(
+    dedupeByRealpath(
+      ["/owner/projects/newFlow", "/ghq/projects/newFlow", "/ghq/projects/other"],
+      realpath,
+    ),
+  ).toEqual(["/owner/projects/newFlow", "/ghq/projects/other"]);
+  // realpath throws (missing/broken symlink) → fall back to the path itself, still deduped
+  const throwing = (p: string) => {
+    if (p === "/gone") throw new Error("ENOENT");
+    return p;
+  };
+  expect(dedupeByRealpath(["/gone", "/gone", "/a"], throwing)).toEqual(["/gone", "/a"]);
 });
 
 test("toggleStar: add if absent, remove if present, never mutates input", () => {

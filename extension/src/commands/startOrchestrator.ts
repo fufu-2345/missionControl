@@ -29,6 +29,7 @@ import {
 } from "./continueRun";
 import {
   classifyDriven,
+  dedupeByRealpath,
   defaultTeamForProject,
   type DrivenState,
   isProjectLive,
@@ -36,6 +37,7 @@ import {
   parseOrchesMeta,
   parsePlan,
   parseStateValue,
+  projectScanDirs,
   type ResumableProject,
   serializeOrchesMeta,
   sortResumable,
@@ -195,13 +197,19 @@ export function scanResumableProjects(): ResumableProject[] {
   const root = resolveOwnerRoot();
   if (!root) return [];
   const candidates: string[] = [];
-  try {
-    for (const n of fs.readdirSync(path.join(root, "projects"))) {
-      if (n === "ψ" || n.startsWith(".")) continue;
-      candidates.push(path.join(root, "projects", n));
+  // Location-tolerant: scan the canonical owner-root/projects AND the ghq-root/projects
+  // (derived by projectScanDirs) so a project accidentally built in the stray
+  // soulbrew/projects still appears — matching where the Budget page attributes it.
+  // owner-root's dir is scanned FIRST so it wins the realpath-dedup below.
+  for (const projectsDir of projectScanDirs(root)) {
+    try {
+      for (const n of fs.readdirSync(projectsDir)) {
+        if (n === "ψ" || n.startsWith(".")) continue;
+        candidates.push(path.join(projectsDir, n));
+      }
+    } catch {
+      /* no such projects/ dir */
     }
-  } catch {
-    /* no projects/ dir */
   }
   try {
     for (const n of fs.readdirSync(root)) {
@@ -220,8 +228,10 @@ export function scanResumableProjects(): ResumableProject[] {
   } catch {
     /* ignore */
   }
+  // Collapse symlink duplicates: a soulbrew/projects entry that points into
+  // owner-root/projects (e.g. a bridge symlink) must not list the project twice.
   const out: ResumableProject[] = [];
-  for (const p of candidates) {
+  for (const p of dedupeByRealpath(candidates, (q) => fs.realpathSync(q))) {
     const sprintDocs = countSprintDocs(p);
     const openWorktrees = countOpenAgentWorktrees(p);
     const plan = readPlan(p);
