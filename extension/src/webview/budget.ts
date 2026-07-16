@@ -1,10 +1,9 @@
-import * as fs from "node:fs";
 import * as os from "node:os";
-import * as path from "node:path";
 
 import * as vscode from "vscode";
 
 import { type ProjectDetail, buildDetail } from "../budget-detail";
+import { openBudgetDetailPanel } from "./budget-detail-page";
 import {
   MONTHLY_CAP_KEY,
   type Breakdown,
@@ -16,6 +15,7 @@ import {
   localMonthKey,
   localTodayKey,
   refreshUsage,
+  resolveProject,
   sumByPrefix,
   unwiredProviders,
 } from "../usage";
@@ -30,34 +30,8 @@ let _panel: vscode.WebviewPanel | undefined;
 
 const fmt = (n: number) => "$" + n.toFixed(2);
 
-/** A "project" is any directory that lives under a `projects/` folder — that's
- *  where the /orches build projects go (github.com/…/projects/<name>). Given a
- *  recorded cwd, resolve it to that project (root = `…/projects/<name>`, so all
- *  the sub-dir cwds Claude Code logs — <name>/src, <name>/src/cmds, … — collapse
- *  onto one entry). Returns null for anything not under a projects/ folder
- *  (oracles, tools, home) or that is transient / gone. */
-function resolveProject(cwd: string): { root: string; name: string } | null {
-  const segs = cwd.split(path.sep);
-  // last "projects" segment that still has a child (the project name)
-  let idx = -1;
-  for (let i = 0; i < segs.length; i++) {
-    if (segs[i] === "projects" && i + 1 < segs.length) idx = i;
-  }
-  if (idx < 0) return null;
-  const root = segs.slice(0, idx + 2).join(path.sep);
-  // Drop Claude Code's own session store (~/.claude/projects/*) and temp dirs —
-  // they contain a "projects" segment too but aren't user projects.
-  const home = os.homedir();
-  const rel = root.startsWith(home) ? root.slice(home.length) : root;
-  if (rel.split(path.sep).some((s) => s.startsWith("."))) return null;
-  if (root === "/tmp" || root.startsWith("/tmp/")) return null;
-  try {
-    if (!fs.statSync(root).isDirectory()) return null;
-  } catch {
-    return null; // deleted / gone
-  }
-  return { root, name: segs[idx + 1] };
-}
+// resolveProject (cwd -> project root/name, the projects/ grouping) now lives in
+// usage.ts so the detail page can reuse the exact same grouping — imported above.
 
 export interface BudgetView {
   monthFmt: string;
@@ -275,6 +249,19 @@ export function openBudgetPanel(context: vscode.ExtensionContext): vscode.Webvie
         pushCap(context, panel);
         return;
       }
+
+      case "openProjectDetail": {
+        const { projectPath, projectName } = msg;
+        if (typeof projectPath !== "string" || typeof projectName !== "string") return;
+        // projectPath is the display path ("~/…") — expand ~ back to an absolute
+        // root so collapseProjectHours can match it against the cwd keys.
+        const absRoot = projectPath.startsWith("~")
+          ? os.homedir() + projectPath.slice(1)
+          : projectPath;
+        const current = (await getInstantUsage()) ?? (await computeUsage());
+        openBudgetDetailPanel(absRoot, projectName, current);
+        return;
+      }
     }
   });
 
@@ -394,48 +381,28 @@ function renderShell(): string {
     border-top: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.2));
   }
 
-  /* project row is clickable -> opens the token breakdown popup */
+  /* project row is clickable -> opens detail view; hovering shows the pie tip */
   .prow { cursor: pointer; transition: border-color 0.12s; }
   .prow:hover { border-color: var(--vscode-focusBorder); }
 
-  #modal-bg {
-    display: none; position: fixed; inset: 0; z-index: 50;
-    background: rgba(0,0,0,0.5); align-items: center; justify-content: center; padding: 24px;
-  }
-  #modal {
-    position: relative; width: 100%; max-width: 380px;
-    background: var(--vscode-editor-background);
-    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35));
-    border-radius: 12px; padding: 20px 22px; box-shadow: 0 8px 32px rgba(0,0,0,0.4);
-  }
-  #modal-x {
-    position: absolute; top: 10px; right: 12px; background: transparent;
-    color: var(--vscode-foreground); border: none; font-size: 15px; cursor: pointer; opacity: 0.6; line-height: 1;
-  }
-  #modal-x:hover { opacity: 1; }
-  #modal-head { margin-bottom: 16px; padding-right: 20px; }
-  .m-name { font-size: 15px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .m-total { font-size: 12px; opacity: 0.6; margin-top: 3px; font-variant-numeric: tabular-nums; }
-  .m-chart { display: flex; justify-content: center; margin-bottom: 16px; }
-  .pie { width: 170px; height: 170px; }
-  .pie path, .pie circle { stroke: var(--vscode-editor-background); stroke-width: 1.5; transition: opacity 0.12s; }
-  .pie path:hover, .pie circle:hover { opacity: 0.85; }
-  .m-legend { display: flex; flex-direction: column; gap: 7px; }
-  .lg { display: grid; grid-template-columns: 14px 1fr auto auto; align-items: center; gap: 9px; font-size: 12.5px; cursor: default; }
-  .lg .sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
-  .lg-label { opacity: 0.85; }
-  .lg-text { font-variant-numeric: tabular-nums; opacity: 0.7; }
-  .lg-pct { font-variant-numeric: tabular-nums; font-weight: 600; min-width: 42px; text-align: right; }
-  .m-empty { opacity: 0.6; font-size: 13px; padding: 12px 0; text-align: center; }
-
+  /* floating token-breakdown pie, shown on row hover (pointer-events:none so it
+     never eats the click that opens the detail view) */
   #tip {
-    display: none; position: fixed; z-index: 60; pointer-events: none; max-width: 240px;
-    padding: 7px 10px; border-radius: 6px; font-size: 11.5px; line-height: 1.45;
-    background: var(--vscode-editorHoverWidget-background, #252526);
-    color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground));
-    border: 1px solid var(--vscode-editorHoverWidget-border, rgba(128,128,128,0.4));
-    box-shadow: 0 2px 10px rgba(0,0,0,0.35);
+    position: fixed; z-index: 50; pointer-events: none; display: none; max-width: 300px;
+    background: var(--vscode-editorHoverWidget-background, var(--vscode-editor-background));
+    border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-panel-border, rgba(128,128,128,0.4)));
+    border-radius: 10px; padding: 12px 14px; box-shadow: 0 6px 24px rgba(0,0,0,0.28); font-size: 12px;
   }
+  #tip .t-name { font-weight: 700; font-size: 13px; margin-bottom: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #tip .t-total { opacity: 0.7; margin-bottom: 10px; font-variant-numeric: tabular-nums; }
+  #tip .t-wrap { display: flex; gap: 13px; align-items: center; }
+  #tip .pie { width: 88px; height: 88px; border-radius: 50%; flex-shrink: 0; }
+  #tip .t-legend { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  #tip .lg { display: flex; align-items: center; gap: 7px; font-size: 11px; white-space: nowrap; }
+  #tip .sw { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+  #tip .lg .lb { opacity: 0.72; }
+  #tip .lg .vl { margin-left: auto; padding-left: 10px; font-variant-numeric: tabular-nums; opacity: 0.92; }
+  #tip .t-empty { opacity: 0.6; }
 </style>
 </head>
 <body>
@@ -472,11 +439,6 @@ function renderShell(): string {
   <div class="foot" id="foot"></div>
 </div>
 
-<div id="modal-bg"><div id="modal">
-  <button id="modal-x" title="ปิด">✕</button>
-  <div id="modal-head"></div>
-  <div id="modal-body"></div>
-</div></div>
 <div id="tip"></div>
 
 <script>
@@ -498,6 +460,72 @@ function renderShell(): string {
 
   var TOKFMT = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
   function fmtTokens(n) { return TOKFMT.format(n || 0) + " tok"; }
+
+  // ── Hover pie: the per-project token breakdown, shown as a floating tip while
+  // the cursor is over a project row. Data rides on each project's .detail
+  // (slices/totalText/hasCost from buildDetail). Click still opens the detail
+  // view — the tip is pointer-events:none so it never intercepts the click.
+  function pieBg(slices) {
+    var total = 0, i;
+    for (i = 0; i < slices.length; i++) total += slices[i].cost;
+    if (total <= 0) return "transparent";
+    var acc = 0, stops = [];
+    for (i = 0; i < slices.length; i++) {
+      var start = (acc / total) * 360;
+      acc += slices[i].cost;
+      var end = (acc / total) * 360;
+      stops.push(slices[i].color + " " + start.toFixed(2) + "deg " + end.toFixed(2) + "deg");
+    }
+    return "conic-gradient(" + stops.join(", ") + ")";
+  }
+  function tipHtml(p) {
+    var d = p.detail || {};
+    var html = '<div class="t-name">' + esc(p.name) + "</div>";
+    html += '<div class="t-total">' + esc(d.totalText || "") + "</div>";
+    if (!d.hasCost) return html + '<div class="t-empty">ยังไม่มียอดใช้จ่ายที่คิดเงิน</div>';
+    var slices = d.slices || [];
+    html += '<div class="t-wrap"><div class="pie" style="background:' + pieBg(slices) + '"></div>';
+    html += '<div class="t-legend">';
+    for (var i = 0; i < slices.length; i++) {
+      var s = slices[i];
+      html += '<div class="lg" title="' + esc(s.meaning || "") + '">' +
+        '<span class="sw" style="background:' + s.color + '"></span>' +
+        '<span class="lb">' + esc(s.label) + "</span>" +
+        '<span class="vl">' + esc(s.text) + "</span></div>";
+    }
+    return html + "</div></div>";
+  }
+  function projFromKey(key) {
+    var v = STATE.view;
+    if (!v) return null;
+    var list = v.projects || [];
+    for (var i = 0; i < list.length; i++) if (list[i].path === key) return list[i];
+    return null;
+  }
+  function positionTip(x, y) {
+    var tip = document.getElementById("tip");
+    var w = tip.offsetWidth, h = tip.offsetHeight;
+    var nx = x + 16, ny = y + 16;
+    if (nx + w > window.innerWidth - 8) nx = x - w - 16;
+    if (ny + h > window.innerHeight - 8) ny = window.innerHeight - h - 8;
+    if (nx < 8) nx = 8;
+    if (ny < 8) ny = 8;
+    tip.style.left = nx + "px";
+    tip.style.top = ny + "px";
+  }
+  var TIP_KEY = null;
+  function hideTip() { document.getElementById("tip").style.display = "none"; TIP_KEY = null; }
+  function updateTip(e) {
+    var t = e.target;
+    var row = t && t.closest ? t.closest(".prow") : null;
+    var key = row ? row.getAttribute("data-key") : null;
+    if (!key) { if (TIP_KEY) hideTip(); return; }
+    var p = projFromKey(key);
+    if (!p) { if (TIP_KEY) hideTip(); return; }
+    var tip = document.getElementById("tip");
+    if (TIP_KEY !== key) { tip.innerHTML = tipHtml(p); tip.style.display = "block"; TIP_KEY = key; }
+    positionTip(e.clientX, e.clientY);
+  }
 
   var PAGE_SIZE = 10;
   var STATE = { view: null, sortKey: "recent", sortDir: "desc", scope: "month", query: "", page: 0, maxCost: 0, metric: "usd" };
@@ -570,6 +598,7 @@ function renderShell(): string {
   }
 
   function render(v) {
+    hideTip(); // a repaint replaces the row DOM; drop any tip anchored to it
     STATE.view = v;
     STATE.maxCost = (v.projects || []).reduce(function (m, x) { return x.cost > m ? x.cost : m; }, 0);
     document.getElementById("hero").innerHTML = money(v.monthFmt);
@@ -615,12 +644,21 @@ function renderShell(): string {
   document.addEventListener("click", function (e) {
     var t = e.target;
     if (!t) return;
-    // clicking anywhere on a project row opens its token breakdown popup
+    // clicking anywhere on a project row opens detail view
     // (row children have no id, so this must run before the id checks)
     var row = t.closest ? t.closest(".prow") : null;
-    if (row && row.getAttribute("data-key")) { openModal(row.getAttribute("data-key")); return; }
-    // close the popup: the X button, or a click on the dim backdrop itself
-    if (t.id === "modal-x" || t.id === "modal-bg") { closeModal(); return; }
+    if (row && row.getAttribute("data-key")) {
+      var v = STATE.view;
+      if (!v) return;
+      var list = v.projects || [];
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].path === row.getAttribute("data-key")) {
+          vscode.postMessage({ type: "openProjectDetail", projectPath: list[i].path, projectName: list[i].name });
+          return;
+        }
+      }
+      return;
+    }
     if (!t.id) return;
     if (t.id === "refresh") post("reload");
     else if (t.id === "setcap") post("setCap");
@@ -638,113 +676,13 @@ function renderShell(): string {
     if (t && t.id === "proj-search") { STATE.query = t.value || ""; STATE.page = 0; renderProjects(); }
   });
 
+  document.addEventListener("mousemove", updateTip);
+  document.addEventListener("mouseleave", hideTip);
+  window.addEventListener("scroll", hideTip, true);
+
   window.addEventListener("message", function (ev) {
     const m = ev.data;
     if (m && m.type === "budget") render(m);
-  });
-
-  // ── Per-project token breakdown popup (pie + legend + hover tooltip) ─────────
-  var MODAL_SLICES = {}; // key -> slice, for tooltip lookup while a popup is open
-
-  function openModal(key) {
-    var v = STATE.view;
-    if (!v) return;
-    var list = v.projects || [];
-    var p = null;
-    for (var i = 0; i < list.length; i++) { if (list[i].path === key) { p = list[i]; break; } }
-    if (!p) return;
-    var d = p.detail || { slices: [], totalText: "", hasCost: false };
-    MODAL_SLICES = {};
-    for (var j = 0; j < d.slices.length; j++) MODAL_SLICES[d.slices[j].key] = d.slices[j];
-    document.getElementById("modal-head").innerHTML =
-      '<div class="m-name" title="' + esc(p.path) + '">' + esc(p.name) + "</div>" +
-      '<div class="m-total">' + esc(d.totalText) + "</div>";
-    var body = document.getElementById("modal-body");
-    if (!d.hasCost) {
-      body.innerHTML = '<div class="m-empty">ไม่มีค่าใช้จ่ายที่คิดเงินได้สำหรับโปรเจกต์นี้</div>';
-    } else {
-      body.innerHTML =
-        '<div class="m-chart">' + pieSvg(d.slices) + "</div>" +
-        '<div class="m-legend">' + legendHtml(d.slices) + "</div>";
-    }
-    document.getElementById("modal-bg").style.display = "flex";
-  }
-
-  function legendHtml(slices) {
-    return slices
-      .map(function (s) {
-        return (
-          '<div class="lg" data-k="' + esc(s.key) + '">' +
-          '<span class="sw" style="background:' + esc(s.color) + '"></span>' +
-          '<span class="lg-label">' + esc(s.label) + "</span>" +
-          '<span class="lg-text">' + esc(s.text) + "</span>" +
-          '<span class="lg-pct">' + esc(String(s.pct)) + "%</span></div>"
-        );
-      })
-      .join("");
-  }
-
-  // Hand-drawn SVG pie (no external chart lib). Slices sized by cost; each path
-  // carries data-k so hovering shows that category's meaning.
-  function pieSvg(slices) {
-    var draw = [];
-    var sum = 0;
-    for (var i = 0; i < slices.length; i++) {
-      if (slices[i].cost > 0) { draw.push(slices[i]); sum += slices[i].cost; }
-    }
-    if (!draw.length || sum <= 0) return "";
-    var svg = '<svg viewBox="0 0 200 200" class="pie">';
-    if (draw.length === 1) {
-      return (
-        svg +
-        '<circle cx="100" cy="100" r="92" fill="' + esc(draw[0].color) +
-        '" data-k="' + esc(draw[0].key) + '"></circle></svg>'
-      );
-    }
-    var ang = -90; // start at 12 o'clock
-    for (var k = 0; k < draw.length; k++) {
-      var a0 = ang;
-      var a1 = ang + (draw[k].cost / sum) * 360;
-      ang = a1;
-      var large = a1 - a0 > 180 ? 1 : 0;
-      var x0 = (100 + 92 * Math.cos((a0 * Math.PI) / 180)).toFixed(2);
-      var y0 = (100 + 92 * Math.sin((a0 * Math.PI) / 180)).toFixed(2);
-      var x1 = (100 + 92 * Math.cos((a1 * Math.PI) / 180)).toFixed(2);
-      var y1 = (100 + 92 * Math.sin((a1 * Math.PI) / 180)).toFixed(2);
-      svg +=
-        '<path d="M100 100 L' + x0 + " " + y0 + " A92 92 0 " + large + " 1 " + x1 + " " + y1 +
-        ' Z" fill="' + esc(draw[k].color) + '" data-k="' + esc(draw[k].key) + '"></path>';
-    }
-    return svg + "</svg>";
-  }
-
-  function closeModal() {
-    document.getElementById("modal-bg").style.display = "none";
-    hideTip();
-  }
-
-  function showTip(key, x, y) {
-    var s = MODAL_SLICES[key];
-    if (!s) { hideTip(); return; }
-    var tip = document.getElementById("tip");
-    tip.innerHTML = "<b>" + esc(s.label) + "</b><br>" + esc(s.meaning);
-    tip.style.display = "block";
-    tip.style.left = x + 14 + "px";
-    tip.style.top = y + 14 + "px";
-  }
-  function hideTip() { document.getElementById("tip").style.display = "none"; }
-
-  // One handler drives show/move/hide: only while a popup is open, and only when
-  // the cursor is over a slice or legend row (both tagged data-k).
-  document.addEventListener("mousemove", function (e) {
-    if (document.getElementById("modal-bg").style.display !== "flex") return;
-    var t = e.target;
-    var el = t && t.closest ? t.closest("[data-k]") : null;
-    if (el) showTip(el.getAttribute("data-k"), e.clientX, e.clientY);
-    else hideTip();
-  });
-  document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape") closeModal();
   });
 
   post("ready");

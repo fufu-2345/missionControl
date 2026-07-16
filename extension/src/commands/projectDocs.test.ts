@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import {
+  listDetailDocs,
   listProjectDocs,
   listProjectTree,
   renderMarkdown,
@@ -99,6 +100,40 @@ test("listProjectTree: dirs first then files (alpha), .md-only, empty branches p
 
 test("listProjectTree: missing project dir yields empty array, no throw", () => {
   expect(listProjectTree(path.join(os.tmpdir(), "mc-no-such-" + process.pid))).toEqual([]);
+});
+
+test("listDetailDocs: docs top level = wiki/ + virtual sprint/ + plan.md; README → dropdown, not tree", () => {
+  const p = tmpProject(); // makes docs/wiki/decisions
+  fs.writeFileSync(path.join(p, "README.md"), "# root readme");
+  fs.writeFileSync(path.join(p, "docs", "plan.md"), "# plan");
+  fs.writeFileSync(path.join(p, "docs", "README.md"), "# docs readme"); // excluded from tree
+  fs.writeFileSync(path.join(p, "docs", "wiki", "overview.md"), "# o");
+  const proj = path.basename(p);
+  fs.writeFileSync(path.join(p, "docs", proj + "-sprint-2.md"), "s2");
+  fs.writeFileSync(path.join(p, "docs", proj + "-sprint-10.md"), "s10");
+  fs.writeFileSync(path.join(p, "docs", "sprint-1.md"), "s1"); // legacy flat name
+
+  const d = listDetailDocs(p);
+  expect(d.readme?.rel).toBe("README.md"); // root README wins, for the dropdown
+  // top level: wiki/ (dir) → sprint/ (virtual dir) → plan.md (file); README.md absent
+  expect(names(d.tree)).toEqual(["wiki/", "sprint/", "plan.md"]);
+  const sprint = d.tree.find((n) => n.name === "sprint")!;
+  // grouped + shortened + numeric order; each keeps its real docs/ rel for opening
+  expect(names(sprint.children!)).toEqual(["sprint-1.md", "sprint-2.md", "sprint-10.md"]);
+  expect(sprint.children!.map((c) => c.rel)).toEqual([
+    "docs/sprint-1.md",
+    "docs/" + proj + "-sprint-2.md",
+    "docs/" + proj + "-sprint-10.md",
+  ]);
+  const wiki = d.tree.find((n) => n.name === "wiki")!;
+  expect(names(wiki.children!)).toEqual(["overview.md"]);
+});
+
+test("listDetailDocs: no README, no docs dir → null readme + empty tree, no throw", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "mc-detail-empty-"));
+  const d = listDetailDocs(base);
+  expect(d.readme).toBeNull();
+  expect(d.tree).toEqual([]);
 });
 
 test("resolveProjectFile: accepts any .md under project, rejects traversal, non-md, missing", () => {

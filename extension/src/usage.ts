@@ -32,6 +32,10 @@ export interface UsageSummary {
   byDay: Record<string, Bucket>; // key "YYYY-MM-DD" in LOCAL time (matches the user's clock)
   byProject: Record<string, Bucket>; // key = cwd
   byProjectDetail: Record<string, Breakdown>; // key = cwd -> per-category token/cost split
+  // cwd -> ("YYYY-MM-DD HH:00" LOCAL) -> bucket. The per-project usage-over-time
+  // data the detail page charts. Kept per-cwd (not pre-collapsed) so the SAME
+  // resolveProject grouping the budget page uses can fold sub-dir cwds together.
+  byProjectHour: Record<string, Record<string, Bucket>>;
   projectLastMs: Record<string, number>; // key = cwd -> latest touched session mtime (ms)
   fileCount: number;
   computedAt: number;
@@ -51,6 +55,15 @@ function fmtLocalDay(d: Date): string {
 function localDayKey(iso: string): string {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? "unknown" : fmtLocalDay(d);
+}
+function localHourKey(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "unknown";
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  const h = String(d.getHours()).padStart(2, "0");
+  return `${y}-${m}-${day} ${h}:00`;
 }
 /** Local "YYYY-MM-DD" for now. */
 export function localTodayKey(): string {
@@ -170,6 +183,7 @@ interface FileAgg extends Bucket {
   size: number;
   byDay: Record<string, Bucket>;
   byProject: Record<string, Bucket>;
+  byProjectHour: Record<string, Record<string, Bucket>>;
   // Per-cwd NEWEST line timestamp (ms). Recency MUST come from the transcript's
   // own timestamps, NOT the file's mtime: one long-lived session file (an orches
   // foreman/worker oracle) touches many projects across many days, so its single
@@ -200,9 +214,12 @@ const CACHE_FILE = path.join(os.homedir(), ".cache", "mission-control", "usage-f
 // table changes or the scan itself changes shape (v2: depth limit 4→12; v3:
 // FileAgg gained projectLastMs — per-project recency now derives from line
 // timestamps, not file mtime; v4: FileAgg/UsageSummary gained byProjectDetail —
-// per-project input/output/cache token+cost split) — so hydrate discards the
-// stale cache and the next scan recomputes everything.
-const CACHE_VERSION = 4;
+// per-project input/output/cache token+cost split; v5: added a global byHour;
+// v6: replaced global byHour with byProjectHour — the hourly series is now kept
+// PER cwd so the detail page can chart one project's usage over time, not the
+// whole machine's) — so hydrate discards the stale cache and the next scan
+// recomputes everything.
+const CACHE_VERSION = 6;
 let hydrated = false;
 
 async function hydrateFileCache(): Promise<void> {
@@ -292,6 +309,19 @@ function bump(map: Record<string, Bucket>, key: string, cost: number, tokens: nu
   b.tokens += tokens;
 }
 
+// bump() into a two-level map (outer key -> inner key -> bucket) — used for the
+// per-project hourly series (cwd -> hour -> bucket).
+function bumpNested(
+  map: Record<string, Record<string, Bucket>>,
+  outer: string,
+  inner: string,
+  cost: number,
+  tokens: number,
+): void {
+  const m = map[outer] || (map[outer] = {});
+  bump(m, inner, cost, tokens);
+}
+
 async function aggregateFile(file: string): Promise<FileAgg | null> {
   const agg: FileAgg = {
     mtimeMs: 0,
@@ -300,6 +330,7 @@ async function aggregateFile(file: string): Promise<FileAgg | null> {
     tokens: 0,
     byDay: {},
     byProject: {},
+    byProjectHour: {},
     projectLastMs: {},
     byProjectDetail: {},
   };
@@ -359,6 +390,9 @@ async function aggregateFile(file: string): Promise<FileAgg | null> {
     const proj = typeof d.cwd === "string" && d.cwd ? d.cwd : "unknown";
     bump(agg.byProject, proj, pl.cost, pl.tokens);
     agg.byProjectDetail[proj] = addBreakdown(agg.byProjectDetail[proj] ?? emptyBreakdown(), pl.bd);
+    // Per-project hour bucket — the detail page's usage-over-time series.
+    const hour = typeof d.timestamp === "string" ? localHourKey(d.timestamp) : "unknown";
+    bumpNested(agg.byProjectHour, proj, hour, pl.cost, pl.tokens);
     // Track this cwd's newest line timestamp (ms) for recency — see FileAgg.
     const tsMs = typeof d.timestamp === "string" ? Date.parse(d.timestamp) : Number.NaN;
     if (!Number.isNaN(tsMs) && tsMs > (agg.projectLastMs[proj] ?? 0)) {
@@ -423,6 +457,7 @@ async function scan(): Promise<UsageSummary> {
   const byDay: Record<string, Bucket> = {};
   const byProject: Record<string, Bucket> = {};
   const byProjectDetail: Record<string, Breakdown> = {};
+  const byProjectHour: Record<string, Record<string, Bucket>> = {};
   const projectLastMs: Record<string, number> = {};
 
   // Read/parse transcripts CONCURRENTLY (bounded) — they're independent, and a
@@ -469,6 +504,11 @@ async function scan(): Promise<UsageSummary> {
     total.cost += agg.cost;
     total.tokens += agg.tokens;
     for (const k of Object.keys(agg.byDay)) bump(byDay, k, agg.byDay[k].cost, agg.byDay[k].tokens);
+    for (const cwd of Object.keys(agg.byProjectHour)) {
+      const inner = agg.byProjectHour[cwd];
+      const dst = byProjectHour[cwd] || (byProjectHour[cwd] = {});
+      for (const hk of Object.keys(inner)) bump(dst, hk, inner[hk].cost, inner[hk].tokens);
+    }
     for (const k of Object.keys(agg.byProject)) {
       bump(byProject, k, agg.byProject[k].cost, agg.byProject[k].tokens);
     }
@@ -488,6 +528,7 @@ async function scan(): Promise<UsageSummary> {
     byDay,
     byProject,
     byProjectDetail,
+    byProjectHour,
     projectLastMs,
     fileCount: files.length,
     computedAt: Date.now(),
@@ -541,6 +582,53 @@ export function sumByPrefix(s: UsageSummary, prefix: string): number {
   let c = 0;
   for (const k of Object.keys(s.byDay)) if (k.startsWith(prefix)) c += s.byDay[k].cost;
   return c;
+}
+
+/** A "project" is any directory that lives under a `projects/` folder — that's
+ *  where the /orches build projects go (github.com/…/projects/<name>). Given a
+ *  recorded cwd, resolve it to that project (root = `…/projects/<name>`, so all
+ *  the sub-dir cwds Claude Code logs — <name>/src, <name>/src/cmds, … — collapse
+ *  onto one entry). Returns null for anything not under a projects/ folder
+ *  (oracles, tools, home) or that is transient / gone. Shared by the budget page
+ *  (row grouping) and the detail page (per-project hour series) so both group
+ *  cwds the same way and their totals line up. */
+export function resolveProject(cwd: string): { root: string; name: string } | null {
+  const segs = cwd.split(path.sep);
+  // last "projects" segment that still has a child (the project name)
+  let idx = -1;
+  for (let i = 0; i < segs.length; i++) {
+    if (segs[i] === "projects" && i + 1 < segs.length) idx = i;
+  }
+  if (idx < 0) return null;
+  const root = segs.slice(0, idx + 2).join(path.sep);
+  // Drop Claude Code's own session store (~/.claude/projects/*) and temp dirs —
+  // they contain a "projects" segment too but aren't user projects.
+  const home = os.homedir();
+  const rel = root.startsWith(home) ? root.slice(home.length) : root;
+  if (rel.split(path.sep).some((s) => s.startsWith("."))) return null;
+  if (root === "/tmp" || root.startsWith("/tmp/")) return null;
+  try {
+    if (!fs.statSync(root).isDirectory()) return null;
+  } catch {
+    return null; // deleted / gone
+  }
+  return { root, name: segs[idx + 1] };
+}
+
+/** Merge every cwd that belongs to project `absRoot` into ONE hour-keyed series
+ *  ("YYYY-MM-DD HH:00" LOCAL -> bucket) — the per-project usage-over-time data
+ *  the detail page charts. Uses the same resolveProject grouping as the budget
+ *  page, so a project's sub-dir cwds fold together and the series totals match
+ *  that project's row. */
+export function collapseProjectHours(u: UsageSummary, absRoot: string): Record<string, Bucket> {
+  const out: Record<string, Bucket> = {};
+  for (const cwd of Object.keys(u.byProjectHour)) {
+    const p = resolveProject(cwd);
+    if (!p || p.root !== absRoot) continue;
+    const inner = u.byProjectHour[cwd];
+    for (const hk of Object.keys(inner)) bump(out, hk, inner[hk].cost, inner[hk].tokens);
+  }
+  return out;
 }
 
 export const MONTHLY_CAP_KEY = "missioncontrol.monthlyCapUsd";

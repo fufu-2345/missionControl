@@ -19,7 +19,7 @@ import {
 } from "../commands/startOrchestrator";
 import { partitionStarred, sortResumable, toggleStar, type ResumableProject } from "../commands/orchestratorResume";
 import { removeProjectDir } from "../commands/deleteProject";
-import { listProjectTree, resolveProjectFile, renderMarkdown } from "../commands/projectDocs";
+import { listDetailDocs, resolveProjectFile, renderMarkdown } from "../commands/projectDocs";
 import {
   isPreviewAvailable,
   isPreviewRunning,
@@ -305,15 +305,17 @@ async function pushTeamsScreen(panel: vscode.WebviewPanel) {
   });
 }
 
-/** Project Detail screen — the hub for one project: a file-explorer of the project's
- *  markdown (folders + .md only; click a folder to drill in, click a file to open it as
- *  a full page over the explorer) + nav (back / close / localhost / ▶ ทำต่อ / GitHub).
- *  Reached by picking any project card; ▶ ทำต่อ carries the attach-or-team-picker logic. */
+/** Project Detail screen — the hub for one project: a README dropdown + an icon-grid
+ *  file-explorer of docs/ (wiki/ · a virtual sprint/ folder · plan.md; click a folder to
+ *  drill in, click a file to open it as a full page over the grid) + nav (.. / close /
+ *  localhost / ▶ ทำต่อ / GitHub). Reached by picking any project card; ▶ ทำต่อ carries
+ *  the attach-or-team-picker logic. */
 async function pushDetailScreen(panel: vscode.WebviewPanel) {
   const p = _st?.project;
   if (!p) return;
   _screen = "detail";
   const githubUrl = await gitOps.getGithubWebUrl(p.path);
+  const docs = listDetailDocs(p.path);
   panel.webview.postMessage({
     type: "screen_detail",
     title: `📁 ${p.name}`,
@@ -321,7 +323,8 @@ async function pushDetailScreen(panel: vscode.WebviewPanel) {
     path: p.path,
     githubUrl, // null → client hides the GitHub button
     preview: { available: isPreviewAvailable(p.path), running: isPreviewRunning(p.path) },
-    tree: listProjectTree(p.path),
+    tree: docs.tree,
+    readme: docs.readme, // null → no README dropdown
   });
 }
 
@@ -846,15 +849,30 @@ function renderShell(): string {
     border: 1px solid var(--vscode-panel-border); background: transparent; color: var(--vscode-foreground); }
   .modal-card .mbtn.primary { border-color: #3f7bd0; color: #fff; background: #1f6feb; }
   .modal-card .mbtn.primary:hover { background: #388bfd; }
-  /* ── Project Detail: markdown file-explorer ── */
-  .fx { display: flex; flex-direction: column; gap: 2px; }
-  .fx-row { display: flex; align-items: center; gap: 9px; padding: 8px 12px; border-radius: 6px;
-    cursor: pointer; user-select: none; }
-  .fx-row:hover { background: var(--vscode-list-hoverBackground); }
-  .fx-ic { flex: 0 0 auto; font-size: 14px; line-height: 1; width: 1.3em; text-align: center; }
-  .fx-name { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .fx-dir .fx-name { font-weight: 600; }
-  .fx-arrow { flex: 0 0 auto; opacity: 0.5; font-size: 15px; }
+  /* ── Project Detail: markdown file-explorer (icon grid, OS file-manager style) ── */
+  .fx { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+    gap: 4px; padding: 10px 2px 4px; }
+  .fx-tile { display: flex; flex-direction: column; align-items: center; gap: 9px;
+    padding: 14px 6px 12px; border-radius: 8px; cursor: pointer; user-select: none; text-align: center; }
+  .fx-tile:hover { background: var(--vscode-list-hoverBackground); }
+  .fx-ic { height: 48px; display: flex; align-items: center; justify-content: center; }
+  .fx-svg { display: block; }
+  .fx-svg-folder { width: 52px; height: 52px; }
+  .fx-svg-md { width: 46px; height: 46px; opacity: 0.85; }
+  .fx-svg-up { width: 15px; height: 15px; }
+  .fx-label { font-size: 12px; line-height: 1.3; word-break: break-word; max-width: 100%; }
+  .fx-dir .fx-label { font-weight: 600; }
+  /* back button = icon + ".." */
+  .iconbtn { display: inline-flex; align-items: center; gap: 5px; }
+  .iconbtn svg { display: block; }
+  /* README inline dropdown */
+  .rm { border: 1px solid var(--vscode-panel-border); border-radius: 6px; overflow: hidden; margin-bottom: 4px; }
+  .rm-head { width: 100%; text-align: left; background: var(--vscode-editor-inactiveSelectionBackground);
+    border: none; color: inherit; padding: 8px 12px; font-size: 12px; font-weight: 600; cursor: pointer;
+    display: flex; gap: 6px; align-items: center; }
+  .rm-head:hover { background: var(--vscode-list-hoverBackground); }
+  .rm-caret { width: 1ch; display: inline-block; opacity: 0.7; }
+  .rm-body { padding: 4px 16px 12px; border-top: 1px solid var(--vscode-panel-border); }
   /* ── Project Detail: a single doc opened as a full page ── */
   .doc-page { padding: 4px 2px 24px; }
   .doc-body { font-size: 13px; line-height: 1.55; }
@@ -1096,25 +1114,41 @@ function renderShell(): string {
   var _docCache = {};        // rel → rendered HTML (or error markup), cached per open
   var _previewRunning = false, _previewAvail = false;
   var _detail = {};          // {title, subtitle, githubUrl} — kept so we can re-render the explorer header
-  var _tree = [];            // root TreeNode[] for this project (folders + .md only)
-  var _navStack = [];        // folder names from root → current folder ([] = root)
+  var _tree = [];            // docs TreeNode[] (wiki/ · virtual sprint/ · plan.md)
+  var _readme = null;        // {rel,label} of the README shown as a dropdown, or null
+  var _navStack = [];        // folder names from docs root → current folder ([] = docs root)
   var _viewingDoc = null;    // rel of the .md open as a full page, or null while in the explorer
 
+  // ── Icons (inline SVG so they render like the OS file-manager, no external assets) ──
+  var _icoFolder = '<svg class="fx-svg fx-svg-folder" viewBox="0 0 24 24" aria-hidden="true">'
+    + '<path fill="#c98a2b" d="M3 6.2c0-.8.7-1.5 1.5-1.5h4.3c.5 0 1 .2 1.3.6l1.1 1.4h7c.8 0 1.5.7 1.5 1.5V18c0 .8-.7 1.5-1.5 1.5h-15C3.7 19.5 3 18.8 3 18z"/>'
+    + '<path fill="#e8ab45" d="M3 9.2h18V18c0 .8-.7 1.5-1.5 1.5h-15C3.7 19.5 3 18.8 3 18z"/></svg>';
+  // the standard Markdown mark (rounded rect + "M" + down-arrow), in the text colour
+  var _icoMd = '<svg class="fx-svg fx-svg-md" viewBox="0 0 208 128" aria-hidden="true">'
+    + '<rect x="5" y="5" width="198" height="118" rx="10" ry="10" fill="none" stroke="currentColor" stroke-width="12"/>'
+    + '<path fill="currentColor" d="M30 98V30h20l20 25 20-25h20v68H90V59L70 84 50 59v39zm125 0l-30-33h20V30h20v35h20z"/></svg>';
+  // a "return / up a level" arrow for the back button labelled ".."
+  var _icoUp = '<svg class="fx-svg fx-svg-up" viewBox="0 0 24 24" aria-hidden="true">'
+    + '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'
+    + ' d="M10 15 5 10l5-5M5 10h9a5 5 0 0 1 5 5v4"/></svg>';
+
+  function backBtnHtml(){ return '<button id="backBtn" class="iconbtn" title="ขึ้นบน / ย้อนกลับ">'+_icoUp+'<span>..</span></button>'; }
   function detailActionsHtml(githubUrl){
     var lh = _previewAvail
       ? '<button id="lhBtn" title="รัน dev server แล้วเปิด browser (กดซ้ำ = หยุด)">'
           + (_previewRunning ? '⏹ หยุด' : '🌐 localhost') + '</button>'
       : '<button id="lhBtn" class="disabled" disabled title="โปรเจคนี้ไม่มี .orches-preview.sh — เปิด localhost ไม่ได้">🌐 localhost</button>';
-    return '<button id="backBtn">← กลับ</button>'
+    // ".." shows only in a subfolder — at the docs root there's nothing above to go to.
+    return (_navStack.length ? backBtnHtml() : '')
       + '<button id="closeBtn">✕ ปิด</button>'
       + lh
       + '<button id="contBtn" title="ไปเลือกทีม / เข้า session ที่ทำอยู่" style="border-color:#2ea043;color:#3fb950;">▶ ทำต่อ</button>'
       + (githubUrl ? '<button id="ghBtn" title="เปิด repo นี้ใน GitHub (browser)">🔗 GitHub</button>' : '');
   }
   function wireDetailActions(){
-    // Explorer back: inside a subfolder → up one level; at the root → out to Projects.
+    // Explorer back (labelled ".."): only rendered inside a subfolder → up one level.
     var b=el("backBtn"); if(b) b.addEventListener('click',function(){
-      if(_navStack.length){ _navStack.pop(); renderExplorer(); } else { post('to_projects'); } });
+      if(_navStack.length){ _navStack.pop(); renderExplorer(); } });
     var c=el("closeBtn"); if(c) c.addEventListener('click',function(){post('close');});
     var lh=el("lhBtn"); if(lh && _previewAvail) lh.addEventListener('click',function(){
       lh.disabled=true; lh.textContent='⏳ …'; post('run_localhost'); });
@@ -1129,7 +1163,8 @@ function renderShell(): string {
     _previewAvail   = !!(m.preview && m.preview.available);
     _docCache = {};                    // fresh project → fresh cache
     _tree = m.tree || [];
-    _navStack = [];                    // always start at the project root
+    _readme = m.readme || null;
+    _navStack = [];                    // always start at the docs root
     _viewingDoc = null;
     renderExplorer();
   }
@@ -1145,40 +1180,58 @@ function renderShell(): string {
     }
     return nodes;
   }
-  function explorerRow(n){
-    // Folder: 📁 + trailing "/" + chevron. File: 📄 + name. Name/"/" carry the
-    // dir-vs-file distinction on their own so it survives terminals that drop emoji.
+  // One grid tile: a big icon over a centred label. Folder → folder icon + trailing "/";
+  // .md → the Markdown mark. The label + "/" carry dir-vs-file on their own (emoji-free).
+  function explorerTile(n){
     var isDir = n.kind==='dir';
-    return '<div class="fx-row'+(isDir?' fx-dir':'')+'" data-kind="'+n.kind+'"'
+    return '<div class="fx-tile'+(isDir?' fx-dir':'')+'" data-kind="'+n.kind+'"'
       +' data-name="'+esc(n.name)+'" data-rel="'+esc(n.rel)+'">'
-      +'<span class="fx-ic">'+(isDir?'📁':'📄')+'</span>'
-      +'<span class="fx-name">'+esc(n.name)+(isDir?'/':'')+'</span>'
-      +(isDir?'<span class="fx-arrow">›</span>':'')+'</div>';
+      +'<div class="fx-ic">'+(isDir?_icoFolder:_icoMd)+'</div>'
+      +'<div class="fx-label">'+esc(n.name)+(isDir?'/':'')+'</div></div>';
+  }
+  function readmeHtml(){
+    if(!_readme || _navStack.length) return '';   // README dropdown only at the docs root
+    return '<div class="rm"><button class="rm-head"><span class="rm-caret">▸</span> '
+      +esc(_readme.label||'README')+'</button>'
+      +'<div class="rm-body doc-body" style="display:none"></div></div>';
   }
   function renderExplorer(){
     _viewingDoc = null;
     el("title").textContent = _detail.title;
-    el("subtitle").textContent = _navStack.length ? ('/' + _navStack.join('/')) : _detail.subtitle;
+    el("subtitle").textContent = _navStack.length ? ('docs/' + _navStack.join('/')) : _detail.subtitle;
     el("actions").innerHTML = detailActionsHtml(_detail.githubUrl); wireDetailActions();
     var nodes = currentFolder();
-    var rows = nodes.map(explorerRow).join('');
-    var emptyMsg = _navStack.length ? 'โฟลเดอร์นี้ไม่มีไฟล์ .md' : 'โปรเจคนี้ไม่มีไฟล์ .md';
-    el("content").innerHTML = '<div class="fx">'
-      + (rows || '<div class="empty">'+emptyMsg+'</div>') + '</div>';
-    el("content").querySelectorAll('.fx-row').forEach(function(row){
-      row.addEventListener('click',function(){
-        if(row.dataset.kind==='dir'){ _navStack.push(row.dataset.name); renderExplorer(); }
-        else { openDocView(row.dataset.rel, row.dataset.name); }
+    var tiles = nodes.map(explorerTile).join('');
+    var emptyMsg = _navStack.length ? 'โฟลเดอร์นี้ไม่มีไฟล์ .md' : 'โปรเจคนี้ยังไม่มี docs .md';
+    el("content").innerHTML = readmeHtml()
+      + '<div class="fx">' + (tiles || '<div class="empty">'+emptyMsg+'</div>') + '</div>';
+    var rm = el("content").querySelector('.rm-head');
+    if(rm) rm.addEventListener('click', toggleReadme);
+    el("content").querySelectorAll('.fx-tile').forEach(function(tile){
+      tile.addEventListener('click',function(){
+        if(tile.dataset.kind==='dir'){ _navStack.push(tile.dataset.name); renderExplorer(); }
+        else { openDocView(tile.dataset.rel, tile.dataset.name); }
       });
     });
   }
-  // Open one .md as a full page over the explorer: its own header + back button.
+  // README as an inline dropdown (short → nicer to read in place than a full page).
+  function toggleReadme(){
+    var body=el("content").querySelector('.rm-body'), caret=el("content").querySelector('.rm-caret');
+    if(!body || !_readme) return;
+    if(body.style.display!=='none'){ body.style.display='none'; caret.textContent='▸'; return; }
+    body.style.display='block'; caret.textContent='▾';
+    var rel=_readme.rel;
+    if(_docCache[rel]!==undefined){ body.innerHTML=_docCache[rel]; return; }
+    body.innerHTML='<div class="doc-empty">กำลังโหลด…</div>';
+    post('open_doc',{rel:rel});
+  }
+  // Open one .md as a full page over the explorer: its own header + ".." back button.
   // Back returns to the explorer at the same folder (renderExplorer, wired here).
   function openDocView(rel, name){
     _viewingDoc = rel;
-    el("title").textContent = '📄 ' + name;
+    el("title").textContent = name;
     el("subtitle").textContent = rel;
-    el("actions").innerHTML = '<button id="backBtn">← กลับ</button><button id="closeBtn">✕ ปิด</button>';
+    el("actions").innerHTML = backBtnHtml() + '<button id="closeBtn">✕ ปิด</button>';
     el("backBtn").addEventListener('click',function(){ renderExplorer(); });
     el("closeBtn").addEventListener('click',function(){ post('close'); });
     var cached = _docCache[rel];
@@ -1189,10 +1242,14 @@ function renderShell(): string {
   function handleDocHtml(rel, html, error){
     var out = error ? '<div class="doc-empty">'+esc(error)+'</div>' : (html||'');
     _docCache[rel]=out;
-    if(_viewingDoc===rel){                 // still on this doc's page → paint it
+    if(_viewingDoc===rel){                 // full-page doc open → paint it
       var page=el("content").querySelector('.doc-page');
       if(page) page.innerHTML=out;
+      return;
     }
+    // else it may be the README dropdown, expanded, in the explorer
+    var rb=el("content").querySelector('.rm-body');
+    if(rb && _readme && _readme.rel===rel && rb.style.display!=='none') rb.innerHTML=out;
   }
   function handlePreviewState(running){
     _previewRunning=!!running;

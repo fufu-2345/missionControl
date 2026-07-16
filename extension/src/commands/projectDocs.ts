@@ -133,6 +133,65 @@ function buildTree(dir: string, root: string, depth: number): TreeNode[] {
   return [...dirs, ...files];
 }
 
+/** Curated docs view for the Project Detail page: a README (shown as an inline dropdown)
+ *  plus a docs-rooted file tree. README is left out of the tree (it has its own dropdown),
+ *  and the flat sprint docs (docs/<proj>-sprint-N.md) are collapsed into one virtual
+ *  "sprint" folder so the top level stays clean: wiki/, sprint/, plan.md. */
+export interface DetailDocs {
+  readme: DocRef | null; // for the dropdown; null → no README anywhere obvious
+  tree: TreeNode[]; // the docs explorer (docs/-rooted, sprint docs grouped)
+}
+const SPRINT_RX = /^(?:.+-)?sprint-(\d+).*\.md$/i;
+
+export function listDetailDocs(projectPath: string): DetailDocs {
+  return { readme: findReadme(projectPath), tree: buildDocsTree(projectPath) };
+}
+function findReadme(projectPath: string): DocRef | null {
+  for (const rel of ["README.md", "docs/README.md"]) {
+    try {
+      if (fs.statSync(path.join(projectPath, rel)).isFile()) return { rel, label: "README" };
+    } catch {
+      // not there — try the next candidate
+    }
+  }
+  return null;
+}
+function buildDocsTree(projectPath: string): TreeNode[] {
+  const top = buildTree(path.join(projectPath, "docs"), projectPath, 0); // rels are "docs/…"
+  const dirs: TreeNode[] = [];
+  const files: TreeNode[] = [];
+  const sprints: TreeNode[] = [];
+  for (const n of top) {
+    if (n.kind === "dir") {
+      dirs.push(n);
+    } else if (/^readme\.md$/i.test(n.name)) {
+      continue; // README → dropdown, never the tree
+    } else if (SPRINT_RX.test(n.name)) {
+      sprints.push({ ...n, name: shortSprint(n.name) }); // "<proj>-sprint-1.md" → "sprint-1.md"
+    } else {
+      files.push(n);
+    }
+  }
+  const byName = (a: TreeNode, b: TreeNode) =>
+    a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+  dirs.sort(byName);
+  files.sort(byName);
+  sprints.sort((a, b) => sprintNum(a.name) - sprintNum(b.name) || byName(a, b));
+  // dirs first, then the virtual "sprint" folder, then plain files (e.g. plan.md)
+  const virtual: TreeNode[] = sprints.length
+    ? [{ name: "sprint", rel: "docs/sprint", kind: "dir", children: sprints }]
+    : [];
+  return [...dirs, ...virtual, ...files];
+}
+function shortSprint(base: string): string {
+  const i = base.toLowerCase().indexOf("sprint-");
+  return i >= 0 ? base.slice(i) : base;
+}
+function sprintNum(name: string): number {
+  const m = /sprint-(\d+)/i.exec(name);
+  return m ? Number(m[1]) : 0;
+}
+
 /** Resolve a project-relative .md path, guarding against traversal outside the project.
  *  Returns the absolute path only if it is a real .md file under <project>/. */
 export function resolveProjectFile(projectPath: string, rel: string): string | null {

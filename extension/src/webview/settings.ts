@@ -272,13 +272,6 @@ function renderShell(): string {
     padding: 5px 8px; font-size: 12.5px; font-family: inherit; min-width: 150px;
   }
   select:focus, input:focus { outline: none; border-color: var(--vscode-focusBorder); }
-  .toggle {
-    background: transparent; color: var(--vscode-foreground);
-    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.35)); border-radius: 999px;
-    padding: 5px 14px; font-size: 12px; cursor: pointer; min-width: 66px; font-weight: 600;
-  }
-  .toggle.on { border-color: #3fb950; color: #3fb950; background: rgba(63,185,80,0.12); }
-  .toggle:hover { border-color: var(--vscode-focusBorder); }
   .empty { opacity: 0.55; font-size: 12.5px; padding: 12px 4px; }
   .note {
     margin-top: 10px; max-width: 820px; font-size: 12px; line-height: 1.6; opacity: 0.72;
@@ -319,8 +312,12 @@ function renderShell(): string {
     const key = esc(f.key);
     if (f.type === "boolean") {
       const on = f.value === true || f.value === "true";
-      return '<button class="toggle' + (on ? " on" : "") + '" data-act="bool" data-key="' + key +
-        '" data-next="' + (on ? "false" : "true") + '">' + (on ? "ON" : "OFF") + "</button>";
+      // Sliding on/off switch — same look as the Search / Oracle section's
+      // .so-switch (CSS injected via searchSectionStyle). data-act="bool" stays
+      // so the existing click handler flips it.
+      return '<div class="so-switch' + (on ? " on" : "") + '" role="switch" aria-checked="' +
+        (on ? "true" : "false") + '" data-act="bool" data-key="' + key +
+        '" data-next="' + (on ? "false" : "true") + '"><div class="kn"></div></div>';
     }
     if (f.type === "select") {
       const opts = (f.options || []).map(function (o) {
@@ -363,9 +360,11 @@ function renderShell(): string {
 
   document.addEventListener("click", function (e) {
     const t = e.target;
-    if (!t || !t.getAttribute) return;
-    if (t.getAttribute("data-act") === "bool") {
-      post("set", { key: t.getAttribute("data-key"), value: t.getAttribute("data-next") === "true" });
+    if (!t || !t.closest) return;
+    // Walk up so a click on the switch knob (.kn) still hits the switch.
+    const sw = t.closest('[data-act="bool"]');
+    if (sw) {
+      post("set", { key: sw.getAttribute("data-key"), value: sw.getAttribute("data-next") === "true" });
     }
   });
   document.addEventListener("change", function (e) {
