@@ -759,6 +759,7 @@ function renderShell(): string {
   /* project has a live session driving it right now → green (same palette as .chip.doing/.cont) */
   .card.live { border-color: #2ea043; background: rgba(63,185,80,0.10); }
   .card.live:hover { background: rgba(63,185,80,0.16); }
+  .card.crash { border-color: #f85149; box-shadow: 0 0 0 1px rgba(248,81,73,0.35); }
   .card .cname { font-size: 13px; font-weight: 600; }
   .card .csub { font-size: 11px; opacity: 0.65; margin-top: 2px; }
   /* team-picker cards are the main action here → bigger + button-like */
@@ -792,6 +793,7 @@ function renderShell(): string {
     vertical-align: middle; font-weight: 600; }
   .chip.act { background: rgba(196,127,26,0.22); color: #e3a13a; }
   .chip.idle { background: rgba(125,133,144,0.18); color: #9aa4af; }
+  .chip.crash { background: rgba(248,81,73,0.2); color: #f85149; }
   /* "doing" = a worker is grinding right now → green + a live text spinner */
   .chip.doing { background: rgba(63,185,80,0.18); color: #56d364;
     display: inline-flex; align-items: center; gap: 4px; }
@@ -1309,7 +1311,7 @@ function renderShell(): string {
       var act = it.actions || { kind: 'none' };
       var busy = act.kind === 'busy';  // = spinning || driven (เดิม) — delBtn/gitCell ยังใช้ตัวนี้
       if (busy) sub = 'กำลังทำ';
-      var contBtn = '', multiBtn = '';
+      var contBtn = '', multiBtn = '', crashChip = '', crashCls = '';
       if (busy) {
         contBtn = run.state === 'spinning'
           ? '<button class="cont spin" title="กำลังทำต่อ — คลิกเพื่อยกเลิก"><span class="cont-rot">⟳</span> กำลังทำ</button>'
@@ -1319,6 +1321,13 @@ function renderShell(): string {
         multiBtn = act.runNEnabled
           ? '<button class="cont multi" data-pending="'+pending+'" data-name="'+esc(it.name)+'" title="ทำหลาย sprint รวดเดียว (auto, background) — เลือกจำนวน">ทำ N sprint</button>'
           : '<button class="cont multi disabled" disabled title="เหลือ sprint เดียว — ทำได้ทีละ 1">ทำ N sprint</button>';
+        if (act.crash === 'stale') {
+          crashChip = '<span class="chip crash">รันไม่จบ · session ดับ</span>';
+          crashCls = ' crash';
+        } else if (act.crash === 'error') {
+          crashChip = '<span class="chip crash">error: '+esc(run.errorMsg||'?')+'</span>';
+          crashCls = ' crash';
+        }
       }
       // ปุ่มลบ (โผล่เฉพาะ edit mode ผ่าน CSS) · busy (running/ถูกขับ) = กากบาทเทา กดไม่ได้
       // (กันลบโฟลเดอร์ที่ session กำลังใช้อยู่ — host ก็ guard ซ้ำอีกชั้น)
@@ -1328,9 +1337,9 @@ function renderShell(): string {
       // busy = session กำลังขับโปรเจคนี้อยู่ → ซ่อนปุ่ม git ทั้งหมด (commit/push/pull/
       // create&push) กัน commit/push ชนกับสิ่งที่ worker กำลังทำอยู่ (เข้าคู่กับ delBtn
       // ที่ disable ไปแล้วด้านบน — host-side ก็ guard ซ้ำใน git_* handlers)
-      return '<div class="card'+(it.driven?' live':'')+'" data-path="'+esc(it.path)+'">'
+      return '<div class="card'+(it.driven?' live':'')+crashCls+'" data-path="'+esc(it.path)+'">'
         +'<span class="star'+(it.starred?' on':'')+'" role="button" title="ปักดาว / เอาดาวออก">'+(it.starred?'★':'☆')+'</span>'
-        +'<div style="flex:1"><button class="pick"><span class="cname">'+esc(it.name)+chip+'</span>'
+        +'<div style="flex:1"><button class="pick"><span class="cname">'+esc(it.name)+crashChip+chip+'</span>'
         +'<span class="csub">'+sub+'</span></button>'+(busy ? '' : gitEditor(it.git))+'</div>'
         +contBtn+multiBtn+delBtn
         +'<span class="git-cell">'+(busy ? '' : gitCell(it.git))+'</span></div>';
