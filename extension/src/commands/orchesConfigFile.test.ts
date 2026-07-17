@@ -3,12 +3,19 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
-import { orchesSettingsPath, readTestCap, writeTestCap } from "./orchesConfigFile";
+import {
+  orchesSettingsPath,
+  readTestCapNoLimit,
+  readTestCapNumber,
+  writeTestCapNoLimit,
+  writeTestCapNumber,
+} from "./orchesConfigFile";
 
 // Point ORCHES_SETTINGS at a throwaway file so nothing touches the real
 // ~/.claude/orches/settings.json (same env override the bash cmd_test_cap uses).
 let tmp: string;
 let sp: string;
+const read = () => JSON.parse(fs.readFileSync(sp, "utf8"));
 
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "mc-orches-"));
@@ -20,55 +27,64 @@ afterEach(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-describe("readTestCap", () => {
-  test("missing file → default 10", () => {
+describe("read", () => {
+  test("missing file → number 10, noLimit off", () => {
     expect(orchesSettingsPath()).toBe(sp);
-    expect(readTestCap()).toBe("10");
+    expect(readTestCapNumber()).toBe("10");
+    expect(readTestCapNoLimit()).toBe(false);
   });
-  test("numeric value", () => {
-    fs.writeFileSync(sp, JSON.stringify({ testCap: 25 }));
-    expect(readTestCap()).toBe("25");
+  test("two-key form", () => {
+    fs.writeFileSync(sp, JSON.stringify({ testCap: 25, testCapNoLimit: true }));
+    expect(readTestCapNumber()).toBe("25"); // number kept even while no-limit is on
+    expect(readTestCapNoLimit()).toBe(true);
   });
-  test("word unlimited", () => {
-    fs.writeFileSync(sp, JSON.stringify({ testCap: "unlimited" }));
-    expect(readTestCap()).toBe("unlimited");
-  });
-  test("0 reads back as unlimited", () => {
+  test("legacy single-value forms infer noLimit", () => {
     fs.writeFileSync(sp, JSON.stringify({ testCap: 0 }));
-    expect(readTestCap()).toBe("unlimited");
+    expect(readTestCapNoLimit()).toBe(true);
+    expect(readTestCapNumber()).toBe("10"); // 0 isn't a valid count → default shown
+    fs.writeFileSync(sp, JSON.stringify({ testCap: "unlimited" }));
+    expect(readTestCapNoLimit()).toBe(true);
   });
-  test("corrupt file → default 10", () => {
+  test("corrupt file → defaults", () => {
     fs.writeFileSync(sp, "{not json");
-    expect(readTestCap()).toBe("10");
+    expect(readTestCapNumber()).toBe("10");
+    expect(readTestCapNoLimit()).toBe(false);
   });
 });
 
-describe("writeTestCap", () => {
-  test("writes a number and preserves other keys", () => {
-    fs.writeFileSync(sp, JSON.stringify({ other: "keep" }));
-    expect(writeTestCap("15")).toBe("15");
-    const raw = JSON.parse(fs.readFileSync(sp, "utf8"));
-    expect(raw.testCap).toBe(15);
-    expect(raw.other).toBe("keep");
+describe("writeTestCapNumber", () => {
+  test("writes number, preserves toggle + other keys", () => {
+    fs.writeFileSync(sp, JSON.stringify({ testCapNoLimit: true, other: "keep" }));
+    expect(writeTestCapNumber("15")).toBe("15");
+    expect(read().testCap).toBe(15);
+    expect(read().testCapNoLimit).toBe(true); // toggle untouched
+    expect(read().other).toBe("keep");
   });
-  test("unlimited stored as the word", () => {
-    expect(writeTestCap("unlimited")).toBe("unlimited");
-    expect(JSON.parse(fs.readFileSync(sp, "utf8")).testCap).toBe("unlimited");
+  test("rejects non-integer / negative / zero / garbage", () => {
+    expect(() => writeTestCapNumber("abc")).toThrow();
+    expect(() => writeTestCapNumber("-3")).toThrow();
+    expect(() => writeTestCapNumber("0")).toThrow();
+    expect(() => writeTestCapNumber("3.5")).toThrow();
   });
-  test("0 → unlimited", () => {
-    expect(writeTestCap("0")).toBe("unlimited");
-    expect(JSON.parse(fs.readFileSync(sp, "utf8")).testCap).toBe("unlimited");
+});
+
+describe("writeTestCapNoLimit", () => {
+  test("toggle on/off preserves the typed number", () => {
+    writeTestCapNumber("8");
+    expect(writeTestCapNoLimit(true)).toBe(true);
+    expect(read().testCap).toBe(8); // number survives turning limit off
+    expect(readTestCapNumber()).toBe("8");
+    expect(writeTestCapNoLimit(false)).toBe(false);
+    expect(readTestCapNumber()).toBe("8");
+  });
+  test("toggling on with no prior number seeds default 10", () => {
+    expect(writeTestCapNoLimit(true)).toBe(true);
+    expect(read().testCap).toBe(10);
   });
   test("creates parent dir when absent", () => {
     const nested = path.join(tmp, "deep", "dir", "settings.json");
     process.env.ORCHES_SETTINGS = nested;
-    writeTestCap("7");
+    writeTestCapNoLimit(true);
     expect(fs.existsSync(nested)).toBe(true);
-    expect(readTestCap()).toBe("7");
-  });
-  test("rejects non-integer / negative / garbage", () => {
-    expect(() => writeTestCap("abc")).toThrow();
-    expect(() => writeTestCap("-3")).toThrow();
-    expect(() => writeTestCap("3.5")).toThrow();
   });
 });

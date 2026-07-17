@@ -10,10 +10,14 @@ import * as path from "node:path";
 // so a direct write here lands where cmd_test_cap reads it next run. Offline —
 // no server, no network. Node-only + a schema → unit-testable (no vscode).
 //
-// On-disk shape: { "testCap": <positive int> | "unlimited" }.  The bash treats
-// "unlimited" and 0 identically (= no cap); we store the word for readability.
+// On-disk shape — TWO keys so the count is remembered while "loop until pass"
+// is toggled on/off (a slide switch in the UI, not a typed word):
+//   { "testCap": <positive int>, "testCapNoLimit": true|false }
+// noLimit=true means no cap (cmd_test_cap → 0). We still read the legacy single
+// form (testCap = "unlimited"/"none"/0) as noLimit for back-compat.
 
 const ORCHES_SETTINGS_FILE = "settings.json";
+const DEFAULT_CAP = "10";
 
 /** Absolute path to the orches settings sidecar (overridable via ORCHES_SETTINGS
  *  for tests / parity with the bash). */
@@ -39,40 +43,65 @@ function readRaw(): Record<string, unknown> {
   }
 }
 
-/** The retry cap as a display string the Settings UI shows/edits: a positive
- *  integer ("10") or "unlimited". Missing/blank/invalid → the default "10",
- *  matching cmd_test_cap's default. 0 (or "0") also reads back as "unlimited". */
-export function readTestCap(): string {
-  const v = readRaw()["testCap"];
-  if (typeof v === "string") {
-    const t = v.trim().toLowerCase();
-    if (t === "unlimited" || t === "none" || t === "0") return "unlimited";
-    if (/^\d+$/.test(t)) return t === "0" ? "unlimited" : t;
-    return "10";
-  }
-  if (typeof v === "number" && Number.isFinite(v)) {
-    return v <= 0 ? "unlimited" : String(Math.floor(v));
-  }
-  return "10";
-}
-
-/** Validate a UI value (a positive integer, or "unlimited"/"none"/0) and write
- *  it to the sidecar, preserving every other key. Stores a number for a numeric
- *  cap and the word "unlimited" for no cap. Throws on anything else. */
-export function writeTestCap(raw: string | number): string {
-  const s = String(raw).trim().toLowerCase();
-  let next: number | string;
-  if (s === "unlimited" || s === "none" || s === "0") {
-    next = "unlimited";
-  } else if (/^\d+$/.test(s)) {
-    next = Number(s); // > 0 here (0 handled above)
-  } else {
-    throw new Error("retry cap must be a positive integer or 'unlimited'");
-  }
-  const obj = readRaw();
-  obj["testCap"] = next;
+function writeRaw(obj: Record<string, unknown>): void {
   const fp = orchesSettingsPath();
   fs.mkdirSync(path.dirname(fp), { recursive: true });
   fs.writeFileSync(fp, JSON.stringify(obj, null, 2) + "\n", "utf8");
-  return readTestCap();
+}
+
+/** True when the legacy single-value form meant "no cap". */
+function legacyNoLimit(tc: unknown): boolean {
+  if (typeof tc === "number") return tc <= 0;
+  if (typeof tc === "string") {
+    const t = tc.trim().toLowerCase();
+    return t === "unlimited" || t === "none" || t === "0";
+  }
+  return false;
+}
+
+/** The finite round count shown in the number field, always a positive-int
+ *  string (default "10"). Independent of the no-limit toggle so the value the
+ *  user typed survives toggling. */
+export function readTestCapNumber(): string {
+  const tc = readRaw()["testCap"];
+  if (typeof tc === "number" && Number.isFinite(tc) && tc > 0) return String(Math.floor(tc));
+  if (typeof tc === "string" && /^\d+$/.test(tc.trim()) && Number(tc) > 0) return String(Number(tc));
+  return DEFAULT_CAP;
+}
+
+/** Whether "loop until pass" (no cap) is ON — the slide toggle. Reads the
+ *  explicit boolean, or infers it from the legacy single-value form. */
+export function readTestCapNoLimit(): boolean {
+  const raw = readRaw();
+  if (raw["testCapNoLimit"] === true) return true;
+  if (raw["testCapNoLimit"] === false) return false;
+  return legacyNoLimit(raw["testCap"]);
+}
+
+/** Validate + persist the finite round count (positive integer), preserving the
+ *  no-limit toggle. Throws on anything that isn't a positive integer. */
+export function writeTestCapNumber(raw: string | number): string {
+  const s = String(raw).trim();
+  if (!/^\d+$/.test(s) || Number(s) <= 0) {
+    throw new Error("retry cap must be a positive integer");
+  }
+  const obj = readRaw();
+  obj["testCap"] = Number(s);
+  if (typeof obj["testCapNoLimit"] !== "boolean") obj["testCapNoLimit"] = legacyNoLimit(readRaw()["testCap"]);
+  writeRaw(obj);
+  return readTestCapNumber();
+}
+
+/** Set the "loop until pass" slide toggle, preserving the finite count (so
+ *  turning it off restores the previously-typed number). */
+export function writeTestCapNoLimit(on: boolean): boolean {
+  const obj = readRaw();
+  obj["testCapNoLimit"] = on;
+  // Ensure a sane finite count is present regardless, so toggling off later
+  // shows a real number rather than nothing.
+  if (typeof obj["testCap"] !== "number" || !(Number(obj["testCap"]) > 0)) {
+    obj["testCap"] = Number(readTestCapNumber());
+  }
+  writeRaw(obj);
+  return readTestCapNoLimit();
 }

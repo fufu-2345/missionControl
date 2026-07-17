@@ -138,26 +138,32 @@ describe("orches_test_cap special-case (orches sidecar, not config.json)", () =>
     delete process.env.ORCHES_SETTINGS;
   });
 
-  test("listed under Orchestration, default 10, no sidecar file", () => {
-    const e = listSettings().find((x) => x.key === "orches_test_cap");
-    expect(e?.group).toBe("Orchestration");
-    expect(e?.value).toBe("10");
+  test("number field + slide toggle listed under Orchestration with defaults", () => {
+    const num = listSettings().find((x) => x.key === "orches_test_cap");
+    expect(num?.group).toBe("Orchestration");
+    expect(num?.type).toBe("number");
+    expect(num?.value).toBe(10);
+    const tog = listSettings().find((x) => x.key === "orches_test_cap_nolimit");
+    expect(tog?.type).toBe("boolean"); // renders as the slide switch
+    expect(tog?.value).toBe(false);
   });
 
-  test("setSetting writes the sidecar (not config.json) and reads back", () => {
+  test("number writes the sidecar (not config.json) and reads back", () => {
     setSetting("orches_test_cap", "20");
-    // sidecar got it...
     expect(JSON.parse(fs.readFileSync(settingsPath, "utf8")).testCap).toBe(20);
-    // ...and config.json did NOT (special-cased away)
-    expect("orches_test_cap" in readConfig()).toBe(false);
-    expect(
-      listSettings().find((x) => x.key === "orches_test_cap")?.value,
-    ).toBe("20");
+    expect("orches_test_cap" in readConfig()).toBe(false); // special-cased away
+    expect(listSettings().find((x) => x.key === "orches_test_cap")?.value).toBe(20);
+    expect(() => setSetting("orches_test_cap", "nope")).toThrow();
   });
 
-  test("unlimited round-trips; bad value throws", () => {
-    setSetting("orches_test_cap", "unlimited");
-    expect(JSON.parse(fs.readFileSync(settingsPath, "utf8")).testCap).toBe("unlimited");
-    expect(() => setSetting("orches_test_cap", "nope")).toThrow();
+  test("slide toggle sets no-limit without disturbing the number", () => {
+    setSetting("orches_test_cap", "20");
+    setSetting("orches_test_cap_nolimit", true);
+    const raw = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+    expect(raw.testCapNoLimit).toBe(true);
+    expect(raw.testCap).toBe(20); // number preserved
+    expect(
+      listSettings().find((x) => x.key === "orches_test_cap_nolimit")?.value,
+    ).toBe(true);
   });
 });
