@@ -127,3 +127,37 @@ describe("getDefaultMemberModel", () => {
     expect(getDefaultMemberModel()).toBe("claude-haiku-4-5");
   });
 });
+
+describe("orches_test_cap special-case (orches sidecar, not config.json)", () => {
+  let settingsPath: string;
+  beforeEach(() => {
+    settingsPath = path.join(tmp, "orches-settings.json");
+    process.env.ORCHES_SETTINGS = settingsPath;
+  });
+  afterEach(() => {
+    delete process.env.ORCHES_SETTINGS;
+  });
+
+  test("listed under Orchestration, default 10, no sidecar file", () => {
+    const e = listSettings().find((x) => x.key === "orches_test_cap");
+    expect(e?.group).toBe("Orchestration");
+    expect(e?.value).toBe("10");
+  });
+
+  test("setSetting writes the sidecar (not config.json) and reads back", () => {
+    setSetting("orches_test_cap", "20");
+    // sidecar got it...
+    expect(JSON.parse(fs.readFileSync(settingsPath, "utf8")).testCap).toBe(20);
+    // ...and config.json did NOT (special-cased away)
+    expect("orches_test_cap" in readConfig()).toBe(false);
+    expect(
+      listSettings().find((x) => x.key === "orches_test_cap")?.value,
+    ).toBe("20");
+  });
+
+  test("unlimited round-trips; bad value throws", () => {
+    setSetting("orches_test_cap", "unlimited");
+    expect(JSON.parse(fs.readFileSync(settingsPath, "utf8")).testCap).toBe("unlimited");
+    expect(() => setSetting("orches_test_cap", "nope")).toThrow();
+  });
+});

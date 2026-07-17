@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { isAutoSkillEnabled, setAutoSkillEnabled } from "./autoSkillOps";
+import { readTestCap, writeTestCap } from "./orchesConfigFile";
 import { DEFAULT_MODEL, MODEL_ALIASES } from "./teamsModel";
 
 // Node-only settings I/O for the Settings page. Pure fs + a schema — no vscode,
@@ -58,6 +59,15 @@ export const SETTINGS_SCHEMA: FieldSchema[] = [
     ],
     help:
       "How /orches-drive integrates a finished sprint. Online = push the agents/<role> branch, open a PR, and gh pr merge --delete-branch on GitHub, then pull --ff-only. Local = merge straight into main with no PR (offline fallback). Online needs the gh CLI logged in; if gh is missing it stops rather than silently downgrading.",
+  },
+  {
+    key: "orches_test_cap",
+    label: "Retry cap เมื่อเทสไม่ผ่าน",
+    group: "Orchestration",
+    type: "string",
+    default: "10",
+    help:
+      "จำนวนรอบที่ /orches-drive ตีกลับให้ worker แก้เมื่อ verify-gate ไม่ผ่าน ก่อนจะหยุดถาม user. พิมพ์เป็นเลข เช่น 10 หรือ 'unlimited' (วนตีกลับจนกว่าจะผ่าน). ทุกรอบที่ fail จะ comment ลง draft PR ให้เห็น timeline. ชน cap = orchestrator แจ้ง user + ถามว่าจะไปต่อยังไง (แก้ต่อ / merge ทั้งที่ fail / หยุด) — ไม่ merge เอง. เก็บที่ ~/.claude/orches/settings.json (คนละไฟล์กับ knob อื่น เพราะ bash ฝั่ง orches อ่านตรงจากไฟล์นี้).",
   },
   {
     key: "push_mode",
@@ -186,6 +196,10 @@ export function listSettings(): SettingEntry[] {
   // auto_skill_enabled is not a config.json knob — its truth is the CLAUDE.md block.
   const autoSkill = entries.find((e) => e.key === "auto_skill_enabled");
   if (autoSkill) autoSkill.value = isAutoSkillEnabled();
+  // orches_test_cap lives in the orches sidecar (~/.claude/orches/settings.json),
+  // not config.json — the bash side reads it directly. Show that file's truth.
+  const testCap = entries.find((e) => e.key === "orches_test_cap");
+  if (testCap) testCap.value = readTestCap();
   for (const k of Object.keys(raw)) {
     if (SCHEMA_BY_KEY.has(k)) continue;
     if (k.startsWith("search.")) continue; // owned by the Search/Oracle section, not a generic knob
@@ -218,6 +232,12 @@ export function setSetting(
   // auto_skill_enabled toggles the CLAUDE.md block, not a config.json value.
   if (key === "auto_skill_enabled") {
     setAutoSkillEnabled(value === true || value === "true");
+    return listSettings();
+  }
+  // orches_test_cap writes the orches sidecar, not config.json (validates: a
+  // positive integer or "unlimited"; throws bubble up to a UI error toast).
+  if (key === "orches_test_cap") {
+    writeTestCap(value as string | number);
     return listSettings();
   }
 
