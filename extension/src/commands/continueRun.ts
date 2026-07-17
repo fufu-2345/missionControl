@@ -198,3 +198,26 @@ export function decideCancelOutcome(
   if (statusAfterKill === "done" || alreadyMerged) return "keep_done";
   return "revert";
 }
+
+/** สิ่งที่การ์ด project โชว์ จาก 2 สัญญาณเดิม (ButtonState + driven) + จำนวนงานค้าง:
+ *  - busy (spinning/driven) → คงปุ่ม "กำลังทำ" เดิม (คลิกยกเลิก/เข้า session)
+ *  - none (ไม่มีงานค้าง) → ไม่มีปุ่ม แม้ marker ค้าง stale/error (0 เหลือ = จบจริง)
+ *  - actions → โชว์ 2 ปุ่มถาวร: "ทำ 1 sprint" เสมอ + "ทำ N sprint" (เปิดเมื่อเหลือ>=2)
+ *    · crash = สาเหตุที่รอบก่อนไม่จบ (stale = session ดับกลางคัน · error = orches-drive
+ *      เขียน marker error) → webview โชว์ chip + ขอบเตือน · null = ค้างปกติ
+ *  Pure — host คำนวณตัวนี้ก่อนส่งการ์ดให้ webview (webview import host TS ไม่ได้). */
+export type CardActions =
+  | { kind: "busy" }
+  | { kind: "none" }
+  | { kind: "actions"; runNEnabled: boolean; crash: "stale" | "error" | null };
+
+export function resolveCardActions(
+  state: ButtonState,
+  driven: boolean,
+  pending: number,
+): CardActions {
+  if (state === "spinning" || driven) return { kind: "busy" };
+  if (pending <= 0) return { kind: "none" };
+  const crash = state === "stale" ? "stale" : state === "error" ? "error" : null;
+  return { kind: "actions", runNEnabled: pending >= 2, crash };
+}

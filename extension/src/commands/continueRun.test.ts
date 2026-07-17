@@ -16,6 +16,7 @@ import {
   finishedSessions,
   clampSprintCount,
   runSessionLiveForProject,
+  resolveCardActions,
   type RunMarker,
 } from "./continueRun";
 import type { OracleTeam } from "./teams";
@@ -256,4 +257,35 @@ test("runSessionLiveForProject: marker not running / no session / null → NOT l
 
 test("runSessionLiveForProject: unlabeled live session → NOT live (can't prove ownership)", () => {
   expect(runSessionLiveForProject(RUN_ON, [{ name: "09-foreman" }], "proj-v10")).toBe(false);
+});
+
+// --- Task 8: resolveCardActions (2 ปุ่มถาวร + crash indicator) ---
+
+test("resolveCardActions: spinning หรือ driven → busy (คงปุ่ม 'กำลังทำ' เดิม)", () => {
+  expect(resolveCardActions("spinning", false, 3)).toEqual({ kind: "busy" });
+  expect(resolveCardActions("idle", true, 3)).toEqual({ kind: "busy" }); // driven ชนะ
+  expect(resolveCardActions("stale", true, 3)).toEqual({ kind: "busy" }); // driven ชนะ state
+});
+
+test("resolveCardActions: ไม่มีงานค้าง (pending<=0) → none แม้ marker stale/error", () => {
+  expect(resolveCardActions("idle", false, 0)).toEqual({ kind: "none" });
+  expect(resolveCardActions("stale", false, 0)).toEqual({ kind: "none" });
+  expect(resolveCardActions("error", false, 0)).toEqual({ kind: "none" });
+  expect(resolveCardActions("hidden", false, 0)).toEqual({ kind: "none" });
+});
+
+test("resolveCardActions: idle+ค้าง → actions ไม่มี crash; ปุ่ม N เปิดเมื่อเหลือ>=2", () => {
+  expect(resolveCardActions("idle", false, 1)).toEqual({ kind: "actions", runNEnabled: false, crash: null });
+  expect(resolveCardActions("idle", false, 2)).toEqual({ kind: "actions", runNEnabled: true, crash: null });
+  expect(resolveCardActions("idle", false, 5)).toEqual({ kind: "actions", runNEnabled: true, crash: null });
+});
+
+test("resolveCardActions: stale → actions + crash 'stale' (session ดับ)", () => {
+  expect(resolveCardActions("stale", false, 1)).toEqual({ kind: "actions", runNEnabled: false, crash: "stale" });
+  expect(resolveCardActions("stale", false, 3)).toEqual({ kind: "actions", runNEnabled: true, crash: "stale" });
+});
+
+test("resolveCardActions: error → actions + crash 'error'", () => {
+  expect(resolveCardActions("error", false, 2)).toEqual({ kind: "actions", runNEnabled: true, crash: "error" });
+  expect(resolveCardActions("error", false, 1)).toEqual({ kind: "actions", runNEnabled: false, crash: "error" });
 });

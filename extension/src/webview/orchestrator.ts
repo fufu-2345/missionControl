@@ -32,6 +32,7 @@ import {
   pendingSprints,
   readRunMarker,
   resolveButtonState,
+  resolveCardActions,
   runSessionLiveForProject,
 } from "../commands/continueRun";
 import type { OracleTeam } from "../commands/teams";
@@ -154,12 +155,14 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch: boolean | "
       const live = marker?.session
         ? { alive: aliveForThis, createdAt: sessionCreatedAt(marker.session) }
         : { alive: false };
-      const btn = resolveButtonState(pendingSprints(p), marker, live);
+      const pending = pendingSprints(p);
+      const btn = resolveButtonState(pending, marker, live);
       // a run is live iff its session is up, labeled for this project, and not a
       // zombie (reused name, created ≠ recorded).
       const runAlive =
         aliveForThis &&
         !(marker?.sessionCreatedAt !== undefined && live.createdAt !== undefined && live.createdAt !== marker.sessionCreatedAt);
+      const driven = projectDrivenState(p, { sessions, runAlive }).state !== "none";
       return {
         path: p.path,
         name: p.name,
@@ -169,9 +172,10 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch: boolean | "
         plannedDone: p.plannedDone,
         doing: p.doing,
         // green row: is a session driving this project right now? (shared list + reused runAlive)
-        driven: projectDrivenState(p, { sessions, runAlive }).state !== "none",
+        driven,
         starred: starred.has(p.path),
         run: { state: btn.state, errorMsg: btn.errorMsg },
+        actions: resolveCardActions(btn.state, driven, pending),
         git: { path: p.path, ...states[p.path] },
       };
     }),
@@ -755,6 +759,7 @@ function renderShell(): string {
   /* project has a live session driving it right now → green (same palette as .chip.doing/.cont) */
   .card.live { border-color: #2ea043; background: rgba(63,185,80,0.10); }
   .card.live:hover { background: rgba(63,185,80,0.16); }
+  .card.crash { border-color: #f85149; box-shadow: 0 0 0 1px rgba(248,81,73,0.35); }
   .card .cname { font-size: 13px; font-weight: 600; }
   .card .csub { font-size: 11px; opacity: 0.65; margin-top: 2px; }
   /* team-picker cards are the main action here → bigger + button-like */
@@ -788,6 +793,7 @@ function renderShell(): string {
     vertical-align: middle; font-weight: 600; }
   .chip.act { background: rgba(196,127,26,0.22); color: #e3a13a; }
   .chip.idle { background: rgba(125,133,144,0.18); color: #9aa4af; }
+  .chip.crash { background: rgba(248,81,73,0.2); color: #f85149; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; display: inline-block; }
   /* "doing" = a worker is grinding right now → green + a live text spinner */
   .chip.doing { background: rgba(63,185,80,0.18); color: #56d364;
     display: inline-flex; align-items: center; gap: 4px; }
@@ -799,14 +805,14 @@ function renderShell(): string {
     border-radius: 6px; padding: 4px 10px; cursor: pointer; white-space: nowrap;
     display: inline-flex; align-items: center; gap: 5px; }
   .cont:hover { background: rgba(63,185,80,0.22); }
-  .cont.spin, .cont.stale { border-color: #c47f1a; color: #e3a13a; background: rgba(196,127,26,0.14); }
-  .cont.err { border-color: #f85149; color: #f85149; background: rgba(248,81,73,0.12); cursor: help; }
+  .cont.spin { border-color: #c47f1a; color: #e3a13a; background: rgba(196,127,26,0.14); }
   /* driven by a live INTERACTIVE session → spinning "กำลังทำ"; click OPENS that
      session (no headless run to cancel), so green (not amber like .spin). */
   .cont.busy { border-color: #2ea043; color: #56d364; background: rgba(63,185,80,0.14); cursor: pointer; }
   .cont.busy:hover { background: rgba(63,185,80,0.24); }
   .cont.multi { border-color: #3f7bd0; color: #6ca6ff; background: rgba(63,123,208,0.12); }
   .cont.multi:hover { background: rgba(63,123,208,0.22); }
+  .cont.multi.disabled { opacity: 0.4; cursor: not-allowed; pointer-events: none; }
   .cont-rot { display: inline-block; animation: contspin 1.1s linear infinite; }
   @keyframes contspin { to { transform: rotate(360deg); } }
   .git-editor { margin-top: 6px; }
@@ -1296,31 +1302,32 @@ function renderShell(): string {
       var done = pt > 0 ? pd : sp;
       // done>0 → "ทำไปแล้ว X sprint" · done===0 → ยังไม่ทำอะไรเลย = "พร้อมเริ่ม"
       var sub = done > 0 ? 'ทำไปแล้ว '+done+' sprint' : 'พร้อมเริ่ม';
-      // continue button: run 1 sprint headless with the last-used team (state
-      // resolved host-side). spinning = คลิกเพื่อยกเลิก · stale = run หลุด, คลิกเริ่มใหม่.
+      // ปุ่มการ์ด: state resolved host-side → it.actions (resolveCardActions).
+      //  busy    = มี session ขับอยู่ (spinning = headless run เราเอง / driven = interactive) → ปุ่ม "กำลังทำ" เดิม
+      //  actions = idle/stale/error + ยังมีงานค้าง → 2 ปุ่มถาวร [ทำ 1 sprint][ทำ N sprint]
+      //  none    = ไม่มีงานค้าง → ไม่มีปุ่ม
       var run = it.run || { state: 'hidden' };
-      // "busy" = a session is driving this project right now (green card). The
-      // .orches-run.json marker only exists for THIS dashboard's own headless runs,
-      // so an INTERACTIVE orchestrator session (the ▶ เริ่มใหม่ / popup path) leaves
-      // run.state at 'idle' even while a build is live. Gate every start-action on
-      // !busy so a green card never shows ▶ ทำต่อ / ▶▶ ทำหลาย sprint / ลบ — it offers
-      // an attach affordance instead. (spinning = own headless run; keeps cancel.)
-      var busy = run.state === 'spinning' || !!it.driven;
-      // การ์ดสีเขียว (มี session ขับอยู่/headless run) → สถานะคือ "กำลังทำ"
-      // ไม่ใช่ "พร้อมเริ่ม" หรือ "ทำไปแล้ว X sprint" (ซึ่งสื่อว่ายังไม่ได้ทำ/หยุดแล้ว)
+      var act = it.actions || { kind: 'none' };
+      var busy = act.kind === 'busy';  // = spinning || driven (เดิม) — delBtn/gitCell ยังใช้ตัวนี้
       if (busy) sub = 'กำลังทำ';
-      var contBtn =
-        run.state === 'spinning' ? '<button class="cont spin" title="กำลังทำต่อ — คลิกเพื่อยกเลิก"><span class="cont-rot">⟳</span> กำลังทำ</button>' :
-        it.driven                ? '<button class="cont busy" title="กำลังทำอยู่ (มี session ขับโปรเจคนี้) — คลิกเพื่อเปิด/เข้า session"><span class="cont-rot">⟳</span> กำลังทำ</button>' :
-        run.state === 'idle'     ? '<button class="cont" title="ทำต่อ 1 sprint ด้วยทีมล่าสุด (auto, background)">▶ ทำต่อ</button>' :
-        run.state === 'stale'    ? '<button class="cont stale" title="run หลุด — คลิกเพื่อเริ่มใหม่">⚠ ทำต่อ</button>' :
-        run.state === 'error'    ? '<button class="cont err" title="'+esc(run.errorMsg||'error')+'">⚠ error</button>' : '';
-      // "ทำหลาย sprint": only when NOT busy, idle, AND ≥2 sprint left. Opens a "how
-      // many?" input box; host runs N sprints headless in ONE detached run (no
-      // attach, no checkpoint). Class 'cont' so the row-select guard skips it.
-      var multiBtn = (!busy && run.state === 'idle' && pending >= 2)
-        ? '<button class="cont multi" data-pending="'+pending+'" data-name="'+esc(it.name)+'" title="ทำหลาย sprint รวดเดียว (auto, background) — เลือกจำนวน">▶▶ ทำหลาย sprint</button>'
-        : '';
+      var contBtn = '', multiBtn = '', crashChip = '', crashCls = '';
+      if (busy) {
+        contBtn = run.state === 'spinning'
+          ? '<button class="cont spin" title="กำลังทำต่อ — คลิกเพื่อยกเลิก"><span class="cont-rot">⟳</span> กำลังทำ</button>'
+          : '<button class="cont busy" title="กำลังทำอยู่ (มี session ขับโปรเจคนี้) — คลิกเพื่อเปิด/เข้า session"><span class="cont-rot">⟳</span> กำลังทำ</button>';
+      } else if (act.kind === 'actions') {
+        contBtn = '<button class="cont" title="ทำต่อ 1 sprint ด้วยทีมล่าสุด (auto, background)">ทำ 1 sprint</button>';
+        multiBtn = act.runNEnabled
+          ? '<button class="cont multi" data-pending="'+pending+'" data-name="'+esc(it.name)+'" title="ทำหลาย sprint รวดเดียว (auto, background) — เลือกจำนวน">ทำ N sprint</button>'
+          : '<button class="cont multi disabled" disabled title="เหลือ sprint เดียว — ทำได้ทีละ 1">ทำ N sprint</button>';
+        if (act.crash === 'stale') {
+          crashChip = '<span class="chip crash">รันไม่จบ · session ดับ</span>';
+          crashCls = ' crash';
+        } else if (act.crash === 'error') {
+          crashChip = '<span class="chip crash" title="error: '+esc(run.errorMsg||'?')+'">error: '+esc(run.errorMsg||'?')+'</span>';
+          crashCls = ' crash';
+        }
+      }
       // ปุ่มลบ (โผล่เฉพาะ edit mode ผ่าน CSS) · busy (running/ถูกขับ) = กากบาทเทา กดไม่ได้
       // (กันลบโฟลเดอร์ที่ session กำลังใช้อยู่ — host ก็ guard ซ้ำอีกชั้น)
       var delBtn = busy
@@ -1329,9 +1336,9 @@ function renderShell(): string {
       // busy = session กำลังขับโปรเจคนี้อยู่ → ซ่อนปุ่ม git ทั้งหมด (commit/push/pull/
       // create&push) กัน commit/push ชนกับสิ่งที่ worker กำลังทำอยู่ (เข้าคู่กับ delBtn
       // ที่ disable ไปแล้วด้านบน — host-side ก็ guard ซ้ำใน git_* handlers)
-      return '<div class="card'+(it.driven?' live':'')+'" data-path="'+esc(it.path)+'">'
+      return '<div class="card'+(it.driven?' live':'')+crashCls+'" data-path="'+esc(it.path)+'">'
         +'<span class="star'+(it.starred?' on':'')+'" role="button" title="ปักดาว / เอาดาวออก">'+(it.starred?'★':'☆')+'</span>'
-        +'<div style="flex:1"><button class="pick"><span class="cname">'+esc(it.name)+chip+'</span>'
+        +'<div style="flex:1"><button class="pick"><span class="cname">'+esc(it.name)+crashChip+chip+'</span>'
         +'<span class="csub">'+sub+'</span></button>'+(busy ? '' : gitEditor(it.git))+'</div>'
         +contBtn+multiBtn+delBtn
         +'<span class="git-cell">'+(busy ? '' : gitCell(it.git))+'</span></div>';
@@ -1354,7 +1361,7 @@ function renderShell(): string {
         // spinning → this click CANCELS the live run; any other state → start one.
         if(contEl.classList.contains('spin')) post('cancel_run',{path:path});
         else { card.classList.add('live'); post('continue_run',{path:path}); } }); // optimistic: green now
-      var multiEl=card.querySelector('.cont.multi');
+      var multiEl=card.querySelector('.cont.multi:not(.disabled)');
       if(multiEl) multiEl.addEventListener('click',function(e){ e.stopPropagation();
         openMultiModal(path, multiEl.dataset.name||'', Number(multiEl.dataset.pending)||2); });
       var delEl=card.querySelector('.del:not(.disabled)');
