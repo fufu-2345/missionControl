@@ -793,7 +793,7 @@ function renderShell(): string {
     vertical-align: middle; font-weight: 600; }
   .chip.act { background: rgba(196,127,26,0.22); color: #e3a13a; }
   .chip.idle { background: rgba(125,133,144,0.18); color: #9aa4af; }
-  .chip.crash { background: rgba(248,81,73,0.2); color: #f85149; }
+  .chip.crash { background: rgba(248,81,73,0.2); color: #f85149; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; display: inline-block; }
   /* "doing" = a worker is grinding right now → green + a live text spinner */
   .chip.doing { background: rgba(63,185,80,0.18); color: #56d364;
     display: inline-flex; align-items: center; gap: 4px; }
@@ -805,8 +805,7 @@ function renderShell(): string {
     border-radius: 6px; padding: 4px 10px; cursor: pointer; white-space: nowrap;
     display: inline-flex; align-items: center; gap: 5px; }
   .cont:hover { background: rgba(63,185,80,0.22); }
-  .cont.spin, .cont.stale { border-color: #c47f1a; color: #e3a13a; background: rgba(196,127,26,0.14); }
-  .cont.err { border-color: #f85149; color: #f85149; background: rgba(248,81,73,0.12); cursor: help; }
+  .cont.spin { border-color: #c47f1a; color: #e3a13a; background: rgba(196,127,26,0.14); }
   /* driven by a live INTERACTIVE session → spinning "กำลังทำ"; click OPENS that
      session (no headless run to cancel), so green (not amber like .spin). */
   .cont.busy { border-color: #2ea043; color: #56d364; background: rgba(63,185,80,0.14); cursor: pointer; }
@@ -1325,7 +1324,7 @@ function renderShell(): string {
           crashChip = '<span class="chip crash">รันไม่จบ · session ดับ</span>';
           crashCls = ' crash';
         } else if (act.crash === 'error') {
-          crashChip = '<span class="chip crash">error: '+esc(run.errorMsg||'?')+'</span>';
+          crashChip = '<span class="chip crash" title="error: '+esc(run.errorMsg||'?')+'">error: '+esc(run.errorMsg||'?')+'</span>';
           crashCls = ' crash';
         }
       }
