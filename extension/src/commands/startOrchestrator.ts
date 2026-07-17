@@ -188,7 +188,7 @@ function readPlan(dir: string): { total: number; done: number } | null {
   }
 }
 
-/** Scan every repo under the owner root (projects/* + tool repos) for leftover
+/** Scan every project under projects/ (owner-root and ghq-root) for leftover
  *  work — a project is resumable if it has docs/*sprint-*.md (new <project>-sprint-N.md
  *  or legacy sprint-N.md naming) OR an open agents/*
  *  worktree. NOT filtered by team (user picks the team after). Sorted so the
@@ -211,23 +211,9 @@ export function scanResumableProjects(): ResumableProject[] {
       /* no such projects/ dir */
     }
   }
-  try {
-    for (const n of fs.readdirSync(root)) {
-      // skip projects/ (walked above), ψ vault, dotfiles, and oracle repos
-      // (e.g. bob-oracle/foreman-oracle) — those are agents, not build targets.
-      if (n === "projects" || n === "ψ" || n.startsWith(".") || /-oracle$/.test(n)) {
-        continue;
-      }
-      const p = path.join(root, n);
-      try {
-        if (fs.statSync(p).isDirectory()) candidates.push(p);
-      } catch {
-        /* ignore */
-      }
-    }
-  } catch {
-    /* ignore */
-  }
+  // Only projects/ (walked above) holds build targets — every other org-root
+  // sibling (bob-oracle, missionControl, orches-skills, ...) is a tool/agent
+  // repo, not a project, so it must never be scanned here.
   // Collapse symlink duplicates: a soulbrew/projects entry that points into
   // owner-root/projects (e.g. a bridge symlink) must not list the project twice.
   const out: ResumableProject[] = [];
