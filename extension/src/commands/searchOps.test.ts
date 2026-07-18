@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
-import { deriveEnabled, fileToPayload, readIntent, writeIntent, reconcile, UI_MODELS, modelPrimaryCollections } from "./searchOps";
+import { deriveEnabled, fileToPayload, readIntent, writeIntent, reconcile, UI_MODELS } from "./searchOps";
 import { readConfig } from "./settingsOps";
 
 let tmp: string;
@@ -118,12 +118,12 @@ describe("reconcile", () => {
   });
 
   test("enabled=true → shows ON + Vector regardless of stored mode", () => {
-    const c = cfg(true, "bge-m3", { "bge-m3": { ready: true }, nomic: { ready: true } });
+    const c = cfg(true, "nomic", { nomic: { ready: true } });
     const vm = reconcile({ online: true, config: c, health: { vectorMode: "embedded" }, docs: 482, index: IDLE_INDEX, intent: intentGraph });
     expect(vm.hybridEnabled).toBe(true);
     expect(vm.mode).toBe("vector");
     expect(vm.docs).toBe(482);
-    expect(vm.selectedModel).toBe("bge-m3");
+    expect(vm.selectedModel).toBe("nomic");
   });
 
   test("enabled=false + intent graph → ON + Graph", () => {
@@ -139,11 +139,10 @@ describe("reconcile", () => {
     expect(vm.hybridEnabled).toBe(false);
   });
 
-  test("exposes only bge-m3 + nomic, maps status from reason", () => {
-    const c = cfg(true, "bge-m3", { "bge-m3": { ready: false, reason: "bge-m3 not installed in ollama" }, nomic: { ready: true } });
+  test("exposes only nomic, maps status from reason", () => {
+    const c = cfg(true, "nomic", { nomic: { ready: true } });
     const vm = reconcile({ online: true, config: c, health: { vectorMode: "embedded" }, docs: 0, index: IDLE_INDEX, intent: intentOff });
-    expect(vm.models.map((m) => m.key).sort()).toEqual(["bge-m3", "nomic"]);
-    expect(vm.models.find((m) => m.key === "bge-m3")?.status).toBe("not-installed");
+    expect(vm.models.map((m) => m.key)).toEqual(["nomic"]);
     expect(vm.models.find((m) => m.key === "nomic")?.status).toBe("ready");
   });
 
@@ -153,36 +152,14 @@ describe("reconcile", () => {
     expect(vm.envOverrideNote.length).toBeGreaterThan(0);
   });
 
-  test("UI_MODELS is exactly the two exposed models", () => {
-    expect(UI_MODELS.map((m) => m.key)).toEqual(["bge-m3", "nomic"]);
+  test("UI_MODELS is exactly the one exposed model (nomic)", () => {
+    expect(UI_MODELS.map((m) => m.key)).toEqual(["nomic"]);
   });
 
   test("clamps selectedModel to UI_MODELS when oracle reports hidden collection as primary", () => {
-    const c = cfg(true, "qwen3", { "qwen3": { ready: true }, "bge-m3": { ready: false }, nomic: { ready: true } });
+    const c = cfg(true, "qwen3", { "qwen3": { ready: true }, nomic: { ready: true } });
     const vm = reconcile({ online: true, config: c, health: { vectorMode: "embedded" }, docs: 0, index: IDLE_INDEX, intent: intentOff });
-    expect(vm.selectedModel).toBe("bge-m3");
-    expect(vm.models.filter((m) => m.primary).map((m) => m.key)).toEqual(["bge-m3"]);
-  });
-});
-
-describe("modelPrimaryCollections", () => {
-  // The oracle keeps the FIRST of multiple primaries, so a switch must set the
-  // chosen model true AND the others false (verified against a live oracle:
-  // {nomic:{primary:true}} alone left primary=bge-m3).
-  test("sets chosen primary=true and every other exposed model primary=false", () => {
-    expect(modelPrimaryCollections("nomic")).toEqual({
-      "bge-m3": { primary: false },
-      nomic: { primary: true },
-    });
-    expect(modelPrimaryCollections("bge-m3")).toEqual({
-      "bge-m3": { primary: true },
-      nomic: { primary: false },
-    });
-  });
-
-  test("covers exactly the exposed UI models", () => {
-    expect(Object.keys(modelPrimaryCollections("nomic")).sort()).toEqual(
-      UI_MODELS.map((m) => m.key).sort(),
-    );
+    expect(vm.selectedModel).toBe("nomic");
+    expect(vm.models.filter((m) => m.primary).map((m) => m.key)).toEqual(["nomic"]);
   });
 });

@@ -85,31 +85,20 @@ export type OracleConfigPayload = {
 };
 export type OracleHealthPayload = { vectorMode?: string; vectorDisabledReason?: string };
 
-/** The two embedding models the UI exposes. bge-m3 first = default/primary. */
+/** The embedding model(s) the UI picker exposes. nomic is the only supported/
+ *  default model — bge-m3 was removed (it needs a separate index and isn't used
+ *  on this deployment). */
 export const UI_MODELS: { key: string; label: string }[] = [
-  { key: "bge-m3", label: "BGE-M3" },
   { key: "nomic", label: "nomic" },
 ];
 
-/** Build the PATCH `collections` body to make `chosen` the primary model.
- *  The oracle keeps the FIRST of multiple primaries, so setting only the chosen
- *  model's primary=true leaves the old default (bge-m3) winning — we must set
- *  primary=false on the others too. Every exposed model gets an explicit flag. */
-export function modelPrimaryCollections(
-  chosen: string,
-): Record<string, { primary: boolean }> {
-  const out: Record<string, { primary: boolean }> = {};
-  for (const m of UI_MODELS) out[m.key] = { primary: m.key === chosen };
-  return out;
-}
-
 /** The primary model key from an on-disk config (the one search actually uses),
- *  defaulting to bge-m3. Drives which embed-state-<model>.json we count. */
+ *  defaulting to nomic. Drives which embed-state-<model>.json we count. */
 export function primaryModelOf(
   file: { collections?: Record<string, { primary?: boolean }> } | null,
 ): string {
   const cols = file?.collections || {};
-  return Object.keys(cols).find((k) => cols[k]?.primary === true) || "bge-m3";
+  return Object.keys(cols).find((k) => cols[k]?.primary === true) || "nomic";
 }
 
 /** Synthesize an OracleConfigPayload purely from on-disk files — vector-server
@@ -159,9 +148,9 @@ export function reconcile(input: {
   const enabled = config?.enabled === true;
   const state = config?.state || {};
   const cols = state.collections || {};
-  const primary = state.primary || "bge-m3";
+  const primary = state.primary || "nomic";
   const uiKeys = UI_MODELS.map((m) => m.key);
-  const selected = uiKeys.includes(primary) ? primary : "bge-m3";
+  const selected = uiKeys.includes(primary) ? primary : "nomic";
 
   // Display hybrid/mode: enabled=true is authoritative (ON+Vector). enabled=false
   // is ambiguous (OFF vs ON+Graph) → disambiguate from stored intent.

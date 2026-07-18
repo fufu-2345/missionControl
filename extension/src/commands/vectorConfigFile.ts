@@ -11,9 +11,6 @@ import * as path from "node:path";
 
 const VECTOR_CONFIG_FILE = "vector-server.json";
 
-/** Models the UI can pick, first = default/primary — mirrors searchOps.UI_MODELS. */
-const UI_MODEL_KEYS = ["bge-m3", "nomic"] as const;
-
 export type VectorFileConfig = {
   version: string;
   enabled?: boolean;
@@ -73,8 +70,7 @@ function defaultConfig(): VectorFileConfig {
     host: "0.0.0.0",
     port: 8081,
     collections: {
-      "bge-m3": { adapter: "lancedb", collection: "oracle_knowledge_bge_m3", model: "bge-m3", provider: "ollama", primary: true },
-      nomic: { adapter: "lancedb", collection: "oracle_knowledge", model: "nomic-embed-text", provider: "ollama" },
+      nomic: { adapter: "lancedb", collection: "oracle_knowledge", model: "nomic-embed-text", provider: "ollama", primary: true },
       qwen3: { adapter: "lancedb", collection: "oracle_knowledge_qwen3", model: "qwen3-embedding", provider: "ollama" },
     },
     dataPath: path.join(home, ".oracle", "lancedb"),
@@ -93,15 +89,18 @@ export function applyBackendIntent(
   if (patch.enabled !== undefined) next.enabled = patch.enabled;
 
   if (patch.primaryModel !== undefined) {
-    for (const key of UI_MODEL_KEYS) {
-      const col = next.collections[key] || (next.collections[key] = { collection: key, model: key, provider: "ollama", adapter: "lancedb" });
-      col.primary = key === patch.primaryModel;
-    }
+    // Clear primary on every existing collection, then set the chosen one — so a
+    // switch demotes any prior primary, including collections not in the picker.
+    for (const k of Object.keys(next.collections)) next.collections[k].primary = false;
+    const col =
+      next.collections[patch.primaryModel] ||
+      (next.collections[patch.primaryModel] = { collection: patch.primaryModel, model: patch.primaryModel, provider: "ollama", adapter: "lancedb" });
+    col.primary = true;
   }
 
   // Guarantee a single primary, matching the oracle's reconciliation.
   const primaries = Object.keys(next.collections).filter((k) => next.collections[k].primary);
-  if (primaries.length === 0 && next.collections["bge-m3"]) next.collections["bge-m3"].primary = true;
+  if (primaries.length === 0 && next.collections["nomic"]) next.collections["nomic"].primary = true;
   else if (primaries.length > 1) {
     const keep = primaries[0];
     for (const k of Object.keys(next.collections)) next.collections[k].primary = k === keep;

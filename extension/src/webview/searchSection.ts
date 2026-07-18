@@ -120,7 +120,7 @@ const _script = [
   "    var idxBtn = indexing ? '<button class=\"so-btn\" data-so=\"stop\">Stop</button>' : '<button class=\"so-btn\" data-so=\"index\">Index now</button>';",
   "    var statusRow = '<div class=\"so-status\">'+esc(statusLine)+' '+idxBtn+'</div>';",
   "    var sub = '<div class=\"so-sub'+(v.hybridEnabled?'':' so-disabled')+'\">'",
-  "      + '<div class=\"so-row\"><div><div class=\"so-rl\">Embedding model</div><div class=\"so-rh\">BGE-M3 = default</div>'+mLine+'</div>'+modelSel+'</div>'",
+  "      + '<div class=\"so-row\"><div><div class=\"so-rl\">Embedding model</div><div class=\"so-rh\">nomic = default</div>'+mLine+'</div>'+modelSel+'</div>'",
   "      + (v.modelPath?'<div class=\"so-rh\">model path: '+esc(v.modelPath)+'</div>':'')",
   "      + '</div>';",
   "    var note = v.envOverrideNote ? '<div class=\"so-note\">'+esc(v.envOverrideNote)+'</div>' : '';",

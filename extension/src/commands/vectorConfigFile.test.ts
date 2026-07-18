@@ -41,8 +41,9 @@ describe("writeBackendIntent — no file yet", () => {
     expect(fp).toBe(path.join(tmp, "vector-server.json"));
     const cfg = readVectorFile()!;
     expect(cfg.enabled).toBe(true);
-    // default shape the oracle can boot from
-    expect(cfg.collections["bge-m3"].primary).toBe(true);
+    // default shape the oracle can boot from — nomic-only (bge-m3 removed)
+    expect(cfg.collections.nomic.primary).toBe(true);
+    expect(cfg.collections["bge-m3"]).toBeUndefined();
     expect(cfg.version).toBe("1.0");
   });
 });
