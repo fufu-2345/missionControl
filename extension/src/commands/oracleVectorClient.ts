@@ -97,6 +97,15 @@ export function patchConfig(body: PatchBody): Promise<any> {
   return mutate("/api/vector/config", "PATCH", body);
 }
 
+/** Set exactly one collection as the primary vector model. Uses the oracle's
+ *  dedicated endpoint (server-side withPrimary preserves every other field of
+ *  each collection), instead of a wholesale collections PATCH — on current
+ *  arra/alpha, PATCH shallow-replaces the collections map, so a partial
+ *  {primary} body would drop each collection's model/adapter. */
+export function setPrimary(collection: string): Promise<any> {
+  return mutate(`/api/vector/config/${encodeURIComponent(collection)}/primary`, "POST", {});
+}
+
 export function startIndex(model?: string): Promise<any> {
   return mutate("/api/vector/index/start", "POST", model ? { model } : {});
 }

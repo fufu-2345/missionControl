@@ -6,8 +6,8 @@ import {
   setSetting,
   type SettingEntry,
 } from "../commands/settingsOps";
-import { deriveEnabled, writeIntent, modelPrimaryCollections } from "../commands/searchOps";
-import { OracleOfflineError, patchConfig, startIndex, stopIndex } from "../commands/oracleVectorClient";
+import { deriveEnabled, writeIntent } from "../commands/searchOps";
+import { OracleOfflineError, patchConfig, setPrimary, startIndex, stopIndex } from "../commands/oracleVectorClient";
 import { writeBackendIntent } from "../commands/vectorConfigFile";
 import { pullModel } from "../commands/ollamaPull";
 import {
@@ -139,10 +139,12 @@ export function openSettingsPanel(): vscode.WebviewPanel {
             writeBackendIntent({ enabled });
             await patchConfig({ enabled });
           } else if (msg.field === "model" && typeof msg.value === "string") {
-            // Set the chosen model primary AND unset the others — the oracle keeps
-            // the first of multiple primaries, so a lone {primary:true} won't switch.
+            // Set the chosen model primary via the oracle's dedicated endpoint
+            // (server-side withPrimary flips exactly one primary and preserves
+            // every collection's model/adapter). A wholesale collections PATCH
+            // would drop those fields on current arra.
             writeBackendIntent({ primaryModel: msg.value });
-            await patchConfig({ collections: modelPrimaryCollections(msg.value) });
+            await setPrimary(msg.value);
           }
         } catch (err) {
           if (!(err instanceof OracleOfflineError)) {
