@@ -1,47 +1,24 @@
 import * as vscode from "vscode";
 
-import { MONTHLY_CAP_KEY, computeUsage, getInstantUsage } from "../usage";
+import { computeUsage, getInstantUsage } from "../usage";
 import { buildBudgetView, openBudgetPanel } from "../webview/budget";
 
 // Real Claude Code spend, computed locally from ~/.claude/projects transcripts —
 // no backend. Primary UI is a floating QuickPick popup (no editor tab); the
 // "ดูแบบละเอียด" item opens the themed webview panel for the full view.
-// Compute + cap logic are shared with the panel via buildBudgetView.
+// Compute logic is shared with the panel via buildBudgetView.
 
 interface Row extends vscode.QuickPickItem {
-  action?: "setCap" | "clearCap" | "detail";
+  action?: "detail";
 }
 
-async function setCap(context: vscode.ExtensionContext): Promise<void> {
-  const cap = context.globalState.get<number>(MONTHLY_CAP_KEY);
-  const input = await vscode.window.showInputBox({
-    title: "Monthly budget cap (USD)",
-    value: cap ? String(cap) : "100",
-    prompt: "เทียบกับยอดใช้จ่าย Claude Code ที่คำนวณของเดือนปฏิทินนี้",
-    validateInput: (v) =>
-      Number.isFinite(parseFloat(v)) && parseFloat(v) > 0 ? null : "ต้องเป็นตัวเลขบวก",
-  });
-  if (input === undefined) return;
-  await context.globalState.update(MONTHLY_CAP_KEY, parseFloat(input));
-}
-
-async function clearCap(context: vscode.ExtensionContext): Promise<void> {
-  const pick = await vscode.window.showWarningMessage(
-    "ล้างเพดานงบรายเดือน?",
-    { modal: true },
-    "ล้าง",
-  );
-  if (pick === "ล้าง") await context.globalState.update(MONTHLY_CAP_KEY, undefined);
-}
-
-/** Show the budget as a floating QuickPick. Re-shows itself after a cap edit
- *  so the numbers stay live without leaving the popup. */
-async function showBudgetPopup(context: vscode.ExtensionContext): Promise<void> {
+/** Show the budget as a floating QuickPick. */
+async function showBudgetPopup(): Promise<void> {
   // Instant: use the cached snapshot (kicks a background refresh for next time);
   // only the very first run ever awaits a scan. The QuickPick is one-shot so it
   // shows the cached numbers — a budget glance doesn't need sub-15s freshness.
   const u = (await getInstantUsage()) ?? (await computeUsage());
-  const v = buildBudgetView(context, u);
+  const v = buildBudgetView(u);
 
   const items: Row[] = [
     { label: "$(calendar) " + v.monthFmt, description: "เดือนนี้" },
@@ -51,17 +28,6 @@ async function showBudgetPopup(context: vscode.ExtensionContext): Promise<void> 
   ];
   if (v.providerNote) {
     items.push({ label: "$(warning) " + v.providerNote });
-  }
-  items.push(
-    { label: "เพดานงบ", kind: vscode.QuickPickItemKind.Separator },
-    {
-      label: "$(gear) " + (v.hasCap ? "แก้เพดานงบรายเดือน" : "ตั้งเพดานงบรายเดือน"),
-      description: v.capNote,
-      action: "setCap",
-    },
-  );
-  if (v.hasCap) {
-    items.push({ label: "$(trash) ล้างเพดานงบ", action: "clearCap" });
   }
 
   const tokFmt = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
@@ -92,19 +58,13 @@ async function showBudgetPopup(context: vscode.ExtensionContext): Promise<void> 
 
   if (!picked?.action) return;
   if (picked.action === "detail") {
-    openBudgetPanel(context);
-  } else if (picked.action === "setCap") {
-    await setCap(context);
-    await showBudgetPopup(context);
-  } else if (picked.action === "clearCap") {
-    await clearCap(context);
-    await showBudgetPopup(context);
+    openBudgetPanel();
   }
 }
 
-export async function budgetCommand(context: vscode.ExtensionContext): Promise<void> {
+export async function budgetCommand(_context: vscode.ExtensionContext): Promise<void> {
   try {
-    await showBudgetPopup(context);
+    await showBudgetPopup();
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     vscode.window.showErrorMessage(`Mission Control: Budget failed — ${msg}`);

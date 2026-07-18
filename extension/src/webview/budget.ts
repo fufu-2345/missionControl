@@ -5,7 +5,6 @@ import * as vscode from "vscode";
 import { type ProjectDetail, buildDetail } from "../budget-detail";
 import { openBudgetDetailPanel } from "./budget-detail-page";
 import {
-  MONTHLY_CAP_KEY,
   type Breakdown,
   type UsageSummary,
   addBreakdown,
@@ -22,10 +21,9 @@ import {
 
 // Editor-area panel for real Claude Code spend, computed locally from
 // ~/.claude/projects transcripts (no backend). Replaces the old native
-// showInformationMessage modal — same data + cap logic, themed webview
-// so it matches the Accounts/Teams panels. Singleton _panel mirrors
-// accounts.ts; the client script stays dumb (host sends display-ready
-// strings), and cap edits round-trip through native input/confirm prompts.
+// showInformationMessage modal — themed webview so it matches the
+// Accounts/Teams panels. Singleton _panel mirrors accounts.ts; the client
+// script stays dumb (host sends display-ready strings).
 let _panel: vscode.WebviewPanel | undefined;
 
 const fmt = (n: number) => "$" + n.toFixed(2);
@@ -38,10 +36,6 @@ export interface BudgetView {
   todayFmt: string;
   last7Fmt: string;
   allTimeFmt: string;
-  capState: "none" | "under" | "over";
-  capNote: string;
-  capPct: number;
-  hasCap: boolean;
   projects: ProjectRow[]; // every project under projects/ — client sorts + pages
   monthStartMs: number; // local start-of-month (ms) — client's "this month" filter
   providerNote: string; // reminder when a provider on disk isn't summed in yet ("" = none)
@@ -59,9 +53,9 @@ export interface ProjectRow {
 }
 
 /** Build the full display view from a usage snapshot `u`: this-month / today /
- *  7-day / all-time USD, cap status, and the projects — all pre-formatted.
+ *  7-day / all-time USD and the projects — all pre-formatted.
  *  Pure (no scanning) so callers decide instant-cached vs freshly-scanned. */
-export function buildBudgetView(context: vscode.ExtensionContext, u: UsageSummary): BudgetView {
+export function buildBudgetView(u: UsageSummary): BudgetView {
   const month = sumByPrefix(u, localMonthKey());
   const today = sumByPrefix(u, localTodayKey());
 
@@ -74,21 +68,6 @@ export function buildBudgetView(context: vscode.ExtensionContext, u: UsageSummar
     const t = new Date(day + "T00:00:00"); // no "Z" -> local midnight
     if (!Number.isNaN(t.getTime()) && t.getTime() >= cutoff.getTime()) {
       last7 += u.byDay[day].cost;
-    }
-  }
-
-  const cap = context.globalState.get<number>(MONTHLY_CAP_KEY);
-  let capState: "none" | "under" | "over" = "none";
-  let capNote = "ยังไม่ได้ตั้งเพดานรายเดือน";
-  let capPct = 0;
-  if (cap && cap > 0) {
-    capPct = Math.min(100, Math.round((month / cap) * 100));
-    if (month > cap) {
-      capState = "over";
-      capNote = "เกินงบ " + fmt(month - cap) + " (เพดาน " + fmt(cap) + ")";
-    } else {
-      capState = "under";
-      capNote = "เหลืออีก " + fmt(cap - month) + " จากเพดาน " + fmt(cap);
     }
   }
 
@@ -141,10 +120,6 @@ export function buildBudgetView(context: vscode.ExtensionContext, u: UsageSummar
     todayFmt: fmt(today),
     last7Fmt: fmt(last7),
     allTimeFmt: fmt(u.total.cost),
-    capState,
-    capNote,
-    capPct,
-    hasCap: !!(cap && cap > 0),
     projects,
     monthStartMs: monthStart.getTime(),
     providerNote,
@@ -152,51 +127,38 @@ export function buildBudgetView(context: vscode.ExtensionContext, u: UsageSummar
   };
 }
 
-function postView(
-  context: vscode.ExtensionContext,
-  panel: vscode.WebviewPanel,
-  u: UsageSummary,
-): void {
-  panel.webview.postMessage({ type: "budget", ...buildBudgetView(context, u) });
+function postView(panel: vscode.WebviewPanel, u: UsageSummary): void {
+  panel.webview.postMessage({ type: "budget", ...buildBudgetView(u) });
 }
 
 /** Paint instantly from the cached snapshot, then repaint when a fresh scan
  *  lands (stale-while-revalidate) — the panel never blocks on the ~5s cold
  *  parse. Only the very first run (no snapshot at all) awaits one scan. */
-function pushInstant(context: vscode.ExtensionContext, panel: vscode.WebviewPanel): void {
+function pushInstant(panel: vscode.WebviewPanel): void {
   void (async () => {
     const cached = await getInstantUsage();
     if (cached) {
-      postView(context, panel, cached);
+      postView(panel, cached);
       void refreshUsage()
-        .then((fresh) => postView(context, panel, fresh))
+        .then((fresh) => postView(panel, fresh))
         .catch(() => {});
     } else {
-      postView(context, panel, await computeUsage());
+      postView(panel, await computeUsage());
     }
   })();
 }
 
 /** Explicit refresh button — recompute from disk, then repaint. */
-function pushFresh(context: vscode.ExtensionContext, panel: vscode.WebviewPanel): void {
+function pushFresh(panel: vscode.WebviewPanel): void {
   void refreshUsage()
-    .then((u) => postView(context, panel, u))
+    .then((u) => postView(panel, u))
     .catch(() => {});
 }
 
-/** Repaint after a cap edit — cap doesn't change spend, so use the cached
- *  snapshot (no scan needed). */
-function pushCap(context: vscode.ExtensionContext, panel: vscode.WebviewPanel): void {
-  void (async () => {
-    const u = (await getInstantUsage()) ?? (await computeUsage());
-    postView(context, panel, u);
-  })();
-}
-
-export function openBudgetPanel(context: vscode.ExtensionContext): vscode.WebviewPanel {
+export function openBudgetPanel(): vscode.WebviewPanel {
   if (_panel) {
     _panel.reveal();
-    pushInstant(context, _panel);
+    pushInstant(_panel);
     return _panel;
   }
   const panel = vscode.window.createWebviewPanel(
@@ -217,38 +179,11 @@ export function openBudgetPanel(context: vscode.ExtensionContext): vscode.Webvie
 
     switch (msg.type) {
       case "ready": // initial open — instant cached paint + background refresh
-        pushInstant(context, panel);
+        pushInstant(panel);
         return;
       case "reload": // explicit ⟳ refresh button — recompute from disk
-        pushFresh(context, panel);
+        pushFresh(panel);
         return;
-
-      case "setCap": {
-        const cap = context.globalState.get<number>(MONTHLY_CAP_KEY);
-        const input = await vscode.window.showInputBox({
-          title: "Monthly budget cap (USD)",
-          value: cap ? String(cap) : "100",
-          prompt: "เทียบกับยอดใช้จ่าย Claude Code ที่คำนวณของเดือนปฏิทินนี้",
-          validateInput: (v) =>
-            Number.isFinite(parseFloat(v)) && parseFloat(v) > 0 ? null : "ต้องเป็นตัวเลขบวก",
-        });
-        if (input === undefined) return;
-        await context.globalState.update(MONTHLY_CAP_KEY, parseFloat(input));
-        pushCap(context, panel);
-        return;
-      }
-
-      case "clearCap": {
-        const pick = await vscode.window.showWarningMessage(
-          "ล้างเพดานงบรายเดือน?",
-          { modal: true },
-          "ล้าง",
-        );
-        if (pick !== "ล้าง") return;
-        await context.globalState.update(MONTHLY_CAP_KEY, undefined);
-        pushCap(context, panel);
-        return;
-      }
 
       case "openProjectDetail": {
         const { projectPath, projectName } = msg;
@@ -306,21 +241,6 @@ function renderShell(): string {
   .tile .v { font-size: 22px; font-weight: 700; margin-top: 7px; letter-spacing: -0.5px; }
 
   .section-k { font-size: 11px; font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; opacity: 0.6; margin: 0 0 10px; }
-
-  .cap {
-    border: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); border-radius: 10px;
-    padding: 15px 17px; margin-bottom: 24px;
-  }
-  .cap-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
-  .cap-note { font-size: 13px; font-weight: 600; }
-  .cap-note.over { color: var(--vscode-charts-red, #f14c4c); }
-  .cap-note.none { opacity: 0.6; font-weight: 500; }
-  .cap-btns { display: flex; gap: 6px; flex-shrink: 0; }
-  .bar { height: 8px; border-radius: 6px; background: var(--vscode-panel-border, rgba(128,128,128,0.25)); overflow: hidden; }
-  .bar > span { display: block; height: 100%; border-radius: 6px; background: var(--vscode-charts-green, #3fb950); transition: width 0.3s; }
-  .bar > span.warn { background: var(--vscode-charts-yellow, #d18616); }
-  .bar > span.over { background: var(--vscode-charts-red, #f14c4c); }
-  .cap-pct { font-size: 11px; opacity: 0.6; margin-top: 7px; text-align: right; }
 
   .primary {
     background: var(--vscode-button-background); color: var(--vscode-button-foreground);
@@ -419,9 +339,6 @@ function renderShell(): string {
 
   <div class="notice" id="provider-note" style="display:none"></div>
 
-  <div class="section-k">เพดานงบรายเดือน</div>
-  <div class="cap" id="cap"></div>
-
   <div class="pk-head">
     <div class="section-k" id="projects-k" style="margin:0">โปรเจกต์</div>
     <div class="sortbar">
@@ -467,12 +384,25 @@ function renderShell(): string {
     var total = 0, i;
     for (i = 0; i < slices.length; i++) total += slices[i].cost;
     if (total <= 0) return "transparent";
-    var acc = 0, stops = [];
+    // Floor each NONZERO slice to MIN_DEG so a tiny-but-real share (e.g. Input at
+    // 0.0%) still shows a visible wedge instead of collapsing to a 0deg band. The
+    // big slices then share whatever degrees remain, so the disc still sums to
+    // 360; a genuinely zero slice (cost 0) gets no wedge at all.
+    var MIN_DEG = 8, raw = [], smallDeg = 0, bigRaw = 0;
     for (i = 0; i < slices.length; i++) {
-      var start = (acc / total) * 360;
-      acc += slices[i].cost;
-      var end = (acc / total) * 360;
-      stops.push(slices[i].color + " " + start.toFixed(2) + "deg " + end.toFixed(2) + "deg");
+      raw[i] = (slices[i].cost / total) * 360;
+      if (raw[i] <= 0) continue;
+      if (raw[i] < MIN_DEG) smallDeg += MIN_DEG; else bigRaw += raw[i];
+    }
+    var room = 360 - smallDeg; // degrees left for the big (>= MIN_DEG) slices
+    var acc = 0, stops = [], d;
+    for (i = 0; i < slices.length; i++) {
+      if (raw[i] <= 0) continue;
+      else if (raw[i] < MIN_DEG) d = MIN_DEG;
+      else d = (room > 0 && bigRaw > 0) ? (raw[i] / bigRaw) * room : raw[i];
+      var start = acc;
+      acc += d;
+      stops.push(slices[i].color + " " + start.toFixed(2) + "deg " + acc.toFixed(2) + "deg");
     }
     return "conic-gradient(" + stops.join(", ") + ")";
   }
@@ -622,18 +552,6 @@ function renderShell(): string {
       })
       .join("");
 
-    const barCls = v.capState === "over" ? "over" : v.capPct >= 80 ? "warn" : "";
-    let capHtml = '<div class="cap-top">';
-    capHtml += '<div class="cap-note ' + esc(v.capState) + '">' + esc(v.capNote) + "</div>";
-    capHtml += '<div class="cap-btns"><button class="primary" id="setcap">' + (v.hasCap ? "แก้เพดาน" : "ตั้งเพดาน") + "</button>";
-    if (v.hasCap) capHtml += '<button class="b" id="clearcap">ล้าง</button>';
-    capHtml += "</div></div>";
-    if (v.hasCap) {
-      capHtml += '<div class="bar"><span class="' + barCls + '" style="width:' + v.capPct + '%"></span></div>';
-      capHtml += '<div class="cap-pct">' + v.capPct + "% ของเพดาน</div>";
-    }
-    document.getElementById("cap").innerHTML = capHtml;
-
     var pn = document.getElementById("provider-note");
     if (v.providerNote) {
       pn.textContent = "⚠ " + v.providerNote;
@@ -668,8 +586,6 @@ function renderShell(): string {
     }
     if (!t.id) return;
     if (t.id === "refresh") post("reload");
-    else if (t.id === "setcap") post("setCap");
-    else if (t.id === "clearcap") post("clearCap");
     else if (t.id === "sort-field") { STATE.sortKey = STATE.sortKey === "tokens" ? "usd" : STATE.sortKey === "usd" ? "recent" : "tokens"; STATE.page = 0; renderProjects(); }
     else if (t.id === "sort-dir") { STATE.sortDir = STATE.sortDir === "desc" ? "asc" : "desc"; STATE.page = 0; renderProjects(); }
     else if (t.id === "scope") { STATE.scope = STATE.scope === "month" ? "all" : "month"; STATE.page = 0; renderProjects(); }

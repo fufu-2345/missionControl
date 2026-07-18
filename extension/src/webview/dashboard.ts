@@ -23,7 +23,7 @@ import { parseTeamRoster, type OracleTeam } from "../commands/teams";
 import { parseOrchesMeta, type ResumableProject } from "../commands/orchestratorResume";
 import * as gitOps from "../commands/gitOps";
 import { parseGitButtonState, type GitButtonState } from "../commands/gitStatus";
-import { MONTHLY_CAP_KEY, computeUsage, localMonthKey, sumByPrefix } from "../usage";
+import { computeUsage, localMonthKey, sumByPrefix } from "../usage";
 import {
   TMUX_FMT,
   type TmuxSession,
@@ -124,7 +124,7 @@ export function openDashboardPanel(
   // (cheap GETs) so they self-heal within STATUS_POLL_MS (bug-audit #4/#5).
   const refreshLiveCards = async () => {
     await Promise.all([
-      pushBudget(panel, context),
+      pushBudget(panel),
       pushSkillCount(panel),
       pushMemoryShare(panel),
     ]);
@@ -716,29 +716,15 @@ async function pushProjects(panel: vscode.WebviewPanel): Promise<boolean> {
   }
 }
 
-async function pushBudget(
-  panel: vscode.WebviewPanel,
-  context: vscode.ExtensionContext,
-): Promise<void> {
+async function pushBudget(panel: vscode.WebviewPanel): Promise<void> {
   try {
     // Real Claude Code spend this calendar month, computed from local
-    // transcripts (no backend). Cap is a user-set monthly target in globalState.
+    // transcripts (no backend).
     const u = await computeUsage();
     const month = sumByPrefix(u, localMonthKey());
-    const cap = context.globalState.get<number>(MONTHLY_CAP_KEY) ?? null;
-    panel.webview.postMessage({
-      type: "budget",
-      spent_usd: month,
-      cap_usd: cap,
-      over_cap: cap != null && month > cap,
-    });
+    panel.webview.postMessage({ type: "budget", spent_usd: month });
   } catch {
-    panel.webview.postMessage({
-      type: "budget",
-      spent_usd: 0,
-      cap_usd: null,
-      over_cap: false,
-    });
+    panel.webview.postMessage({ type: "budget", spent_usd: 0 });
   }
 }
 
@@ -1015,7 +1001,7 @@ function renderHtml(): string {
         <div class="title">Open Claude</div>
         <div class="sub">เลือก project → เปิด Claude ใน tmux (ปิด tab ไม่ตาย)</div>
       </button>
-      <button class="tile" type="button" onclick="run('missioncontrol.budget')">
+      <button class="tile" type="button" onclick="run('missioncontrol.budgetPanel')">
         <div class="title">Budget</div>
         <div class="sub" id="budgetSub">$0.00 spent</div>
       </button>
@@ -1249,9 +1235,7 @@ function renderHtml(): string {
       if (st) st.textContent = m.online ? "Running" : "Stopped";
     } else if (m.type === "budget") {
       const sub = document.getElementById("budgetSub");
-      const spent = (m.spent_usd ?? 0).toFixed(2);
-      const cap = m.cap_usd ? " / $" + m.cap_usd.toFixed(2) : "";
-      sub.textContent = "$" + spent + cap + (m.over_cap ? " (over)" : "");
+      sub.textContent = "$" + (m.spent_usd ?? 0).toFixed(2) + " spent";
     } else if (m.type === "skill_count") {
       const sub = document.getElementById("skillsSub");
       if (sub) sub.textContent = (m.enabled ?? 0) + " active / " + (m.total ?? 0) + " total";

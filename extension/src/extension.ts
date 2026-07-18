@@ -17,6 +17,7 @@ import { statusCommand } from "./commands/status";
 import { terminalCommand } from "./commands/terminal";
 import { PROJECT_STATE_KEY, setCurrentProjectId } from "./projectState";
 import { registerStatusBar } from "./statusBar";
+import { openBudgetPanel } from "./webview/budget";
 import { openOrchestratorPanel } from "./webview/orchestrator";
 import { registerSidebar } from "./webview/sidebar";
 import { openIdeasPanel, type Idea } from "./webview/ideas";
@@ -38,6 +39,9 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("missioncontrol.status", () => statusCommand(context)),
     vscode.commands.registerCommand("missioncontrol.approve", () => approveCommand(context)),
     vscode.commands.registerCommand("missioncontrol.budget", () => budgetCommand(context)),
+    // Dashboard's Budget tile opens the full page directly via this; the QuickPick
+    // (missioncontrol.budget) stays for the command palette + cap-warning action.
+    vscode.commands.registerCommand("missioncontrol.budgetPanel", () => openBudgetPanel()),
     vscode.commands.registerCommand("missioncontrol.skills", () => skillsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.teams", () => teamsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.accounts", () => accountsCommand(context)),

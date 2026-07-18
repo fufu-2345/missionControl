@@ -36,6 +36,10 @@ export interface UsageSummary {
   // data the detail page charts. Kept per-cwd (not pre-collapsed) so the SAME
   // resolveProject grouping the budget page uses can fold sub-dir cwds together.
   byProjectHour: Record<string, Record<string, Bucket>>;
+  // cwd -> ("YYYY-MM-DD" LOCAL) -> per-category token/cost split. Per-DAY (not
+  // hour) is enough for the detail page's range-scoped token pie since the picked
+  // range is day-bounded; keeps the payload/cache small.
+  byProjectDayDetail: Record<string, Record<string, Breakdown>>;
   projectLastMs: Record<string, number>; // key = cwd -> latest touched session mtime (ms)
   fileCount: number;
   computedAt: number;
@@ -191,6 +195,7 @@ interface FileAgg extends Bucket {
   // collapsing all their recencies together and scrambling the "ล่าสุด" sort.
   projectLastMs: Record<string, number>;
   byProjectDetail: Record<string, Breakdown>;
+  byProjectDayDetail: Record<string, Record<string, Breakdown>>;
 }
 
 // Per-file cache keyed by path → re-read a transcript only when its mtime/size
@@ -219,7 +224,7 @@ const CACHE_FILE = path.join(os.homedir(), ".cache", "mission-control", "usage-f
 // PER cwd so the detail page can chart one project's usage over time, not the
 // whole machine's) — so hydrate discards the stale cache and the next scan
 // recomputes everything.
-const CACHE_VERSION = 6;
+const CACHE_VERSION = 7;
 let hydrated = false;
 
 async function hydrateFileCache(): Promise<void> {
@@ -333,6 +338,7 @@ async function aggregateFile(file: string): Promise<FileAgg | null> {
     byProjectHour: {},
     projectLastMs: {},
     byProjectDetail: {},
+    byProjectDayDetail: {},
   };
   let raw: string;
   try {
@@ -390,6 +396,9 @@ async function aggregateFile(file: string): Promise<FileAgg | null> {
     const proj = typeof d.cwd === "string" && d.cwd ? d.cwd : "unknown";
     bump(agg.byProject, proj, pl.cost, pl.tokens);
     agg.byProjectDetail[proj] = addBreakdown(agg.byProjectDetail[proj] ?? emptyBreakdown(), pl.bd);
+    // Per-project, per-DAY split — feeds the detail page's range-scoped token pie.
+    const ddet = agg.byProjectDayDetail[proj] || (agg.byProjectDayDetail[proj] = {});
+    ddet[day] = addBreakdown(ddet[day] ?? emptyBreakdown(), pl.bd);
     // Per-project hour bucket — the detail page's usage-over-time series.
     const hour = typeof d.timestamp === "string" ? localHourKey(d.timestamp) : "unknown";
     bumpNested(agg.byProjectHour, proj, hour, pl.cost, pl.tokens);
@@ -458,6 +467,7 @@ async function scan(): Promise<UsageSummary> {
   const byProject: Record<string, Bucket> = {};
   const byProjectDetail: Record<string, Breakdown> = {};
   const byProjectHour: Record<string, Record<string, Bucket>> = {};
+  const byProjectDayDetail: Record<string, Record<string, Breakdown>> = {};
   const projectLastMs: Record<string, number> = {};
 
   // Read/parse transcripts CONCURRENTLY (bounded) — they're independent, and a
@@ -515,6 +525,11 @@ async function scan(): Promise<UsageSummary> {
     for (const k of Object.keys(agg.byProjectDetail)) {
       byProjectDetail[k] = addBreakdown(byProjectDetail[k] ?? emptyBreakdown(), agg.byProjectDetail[k]);
     }
+    for (const cwd of Object.keys(agg.byProjectDayDetail)) {
+      const inner = agg.byProjectDayDetail[cwd];
+      const dst = byProjectDayDetail[cwd] || (byProjectDayDetail[cwd] = {});
+      for (const dk of Object.keys(inner)) dst[dk] = addBreakdown(dst[dk] ?? emptyBreakdown(), inner[dk]);
+    }
     // "recency" = the newest LINE timestamp recorded for that cwd, across every
     // file — a per-project signal, unlike the file's mtime which one shared
     // oracle session file would smear across all the projects it ever touched.
@@ -529,6 +544,7 @@ async function scan(): Promise<UsageSummary> {
     byProject,
     byProjectDetail,
     byProjectHour,
+    byProjectDayDetail,
     projectLastMs,
     fileCount: files.length,
     computedAt: Date.now(),
@@ -631,4 +647,17 @@ export function collapseProjectHours(u: UsageSummary, absRoot: string): Record<s
   return out;
 }
 
-export const MONTHLY_CAP_KEY = "missioncontrol.monthlyCapUsd";
+/** Per-project, per-DAY Breakdown ("YYYY-MM-DD" LOCAL -> split), merged across the
+ *  project's cwds (same resolveProject grouping as collapseProjectHours). The
+ *  detail page sums these over the picked date range to draw the token-cost pie. */
+export function collapseProjectDayDetail(u: UsageSummary, absRoot: string): Record<string, Breakdown> {
+  const out: Record<string, Breakdown> = {};
+  const src = u.byProjectDayDetail || {};
+  for (const cwd of Object.keys(src)) {
+    const p = resolveProject(cwd);
+    if (!p || p.root !== absRoot) continue;
+    const inner = src[cwd];
+    for (const dk of Object.keys(inner)) out[dk] = addBreakdown(out[dk] ?? emptyBreakdown(), inner[dk]);
+  }
+  return out;
+}
