@@ -837,6 +837,8 @@ function renderShell(): string {
   .del.disabled { color:#6e7681; border-color:#6e7681; cursor:not-allowed; }
   .del.disabled:hover { background:none; }
   #editBtn.on { background:rgba(248,81,73,0.15); color:#f85149; border-color:#f85149; }
+  #archBtn.on { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+  .archbadge { font-size: 11px; color: #e3a13a; align-self: center; margin-left: 4px; }
   .modal-card .mbtn.danger { border-color:#f85149; color:#fff; background:#da3633; }
   .modal-card .mbtn.danger:hover { background:#f85149; }
   .modal-card .mbtn.danger:disabled { background:rgba(218,54,51,0.35); border-color:transparent; color:rgba(255,255,255,0.5); cursor:not-allowed; }
@@ -1136,7 +1138,8 @@ function renderShell(): string {
       + (showNew ? '<button id="newProjBtn" title="เริ่ม build โปรเจคใหม่" style="border-color:#2ea043;color:#3fb950;">+ เริ่มโปรเจคใหม่</button>' : '')
       + (askable ? '<button id="askBtn" title="เปิด = สัมภาษณ์ requirement ละเอียด (grilling) + รีวิวแผนก่อนลงมือ (scrutinize)" style="'+askBtnStyle()+'">'+askBtnLabel()+'</button>' : '')
       + (showFetch ? '<button id="reloadBtn">fetch</button>' : '')
-      + (showEdit ? '<button id="editBtn" title="เปิดเพื่อลบโปรเจคที่ไม่ใช้">Edit</button>' : '');
+      + (showEdit ? '<button id="editBtn" title="เปิดเพื่อลบโปรเจคที่ไม่ใช้">Edit</button>' : '')
+      + (showEdit ? '<button id="archBtn" title="ดู/ซ่อนโปรเจกต์ที่ลบไปแล้ว (อ่านอย่างเดียว)">ที่ลบไปแล้ว</button>' : '');
   }
   function wireActions(canBack){
     if (canBack){ var b=el("backBtn"); if(b) b.addEventListener('click',function(){post('back');}); }
@@ -1147,6 +1150,7 @@ function renderShell(): string {
     var rb=el("reloadBtn"); if(rb) rb.addEventListener('click',function(){post('git_refresh');});
     var eb=el("editBtn"); if(eb) eb.addEventListener('click',function(){
       var c=el("content"); var on=c.classList.toggle('edit'); eb.classList.toggle('on', on); });
+    var arb=el("archBtn"); if(arb) arb.addEventListener('click',function(){post('toggle_archived');});
   }
 
   // ── git button (project rows) ────────────────────────────────────────────
@@ -1201,6 +1205,11 @@ function renderShell(): string {
 
   function backBtnHtml(){ return '<button id="backBtn" class="iconbtn" title="ขึ้นบน / ย้อนกลับ">'+_icoUp+'<span>..</span></button>'; }
   function detailActionsHtml(githubUrl){
+    if(_detail.archived){
+      return (_navStack.length ? backBtnHtml() : '')
+        + '<button id="closeBtn">✕ ปิด</button>'
+        + '<span class="archbadge" title="สำเนาสำรองของโปรเจกต์ที่ถูกลบ">อ่านอย่างเดียว (ลบไปแล้ว)</span>';
+    }
     var lh = _previewAvail
       ? '<button id="lhBtn" title="รัน dev server แล้วเปิด browser (กดซ้ำ = หยุด)">'
           + (_previewRunning ? '⏹ หยุด' : '🌐 localhost') + '</button>'
@@ -1228,6 +1237,7 @@ function renderShell(): string {
     disarmAll();                       // leaving the projects screen → drop any armed git action
     _lastProjKey = null;               // invalidate skip-guard → a return to projects re-renders
     _detail = { title:m.title, subtitle:m.subtitle, githubUrl:m.githubUrl };
+    _detail.archived = !!m.archived;
     _previewRunning = !!(m.preview && m.preview.running);
     _previewAvail   = !!(m.preview && m.preview.available);
     _docCache = {};                    // fresh project → fresh cache
@@ -1435,6 +1445,26 @@ function renderShell(): string {
     // อยู่ใน AUTO (script ตัวนี้รันครั้งเดียว) จึงต้อง apply กลับเข้าปุ่มทุกใบ
     items.forEach(function(it){ applyAutoUi(it.path); });
   }
+  // The deleted-projects list — read-only rows (name + delete date), no git/continue/
+  // delete controls. Reuses the projects action bar so the toggle button stays present
+  // to switch back to the live list.
+  function renderArchived(m){
+    _lastProjKey = null;                 // returning to live projects must re-render
+    el("title").textContent = m.title; el("subtitle").textContent = m.subtitle;
+    el("actions").innerHTML = actionsHtml(false, false, false, true, true, false); wireActions(false);
+    var arb=el("archBtn"); if(arb) arb.classList.add('on');
+    var items = m.items||[];
+    el("content").innerHTML = items.length ? items.map(function(it){
+      var when = it.deletedAt ? String(it.deletedAt).slice(0,10) : '';
+      return '<div class="card" data-path="'+esc(it.path)+'">'
+        +'<div style="flex:1"><button class="pick"><span class="cname">'+esc(it.name)+'</span>'
+        +'<span class="csub">ลบไปแล้วเมื่อ '+esc(when)+'</span></button></div></div>';
+    }).join('') : '<div class="empty">'+esc(m.subtitle)+'</div>';
+    el("content").querySelectorAll('.card').forEach(function(card){
+      var path=card.dataset.path;
+      card.addEventListener('click',function(){ post('pick_archived',{path:path}); });
+    });
+  }
   function wireGit(card, path){
     var ed=card.querySelector('.git-editor'), act=card.querySelector('.git-act');
     if(act) act.addEventListener('click',function(e){ e.stopPropagation();
@@ -1575,6 +1605,7 @@ function renderShell(): string {
   window.addEventListener("message",function(e){
     var m=e.data; if(!m||!m.type) return;
     if(m.type==="screen_projects") renderProjects(m);
+    else if(m.type==="screen_archived") renderArchived(m);
     else if(m.type==="screen_teams") renderTeams(m);
     else if(m.type==="screen_orch") renderOrch(m);
     else if(m.type==="screen_detail") renderDetail(m);
