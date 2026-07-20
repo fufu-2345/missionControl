@@ -3,10 +3,14 @@ import * as vscode from "vscode";
 import { accountsCommand } from "./commands/accountsPanel";
 import { approveCommand } from "./commands/approve";
 import { budgetCommand } from "./commands/budget";
+import { attachToClaudeCommand, pasteImageToClaudeCommand } from "./commands/attachToClaude";
 import { claudeCommand } from "./commands/claude";
+import { initClaudeTerminalRegistry } from "./commands/claudeTerminals";
+import { compactFocusedClaudeCommand, initClaudeContextStatusBar } from "./commands/claudeContextStatusBar";
 import { dashboardCommand } from "./commands/dashboard";
 import { installCommand } from "./commands/install";
 import { mawToggleCommand } from "./commands/mawServe";
+import { openObsidianCommand } from "./commands/openObsidian";
 import { settingsCommand } from "./commands/settingsPanel";
 import { setupCommand } from "./commands/setup";
 import { skillsCommand } from "./commands/skills";
@@ -18,6 +22,7 @@ import { terminalCommand } from "./commands/terminal";
 import { PROJECT_STATE_KEY, setCurrentProjectId } from "./projectState";
 import { registerStatusBar } from "./statusBar";
 import { openBudgetPanel } from "./webview/budget";
+import { openDataViewPanel } from "./webview/dataView";
 import { openOrchestratorPanel } from "./webview/orchestrator";
 import { registerSidebar } from "./webview/sidebar";
 import { openIdeasPanel, type Idea } from "./webview/ideas";
@@ -42,12 +47,26 @@ export function activate(context: vscode.ExtensionContext) {
     // Dashboard's Budget tile opens the full page directly via this; the QuickPick
     // (missioncontrol.budget) stays for the command palette + cap-warning action.
     vscode.commands.registerCommand("missioncontrol.budgetPanel", () => openBudgetPanel()),
+    // Cross-project Data View — project status parsed from each project's .md docs
+    // (table / kanban / timeline). Opened from a Project Detail button + palette.
+    vscode.commands.registerCommand("missioncontrol.dataView", () => openDataViewPanel()),
+    // Launch the Obsidian desktop app (opens its last-used vault) from the dashboard.
+    vscode.commands.registerCommand("missioncontrol.openObsidian", () => openObsidianCommand()),
     vscode.commands.registerCommand("missioncontrol.skills", () => skillsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.teams", () => teamsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.accounts", () => accountsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.settings", () => settingsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.dashboard", () => dashboardCommand(context)),
     vscode.commands.registerCommand("missioncontrol.claude", () => claudeCommand(context)),
+    // Attach a file/image to a live Claude REPL: pick it in VS Code, type its
+    // absolute path into the tmux pane; Claude Code reads it from disk.
+    vscode.commands.registerCommand("missioncontrol.attachToClaude", () => attachToClaudeCommand()),
+    // Paste an image off the OS clipboard into the Claude REPL (saves to a temp
+    // file, injects its path). VS Code clipboard is text-only, so this shells
+    // out to xclip/wl-paste.
+    vscode.commands.registerCommand("missioncontrol.pasteImageToClaude", () => pasteImageToClaudeCommand()),
+    // Clickable context pill (status bar) → /compact the focused Claude REPL.
+    vscode.commands.registerCommand("missioncontrol.compactFocusedClaude", () => compactFocusedClaudeCommand()),
     vscode.commands.registerCommand("missioncontrol.mawToggle", () => mawToggleCommand(context)),
     vscode.commands.registerCommand("missioncontrol.terminal", () => terminalCommand(context)),
     vscode.commands.registerCommand("missioncontrol.startOrchestrator", () => startOrchestratorCommand(context)),
@@ -59,6 +78,9 @@ export function activate(context: vscode.ExtensionContext) {
 
   registerStatusBar(context);
   registerSidebar(context);
+  // Terminal→session registry + the clickable Claude context pill.
+  initClaudeTerminalRegistry(context);
+  initClaudeContextStatusBar(context);
 
   // WS client — listens for ideas_ready and auto-opens swipe panel.
   // The ws_server already filters events by the client's set_project_ids, so

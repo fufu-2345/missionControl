@@ -5,16 +5,15 @@ import * as vscode from "vscode";
 import { type ProjectDetail, buildDetail } from "../budget-detail";
 import { openBudgetDetailPanel } from "./budget-detail-page";
 import {
-  type Breakdown,
+  type ProjectAgg,
   type UsageSummary,
-  addBreakdown,
   computeUsage,
-  emptyBreakdown,
   getInstantUsage,
+  getProjectLedger,
+  groupByProjectRoot,
   localMonthKey,
   localTodayKey,
   refreshUsage,
-  resolveProject,
   sumByPrefix,
   unwiredProviders,
 } from "../usage";
@@ -28,8 +27,8 @@ let _panel: vscode.WebviewPanel | undefined;
 
 const fmt = (n: number) => "$" + n.toFixed(2);
 
-// resolveProject (cwd -> project root/name, the projects/ grouping) now lives in
-// usage.ts so the detail page can reuse the exact same grouping — imported above.
+// resolveProject / groupByProjectRoot (cwd -> project root/name grouping) live in
+// usage.ts so the detail page reuses the exact same grouping — imported above.
 
 export interface BudgetView {
   monthFmt: string;
@@ -50,12 +49,15 @@ export interface ProjectRow {
   tokens: number; // total tokens — client sorts by "token ที่ใช้"
   lastMs: number; // last activity (ms) — client sorts by recency + month filter
   detail: ProjectDetail; // per-category token/$ split — powers the click-to-open pie popup
+  live: boolean; // false = folder/transcripts gone now; numbers come from the durable ledger
 }
 
 /** Build the full display view from a usage snapshot `u`: this-month / today /
- *  7-day / all-time USD and the projects — all pre-formatted.
- *  Pure (no scanning) so callers decide instant-cached vs freshly-scanned. */
-export function buildBudgetView(u: UsageSummary): BudgetView {
+ *  7-day / all-time USD and the projects — all pre-formatted. Reads the durable
+ *  project ledger (a small cached file, not a rescan) so projects whose folder
+ *  was since deleted locally still show their last-known spend instead of
+ *  silently disappearing. */
+export async function buildBudgetView(u: UsageSummary): Promise<BudgetView> {
   const month = sumByPrefix(u, localMonthKey());
   const today = sumByPrefix(u, localTodayKey());
 
@@ -73,23 +75,22 @@ export function buildBudgetView(u: UsageSummary): BudgetView {
 
   const home = os.homedir();
 
-  // Collapse every recorded cwd onto its project under projects/, summing cost
-  // and keeping the newest activity. cwds not under a projects/ folder (oracles,
-  // tools, home) are skipped.
-  const byKey = new Map<
-    string,
-    { cost: number; tokens: number; lastMs: number; name: string; det: Breakdown }
-  >();
-  for (const cwd of Object.keys(u.byProject)) {
-    const proj = resolveProject(cwd);
-    if (!proj) continue;
-    const cur =
-      byKey.get(proj.root) ?? { cost: 0, tokens: 0, lastMs: 0, name: proj.name, det: emptyBreakdown() };
-    cur.cost += u.byProject[cwd].cost;
-    cur.tokens += u.byProject[cwd].tokens;
-    cur.lastMs = Math.max(cur.lastMs, u.projectLastMs[cwd] ?? 0);
-    cur.det = addBreakdown(cur.det, u.byProjectDetail[cwd] ?? emptyBreakdown());
-    byKey.set(proj.root, cur);
+  // Live grouping: every recorded cwd collapsed onto its project under
+  // projects/ (cwds not under a projects/ folder — oracles, tools, home — are
+  // skipped). Then fold in any ledger-only root NOT seen in this live scan —
+  // a project whose folder (or transcripts) are gone locally now, but whose
+  // last-known totals are still worth showing.
+  const byKey = new Map<string, ProjectAgg & { live: boolean }>();
+  for (const [root, agg] of Object.entries(groupByProjectRoot(u))) {
+    byKey.set(root, { ...agg, live: true });
+  }
+  const ledger = await getProjectLedger();
+  for (const [root, entry] of Object.entries(ledger)) {
+    if (byKey.has(root)) continue; // live data is at least as fresh — keep it
+    byKey.set(root, {
+      name: entry.name, cost: entry.cost, tokens: entry.tokens, lastMs: entry.lastMs,
+      det: entry.detail, live: false,
+    });
   }
   const projects: ProjectRow[] = [...byKey.entries()]
     .map(([key, b]) => ({
@@ -100,6 +101,7 @@ export function buildBudgetView(u: UsageSummary): BudgetView {
       tokens: b.tokens,
       lastMs: b.lastMs,
       detail: buildDetail(b.det),
+      live: b.live,
     }))
     .sort((a, b) => b.lastMs - a.lastMs); // default order; client re-sorts
 
@@ -127,8 +129,8 @@ export function buildBudgetView(u: UsageSummary): BudgetView {
   };
 }
 
-function postView(panel: vscode.WebviewPanel, u: UsageSummary): void {
-  panel.webview.postMessage({ type: "budget", ...buildBudgetView(u) });
+async function postView(panel: vscode.WebviewPanel, u: UsageSummary): Promise<void> {
+  panel.webview.postMessage({ type: "budget", ...(await buildBudgetView(u)) });
 }
 
 /** Paint instantly from the cached snapshot, then repaint when a fresh scan
@@ -138,12 +140,12 @@ function pushInstant(panel: vscode.WebviewPanel): void {
   void (async () => {
     const cached = await getInstantUsage();
     if (cached) {
-      postView(panel, cached);
+      void postView(panel, cached).catch(() => {});
       void refreshUsage()
         .then((fresh) => postView(panel, fresh))
         .catch(() => {});
     } else {
-      postView(panel, await computeUsage());
+      void postView(panel, await computeUsage()).catch(() => {});
     }
   })();
 }
@@ -269,6 +271,11 @@ function renderShell(): string {
   .prow .cost { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; }
   .prow .tok { font-size: 11px; font-weight: 500; opacity: 0.55; margin-top: 3px; font-variant-numeric: tabular-nums; }
   .empty { opacity: 0.55; font-size: 12.5px; padding: 12px 4px; }
+
+  /* ledger-only row: project's folder/transcripts are gone locally now — totals
+     come from the durable ledger, not a live rescan */
+  .prow.removed { opacity: 0.72; }
+  .tag-removed { font-size: 11px; font-weight: 500; opacity: 0.65; }
 
   .pk-head { display: flex; align-items: center; justify-content: space-between; gap: 12px 10px; margin-bottom: 10px; flex-wrap: wrap; }
   .sortbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -512,9 +519,10 @@ function renderShell(): string {
         var rank = start + i + 1;
         var big = showTokens ? esc(fmtTokens(p.tokens)) : money(p.costFmt);
         var small = showTokens ? money(p.costFmt) : esc(fmtTokens(p.tokens));
+        var removedTag = p.live === false ? ' <span class="tag-removed">(ลบแล้วจากเครื่อง)</span>' : "";
         return (
-          '<div class="prow" data-key="' + esc(p.path) + '"><div class="rank">' + rank + "</div>" +
-          '<div class="pth"><div class="path" title="' + esc(p.path) + '">' + esc(p.name) + "</div>" +
+          '<div class="prow' + (p.live === false ? " removed" : "") + '" data-key="' + esc(p.path) + '"><div class="rank">' + rank + "</div>" +
+          '<div class="pth"><div class="path" title="' + esc(p.path) + '">' + esc(p.name) + removedTag + "</div>" +
           '<div class="pbar"><span style="width:' + pct + '%"></span></div></div>' +
           '<div class="cost">' + big +
           '<div class="tok">' + small + "</div></div></div>"

@@ -18,7 +18,7 @@ async function showBudgetPopup(): Promise<void> {
   // only the very first run ever awaits a scan. The QuickPick is one-shot so it
   // shows the cached numbers — a budget glance doesn't need sub-15s freshness.
   const u = (await getInstantUsage()) ?? (await computeUsage());
-  const v = buildBudgetView(u);
+  const v = await buildBudgetView(u);
 
   const items: Row[] = [
     { label: "$(calendar) " + v.monthFmt, description: "เดือนนี้" },
@@ -33,7 +33,8 @@ async function showBudgetPopup(): Promise<void> {
   const tokFmt = new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 });
   items.push({ label: "Top projects", kind: vscode.QuickPickItemKind.Separator });
   for (const p of [...v.projects].sort((a, b) => b.cost - a.cost).slice(0, 5)) {
-    items.push({ label: p.name, description: p.costFmt + " · " + tokFmt.format(p.tokens) + " tok" });
+    const name = p.live ? p.name : p.name + " (ลบแล้วจากเครื่อง)";
+    items.push({ label: name, description: p.costFmt + " · " + tokFmt.format(p.tokens) + " tok" });
   }
 
   items.push({ label: "", kind: vscode.QuickPickItemKind.Separator });

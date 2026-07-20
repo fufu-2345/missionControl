@@ -20,6 +20,7 @@ import {
   scanResumableProjects,
 } from "../commands/startOrchestrator";
 import { parseTeamRoster, type OracleTeam } from "../commands/teams";
+import { trackClaudeTerminal } from "../commands/claudeTerminals";
 import { parseOrchesMeta, type ResumableProject } from "../commands/orchestratorResume";
 import * as gitOps from "../commands/gitOps";
 import { parseGitButtonState, type GitButtonState } from "../commands/gitStatus";
@@ -256,6 +257,7 @@ export function openDashboardPanel(
           location: vscode.TerminalLocation.Editor,
         });
         _sessionTerminals.set(name, term);
+        trackClaudeTerminal(term, name); // context pill follows this attached REPL
         term.show(false);
 
         const command = buildAttachCommand(name);
@@ -1016,6 +1018,18 @@ function renderHtml(): string {
       <button class="tile" type="button" onclick="run('missioncontrol.accounts')">
         <div class="title">Accounts</div>
         <div class="sub">สลับ subscription login หลาย provider · usage หมดสลับได้</div>
+      </button>
+    </div>
+
+    <div class="group-label">Data</div>
+    <div class="grid cols-2">
+      <button class="tile" type="button" onclick="run('missioncontrol.dataView')">
+        <div class="title">Data View</div>
+        <div class="sub">สถานะทุกโปรเจกต์จากไฟล์ .md · table / kanban / timeline</div>
+      </button>
+      <button class="tile" type="button" onclick="run('missioncontrol.openObsidian')">
+        <div class="title">Open in Obsidian</div>
+        <div class="sub">เปิดแอป Obsidian (vault ล่าสุด)</div>
       </button>
     </div>
   </div>

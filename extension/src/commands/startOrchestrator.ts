@@ -27,6 +27,7 @@ import {
   runSessionLiveForProject,
   writeRunMarker,
 } from "./continueRun";
+import { trackClaudeTerminal } from "./claudeTerminals";
 import {
   classifyDriven,
   dedupeByRealpath,
@@ -132,7 +133,7 @@ export function listOrchestratorTeams(): OracleTeam[] {
 /** The `.../github.com/<owner>` dir that holds `projects/` + tool repos,
  *  derived from any oracle's repo path in oracles.json (robust to where soulbrew
  *  lives / owner renames). null if it can't be resolved. */
-function resolveOwnerRoot(): string | null {
+export function resolveOwnerRoot(): string | null {
   try {
     const data = JSON.parse(fs.readFileSync(ORACLES_JSON, "utf8")) as {
       oracles?: { local_path?: string }[];
@@ -332,6 +333,7 @@ export function attachToProject(project: ResumableProject, preferSession?: strin
     location: vscode.TerminalLocation.Editor,
   });
   _orchTerminals.set(session, term);
+  trackClaudeTerminal(term, session); // context pill follows this orchestrator REPL
   term.show(false);
   runInTerminal(term, `tmux attach -t '=${session}'`);
   return true;
@@ -722,6 +724,7 @@ export async function launchOrchestrator(opts: {
     location: vscode.TerminalLocation.Editor,
   });
   _orchTerminals.set(session, term);
+  trackClaudeTerminal(term, session); // context pill follows this orchestrator REPL
   term.show(false);
   runInTerminal(term, command);
   return {};

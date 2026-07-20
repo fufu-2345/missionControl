@@ -285,6 +285,78 @@ async function saveSummary(s: UsageSummary): Promise<void> {
   }
 }
 
+// Durable per-project ledger — the last-known totals for every project ever
+// seen, keyed by its resolved root ("…/projects/<name>"). Unlike the file
+// cache and summary snapshot above (both scoped to what's CURRENTLY on disk),
+// this file is append-only from the Budget page's point of view: every scan
+// OVERWRITES each present project's row with fresh (already all-time) totals,
+// but never deletes a row for a project that's gone missing this scan. That's
+// what lets a project keep showing its last-known spend on the Budget page
+// after its folder — or eventually even its transcripts — are cleaned up
+// locally; see resolveProject's dropped disk-existence check, above.
+export interface LedgerEntry {
+  name: string;
+  cost: number;
+  tokens: number;
+  lastMs: number;
+  detail: Breakdown;
+  updatedAt: number; // ms — when this row was last refreshed from a live scan
+}
+const LEDGER_FILE = path.join(os.homedir(), ".cache", "mission-control", "project-ledger.json");
+const LEDGER_VERSION = 1;
+let ledgerCache: Record<string, LedgerEntry> | null = null;
+let ledgerHydrated = false;
+
+async function hydrateLedger(): Promise<Record<string, LedgerEntry>> {
+  if (ledgerCache) return ledgerCache;
+  if (!ledgerHydrated) {
+    ledgerHydrated = true;
+    try {
+      const raw = await fs.promises.readFile(LEDGER_FILE, "utf8");
+      const obj = JSON.parse(raw) as { v?: number; entries?: Record<string, LedgerEntry> };
+      if (obj?.v === LEDGER_VERSION && obj.entries) {
+        ledgerCache = obj.entries;
+        return ledgerCache;
+      }
+    } catch {
+      // no ledger yet — the first scan below creates one
+    }
+  }
+  return (ledgerCache = ledgerCache ?? {});
+}
+
+async function saveLedger(): Promise<void> {
+  if (!ledgerCache) return;
+  try {
+    await fs.promises.mkdir(path.dirname(LEDGER_FILE), { recursive: true });
+    await fs.promises.writeFile(LEDGER_FILE, JSON.stringify({ v: LEDGER_VERSION, entries: ledgerCache }));
+  } catch {
+    // best-effort — losing one write just delays the next persisted update
+  }
+}
+
+/** Merge this scan's live per-project totals into the durable ledger. Awaited
+ *  by scan() so the in-memory ledgerCache is fully up to date by the time it
+ *  returns (getProjectLedger() right after must see this scan's numbers, not
+ *  last scan's) — only the disk WRITE is fire-and-forget. */
+async function updateProjectLedger(grouped: Record<string, ProjectAgg>): Promise<void> {
+  const ledger = await hydrateLedger();
+  const now = Date.now();
+  for (const root of Object.keys(grouped)) {
+    const g = grouped[root];
+    ledger[root] = { name: g.name, cost: g.cost, tokens: g.tokens, lastMs: g.lastMs, detail: g.det, updatedAt: now };
+  }
+  void saveLedger();
+}
+
+/** Read-only view of the durable project ledger — every project ever seen,
+ *  including ones whose folder (or transcripts) are gone now. The Budget page
+ *  merges this with the live grouping so a cleaned-up project still shows its
+ *  last-known spend instead of silently disappearing. */
+export function getProjectLedger(): Promise<Record<string, LedgerEntry>> {
+  return hydrateLedger();
+}
+
 function projectsDir(): string {
   const base = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
   return path.join(base, "projects");
@@ -552,6 +624,7 @@ async function scan(): Promise<UsageSummary> {
   summaryAt = summaryCache.computedAt;
   void saveFileCache(files); // persist for the next reload (fire-and-forget)
   void saveSummary(summaryCache); // persist totals for instant paint next open
+  await updateProjectLedger(groupByProjectRoot(summaryCache)); // durable per-project totals
   return summaryCache;
 }
 
@@ -623,12 +696,40 @@ export function resolveProject(cwd: string): { root: string; name: string } | nu
   const rel = root.startsWith(home) ? root.slice(home.length) : root;
   if (rel.split(path.sep).some((s) => s.startsWith("."))) return null;
   if (root === "/tmp" || root.startsWith("/tmp/")) return null;
-  try {
-    if (!fs.statSync(root).isDirectory()) return null;
-  } catch {
-    return null; // deleted / gone
-  }
+  // NOT gated on the directory still existing on disk: a finished project's
+  // folder is routinely deleted long before its Claude Code transcripts (and
+  // its ledger row — see updateProjectLedger) are. Requiring the directory
+  // here used to make the Budget page silently drop that project's spend the
+  // moment it was cleaned up locally.
   return { root, name: segs[idx + 1] };
+}
+
+export interface ProjectAgg {
+  name: string;
+  cost: number;
+  tokens: number;
+  lastMs: number;
+  det: Breakdown;
+}
+
+/** Collapse every recorded cwd onto its project root (via resolveProject),
+ *  summing cost/tokens and keeping the newest activity + category breakdown.
+ *  Shared by the ledger writer (scan, below) and the Budget page's row builder
+ *  so both agree on exactly the same per-project totals. */
+export function groupByProjectRoot(u: UsageSummary): Record<string, ProjectAgg> {
+  const byKey: Record<string, ProjectAgg> = {};
+  for (const cwd of Object.keys(u.byProject)) {
+    const proj = resolveProject(cwd);
+    if (!proj) continue;
+    const cur = byKey[proj.root] ?? (byKey[proj.root] = {
+      name: proj.name, cost: 0, tokens: 0, lastMs: 0, det: emptyBreakdown(),
+    });
+    cur.cost += u.byProject[cwd].cost;
+    cur.tokens += u.byProject[cwd].tokens;
+    cur.lastMs = Math.max(cur.lastMs, u.projectLastMs[cwd] ?? 0);
+    cur.det = addBreakdown(cur.det, u.byProjectDetail[cwd] ?? emptyBreakdown());
+  }
+  return byKey;
 }
 
 /** Merge every cwd that belongs to project `absRoot` into ONE hour-keyed series

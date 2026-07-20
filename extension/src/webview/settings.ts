@@ -17,6 +17,7 @@ import {
   searchSectionScript,
   searchSectionStyle,
 } from "./searchSection";
+import { graphifyRefreshCommand } from "../commands/graphifyRefresh"; // [graphify-temp]
 
 // Editor-area Settings page. Singleton panel + a display-ready postMessage + a
 // small message switch — mirrors accounts.ts / teams.ts. All fs lives in
@@ -101,6 +102,10 @@ export function openSettingsPanel(): vscode.WebviewPanel {
     if (!msg || typeof msg.type !== "string") return;
 
     switch (msg.type) {
+      case "graphifyRefresh": // [graphify-temp]
+        await graphifyRefreshCommand();
+        return;
+
       case "ready":
       case "reload":
         pushList(panel);
@@ -294,6 +299,19 @@ function renderShell(): string {
     <b>legacy:</b> คีย์ที่ติดป้าย legacy ยังบันทึกได้ แต่ไม่มีผลกับ runtime แล้ว (ของเดิมที่ backend/orchestrator ถูกถอดออก) — เก็บไว้เผื่อกลับมาใช้
   </div>
 
+  <!-- [graphify-temp] isolated refresh button — remove this section + the other [graphify-temp] blocks to uninstall -->
+  <section class="grp" id="graphify-temp"><h2>Graphify (temporary)</h2>
+    <div class="rows"><div class="row">
+      <div class="ri">
+        <div class="rl">Refresh code graph</div>
+        <div class="rh">Rebuild graph.json + force-directed graph.html for a repo (algorithmic clustering, no LLM). เลือก repo หลังกด; source repo ไม่ถูกแตะ, HTML ไป ~/graphify-view/.</div>
+      </div>
+      <div class="ra">
+        <button data-act="graphify-refresh" style="background:var(--vscode-button-background);color:var(--vscode-button-foreground);border:none;border-radius:5px;padding:6px 14px;font-size:12.5px;cursor:pointer;">Refresh…</button>
+      </div>
+    </div></div>
+  </section>
+
 <script>
   const vscode = acquireVsCodeApi();
 
@@ -367,7 +385,10 @@ function renderShell(): string {
     const sw = t.closest('[data-act="bool"]');
     if (sw) {
       post("set", { key: sw.getAttribute("data-key"), value: sw.getAttribute("data-next") === "true" });
+      return;
     }
+    const gr = t.closest('[data-act="graphify-refresh"]'); // [graphify-temp]
+    if (gr) { post("graphifyRefresh"); }
   });
   document.addEventListener("change", function (e) {
     const t = e.target;

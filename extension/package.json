@@ -89,8 +89,28 @@
         "title": "Mission Control: Open Dashboard"
       },
       {
+        "command": "missioncontrol.dataView",
+        "title": "Mission Control: Data View"
+      },
+      {
+        "command": "missioncontrol.openObsidian",
+        "title": "Mission Control: Open in Obsidian"
+      },
+      {
         "command": "missioncontrol.claude",
         "title": "Mission Control: Open Claude"
+      },
+      {
+        "command": "missioncontrol.attachToClaude",
+        "title": "Mission Control: Attach File/Image to Claude"
+      },
+      {
+        "command": "missioncontrol.pasteImageToClaude",
+        "title": "Mission Control: Paste Image from Clipboard to Claude"
+      },
+      {
+        "command": "missioncontrol.compactFocusedClaude",
+        "title": "Mission Control: Compact Focused Claude (/compact)"
       },
       {
         "command": "missioncontrol.mawToggle",

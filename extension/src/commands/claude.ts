@@ -5,6 +5,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 
 import { type ClaudeTarget, buildClaudeTmuxCommand, projectSessionName } from "./claudeSessions";
+import { trackClaudeTerminal } from "./claudeTerminals";
 
 // "Open Claude" pops a picker of targets, then opens Claude Code CLI inside a
 // tmux session in the EDITOR area. Running inside tmux means closing the tab
@@ -85,6 +86,7 @@ export async function claudeCommand(context: vscode.ExtensionContext) {
     location: vscode.TerminalLocation.Editor, // main editor area, not the panel
   });
   _claudeTerminals.set(session, term);
+  trackClaudeTerminal(term, session); // so the context pill can follow this REPL
   term.show(false);
 
   // Run the tmux create-or-attach command exactly once, cleanly. Sending text
