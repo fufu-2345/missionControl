@@ -20,6 +20,8 @@ import {
 import { partitionStarred, sortResumable, toggleStar, type ResumableProject } from "../commands/orchestratorResume";
 import { removeProjectDir } from "../commands/deleteProject";
 import { listDetailDocs, resolveProjectFile, renderMarkdown } from "../commands/projectDocs";
+import { listBackedUpProjects, type BackupEntry } from "../commands/docsBackup";
+import { openDataViewPanel } from "./dataView";
 import {
   isPreviewAvailable,
   isPreviewRunning,
@@ -55,12 +57,15 @@ interface WizState {
   team?: OracleTeam;
   askMode?: boolean; // "โหมดถาม" toggle — grilling interview + scrutinize plan review
   newName?: string; // ชื่อ project ที่ user ตั้งใน name-popup (mode "new") → ส่งเข้า kickoff
+  archivedView?: boolean; // showing the deleted-projects list instead of live projects
+  archived?: boolean; // currently viewing a deleted project's docs (read-only)
+  backups?: BackupEntry[]; // cached deleted-projects list for pick_archived
 }
 let _st: WizState | undefined;
 // Which screen is currently showing. The spin-poll only re-renders the projects list
 // when it is the visible screen — otherwise a running project's 2.5s tick would clobber
 // the Detail / teams / orch screen the user navigated to.
-let _screen: "projects" | "detail" | "teams" | "orch" = "projects";
+let _screen: "projects" | "detail" | "teams" | "orch" | "archived" = "projects";
 
 const STARRED_KEY = "missioncontrol.starredProjects";
 let _ctx: vscode.ExtensionContext | undefined;
@@ -182,6 +187,24 @@ async function pushProjectsScreen(panel: vscode.WebviewPanel, fetch: boolean | "
   });
   // Keep polling while any run is live so the spinner + git panel stay fresh.
   if (ordered.some((p) => readRunMarker(p.path)?.status === "running")) startSpinPoll(panel);
+}
+
+/** The deleted-projects list — every durable backup, read-only. Reuses the
+ *  projects screen's client renderer via a distinct message type. */
+function pushArchivedScreen(panel: vscode.WebviewPanel) {
+  _screen = "archived";
+  const backups: BackupEntry[] = listBackedUpProjects().sort((a, b) =>
+    (b.deletedAt ?? "").localeCompare(a.deletedAt ?? ""),
+  );
+  if (_st) _st.backups = backups; // cache for pick_archived (typed below)
+  panel.webview.postMessage({
+    type: "screen_archived",
+    title: "โปรเจกต์ที่ลบไปแล้ว",
+    subtitle: backups.length
+      ? "สำเนาสำรอง (README + docs) ตอนกดลบ — อ่านอย่างเดียว · กดปุ่มเดิมเพื่อกลับหน้าปกติ"
+      : "ยังไม่มีโปรเจกต์ที่ถูกลบผ่านปุ่มลบในโปรแกรม",
+    items: backups.map((b) => ({ name: b.name, path: b.backupDir, deletedAt: b.deletedAt })),
+  });
 }
 
 // ── continue-run spin poll: re-render while any project's run is live ─────────
@@ -318,17 +341,24 @@ async function pushDetailScreen(panel: vscode.WebviewPanel) {
   const p = _st?.project;
   if (!p) return;
   _screen = "detail";
-  const githubUrl = await gitOps.getGithubWebUrl(p.path);
+  const archived = _st?.archived === true;
+  const githubUrl = archived ? null : await gitOps.getGithubWebUrl(p.path);
   const docs = listDetailDocs(p.path);
+  const deletedAt = archived
+    ? (_st?.backups?.find((b) => b.backupDir === p.path)?.deletedAt ?? null)
+    : null;
   panel.webview.postMessage({
     type: "screen_detail",
     title: `📁 ${p.name}`,
-    subtitle: `project: ${p.name}`,
+    subtitle: archived ? `ลบไปแล้วเมื่อ ${deletedAt ?? "?"}` : `project: ${p.name}`,
     path: p.path,
-    githubUrl, // null → client hides the GitHub button
-    preview: { available: isPreviewAvailable(p.path), running: isPreviewRunning(p.path) },
+    githubUrl,
+    archived, // client hides git/preview/continue/delete when true
+    preview: archived
+      ? { available: false, running: false }
+      : { available: isPreviewAvailable(p.path), running: isPreviewRunning(p.path) },
     tree: docs.tree,
-    readme: docs.readme, // null → no README dropdown
+    readme: docs.readme,
   });
 }
 
@@ -463,6 +493,7 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         // never spawn on top. Falls through to the team picker only when nothing live.
         const p = _st.project;
         if (!p) return;
+        if (_st.archived) return; // read-only backup — no continue/preview/github
         annotateLiveState([p]);
         const driven = projectDrivenState(p);
         if (driven.state !== "none") {
@@ -503,6 +534,7 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         // Toggle the project's dev server (background) + open the browser when it starts.
         const p = _st.project;
         if (!p) return;
+        if (_st.archived) return; // read-only backup — no continue/preview/github
         if (!isPreviewAvailable(p.path)) {
           vscode.window.showWarningMessage(
             `'${p.name}' ไม่มี .orches-preview.sh — เปิด localhost ไม่ได้`,
@@ -522,11 +554,39 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         }
         return;
       }
+      case "open_data_view": {
+        // Detail → cross-project Data View (status of every project from its .md docs).
+        void openDataViewPanel();
+        return;
+      }
+      case "toggle_archived": {
+        _st.archivedView = !_st.archivedView;
+        _st.project = undefined;
+        _st.archived = false;
+        if (_st.archivedView) pushArchivedScreen(panel);
+        else await pushProjectsScreen(panel);
+        return;
+      }
+      case "pick_archived": {
+        const b = _st.backups?.find((x) => x.backupDir === msg.path);
+        if (!b) return;
+        // synthetic ResumableProject pointing at the backup folder
+        _st.project = {
+          name: b.name,
+          path: b.backupDir,
+          sprintDocs: 0,
+          openWorktrees: 0,
+        };
+        _st.archived = true;
+        await pushDetailScreen(panel);
+        return;
+      }
       case "to_projects": {
-        // Detail → back to the Projects list.
         _st.project = undefined;
         _st.team = undefined;
-        await pushProjectsScreen(panel);
+        _st.archived = false;
+        if (_st.archivedView) pushArchivedScreen(panel);
+        else await pushProjectsScreen(panel);
         return;
       }
       case "close":
@@ -536,6 +596,7 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         // เปิด repo ของ project นี้ใน browser จริง. Re-resolve host-side (don't trust
         // the client URL) so we only ever open this project's github origin.
         if (!_st.project) return;
+        if (_st.archived) return; // read-only backup — no continue/preview/github
         const url = await gitOps.getGithubWebUrl(_st.project.path);
         if (url) void vscode.env.openExternal(vscode.Uri.parse(url));
         else vscode.window.showWarningMessage(`'${_st.project.name}' ไม่มี GitHub remote (origin)`);
@@ -1149,6 +1210,7 @@ function renderShell(): string {
       + '<button id="closeBtn">✕ ปิด</button>'
       + lh
       + '<button id="contBtn" title="ไปเลือกทีม / เข้า session ที่ทำอยู่" style="border-color:#2ea043;color:#3fb950;">▶ ทำต่อ</button>'
+      + '<button id="dvBtn" title="ดูสถานะทุกโปรเจกต์ (table / kanban / timeline จากไฟล์ .md)">Data View</button>'
       + (githubUrl ? '<button id="ghBtn" title="เปิด repo นี้ใน GitHub (browser)">🔗 GitHub</button>' : '');
   }
   function wireDetailActions(){
@@ -1159,6 +1221,7 @@ function renderShell(): string {
     var lh=el("lhBtn"); if(lh && _previewAvail) lh.addEventListener('click',function(){
       lh.disabled=true; lh.textContent='⏳ …'; post('run_localhost'); });
     var ct=el("contBtn"); if(ct) ct.addEventListener('click',function(){post('continue_to_team');});
+    var dv=el("dvBtn"); if(dv) dv.addEventListener('click',function(){post('open_data_view');});
     var gh=el("ghBtn"); if(gh) gh.addEventListener('click',function(){post('open_github');});
   }
   function renderDetail(m){
