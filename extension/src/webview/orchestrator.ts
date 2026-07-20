@@ -350,7 +350,7 @@ async function pushDetailScreen(panel: vscode.WebviewPanel) {
   panel.webview.postMessage({
     type: "screen_detail",
     title: `📁 ${p.name}`,
-    subtitle: archived ? `ลบไปแล้วเมื่อ ${deletedAt ?? "?"}` : `project: ${p.name}`,
+    subtitle: archived ? `ลบไปแล้วเมื่อ ${(deletedAt ?? "").slice(0, 10) || "?"}` : `project: ${p.name}`,
     path: p.path,
     githubUrl,
     archived, // client hides git/preview/continue/delete when true
@@ -1451,7 +1451,7 @@ function renderShell(): string {
   function renderArchived(m){
     _lastProjKey = null;                 // returning to live projects must re-render
     el("title").textContent = m.title; el("subtitle").textContent = m.subtitle;
-    el("actions").innerHTML = actionsHtml(false, false, false, true, true, false); wireActions(false);
+    el("actions").innerHTML = actionsHtml(false, false, false, false, true, false); wireActions(false);
     var arb=el("archBtn"); if(arb) arb.classList.add('on');
     var items = m.items||[];
     el("content").innerHTML = items.length ? items.map(function(it){
