@@ -53,13 +53,40 @@ test("confirmNameMatches: ตรง=true, ผิด/ว่าง=false, trim ก
   expect(confirmNameMatches("", "foo")).toBe(false);
 });
 
-test("removeProjectDir: ลบ dir จริงหาย", () => {
+test("removeProjectDir: ลบ dir จริงหาย (snapshot no-op)", () => {
   const base = tmpProjects();
   const p = path.join(base, "projects", "foo");
   fs.mkdirSync(path.join(p, "agents", "r"), { recursive: true });
   fs.writeFileSync(path.join(p, "file.txt"), "x");
-  const r = removeProjectDir(p);
+  const r = removeProjectDir(p, () => {}); // inject no-op → no real ~/.cache write
   expect(r.deleted).toBe(true);
+  expect(fs.existsSync(p)).toBe(false);
+});
+
+test("removeProjectDir: snapshot ล้มเหลว → ไม่ลบ + reason", () => {
+  const base = tmpProjects();
+  const p = path.join(base, "projects", "foo");
+  fs.mkdirSync(p, { recursive: true });
+  fs.writeFileSync(path.join(p, "keep.txt"), "x");
+  const r = removeProjectDir(p, () => {
+    throw new Error("disk full");
+  });
+  expect(r.deleted).toBe(false);
+  expect(r.reason).toContain("backup");
+  expect(fs.existsSync(p)).toBe(true); // ← project untouched
+});
+
+test("removeProjectDir: snapshot ได้รับ path ของ project แล้วค่อยลบ", () => {
+  const base = tmpProjects();
+  const p = path.join(base, "projects", "foo");
+  fs.mkdirSync(p, { recursive: true });
+  const resolved_p = fs.realpathSync(p);
+  let seen = "";
+  const r = removeProjectDir(p, (proj) => {
+    seen = proj;
+  });
+  expect(r.deleted).toBe(true);
+  expect(seen).toBe(resolved_p);
   expect(fs.existsSync(p)).toBe(false);
 });
 

@@ -6,6 +6,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+import { snapshotProjectDocs } from "./docsBackup";
+
 /** Deletable only when: exists, resolves (symlinks followed) to a real
  *  directory, is a DIRECT child of a dir named `projects` (i.e.
  *  `.../projects/<name>`), and is not the `projects` dir itself. */
@@ -36,10 +38,20 @@ export function confirmNameMatches(typed: string, expected: string): boolean {
   return typeof typed === "string" && typed.trim() === expected;
 }
 
-/** Guard แล้วลบโฟลเดอร์ (recursive). ไม่ผ่าน guard = ไม่ลบ + reason. */
-export function removeProjectDir(projectPath: string): { deleted: boolean; reason?: string } {
+/** Guard → snapshot docs → ลบโฟลเดอร์ (recursive). ไม่ผ่าน guard หรือ snapshot
+ *  ล้มเหลว = ไม่ลบ + reason. snapshot injectable เพื่อเทส (default = ตัวจริง). */
+export function removeProjectDir(
+  projectPath: string,
+  snapshot: (p: string) => void = snapshotProjectDocs,
+): { deleted: boolean; reason?: string } {
   const g = canDeleteProjectPath(projectPath);
   if (!g.ok) return { deleted: false, reason: g.reason };
-  fs.rmSync(fs.realpathSync(projectPath), { recursive: true, force: true });
+  const resolved = fs.realpathSync(projectPath);
+  try {
+    snapshot(resolved); // back up BEFORE the destructive delete
+  } catch (e) {
+    return { deleted: false, reason: `backup ไม่สำเร็จ: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  fs.rmSync(resolved, { recursive: true, force: true });
   return { deleted: true };
 }
