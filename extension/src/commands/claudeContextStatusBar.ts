@@ -70,13 +70,19 @@ export async function refreshContextPill(): Promise<void> {
 export async function compactFocusedClaudeCommand(): Promise<void> {
   const session = _pillSession ?? focusedClaudeSession();
   if (!session || !isSafeSessionName(session)) {
-    vscode.window.showInformationMessage("ไม่พบ Claude REPL ที่ focus อยู่ — คลิกที่แท็บ Claude ก่อน");
+    vscode.window.showWarningMessage(
+      "ไม่พบ Claude REPL ที่ focus อยู่ — คลิกให้แท็บ Claude เป็น active ก่อน แล้วลองใหม่",
+    );
     return;
   }
-  await new Promise<void>((resolve) => {
-    // bare session target = active pane; send-keys (no -l) types /compact then Enter.
-    cp.execFile("tmux", buildCompactSendKeysArgs(session), { timeout: 2000 }, () => resolve());
+  // bare session target = active pane; send-keys (no -l) types /compact then Enter.
+  const err = await new Promise<Error | null>((resolve) => {
+    cp.execFile("tmux", buildCompactSendKeysArgs(session), { timeout: 2000 }, (e) => resolve(e ?? null));
   });
+  if (err) {
+    vscode.window.showErrorMessage(`ส่ง /compact ไม่สำเร็จ (${session}): ${err.message}`);
+    return;
+  }
   vscode.window.setStatusBarMessage(`ส่ง /compact ให้ ${session} แล้ว`, 4000);
   // let the compact run, then repaint the (now-smaller) context.
   setTimeout(() => void refreshContextPill(), 1500);
