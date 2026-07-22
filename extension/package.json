@@ -109,8 +109,8 @@
         "title": "Mission Control: Paste Image from Clipboard to Claude"
       },
       {
-        "command": "missioncontrol.compactFocusedClaude",
-        "title": "Mission Control: Compact Focused Claude (/compact)"
+        "command": "missioncontrol.attachToFocusedClaude",
+        "title": "Mission Control: Attach File to Focused Claude"
       },
       {
         "command": "missioncontrol.mawToggle",

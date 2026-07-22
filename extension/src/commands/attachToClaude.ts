@@ -103,6 +103,26 @@ function injectPathsIntoClaude(chosen: ReplCandidate, paths: string[], label: st
   return true;
 }
 
+/** Inject absolute path(s) into a tmux session's ACTIVE pane (literal, no Enter)
+ *  via `send-keys -t <session> -l`. Unlike injectPathsIntoClaude this targets a
+ *  session BY NAME — the dashboard attach popover lists tmux sessions that may
+ *  have no attached VS Code terminal, and we deliberately land on whatever pane
+ *  is focused in that session (see the design note). The caller passes a name it
+ *  already listed + whitelisted; we re-guard anyway. Returns null on success or a
+ *  human-readable error string (the caller surfaces it). */
+export function injectPathsIntoSession(session: string, paths: string[]): string | null {
+  if (!isSafeSessionName(session)) return `ชื่อ session ไม่ปลอดภัย (${session})`;
+  const text = buildAttachText(paths);
+  if (!text) return "ไม่มีไฟล์ที่ใช้ได้";
+  try {
+    // argv (no shell) — arbitrary paths pass as one literal arg.
+    cp.execFileSync("tmux", buildClaudeSendKeysArgs(session, text));
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+  return null;
+}
+
 /** Command: pick a file/image and inject its path into the Claude REPL. */
 export async function attachToClaudeCommand() {
   const chosen = await resolveClaudeReplTarget();

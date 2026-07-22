@@ -19,7 +19,7 @@ import {
   type TeamMember,
 } from "../commands/teamsModel";
 import { getDefaultMemberModel } from "../commands/settingsOps";
-import { teamUp } from "../commands/teamUp";
+import { teamUp, teamUpMember } from "../commands/teamUp";
 
 // Editor-area panel for browsing + editing maw oracle-teams. Mirrors skills.ts:
 // singleton _panel, renderShell HTML, postMessage list/detail, a message switch.
@@ -160,6 +160,29 @@ export function openTeamsPanel(_projectId: string | null = null): vscode.Webview
         panel.webview.postMessage({ type: "op_done" });
         return;
       }
+      case "team_up_member": {
+        const name = typeof msg.name === "string" ? msg.name : "";
+        const oracle = typeof msg.oracle === "string" ? msg.oracle : "";
+        if (!isSafeTeamName(name) || !isSafeTeamName(oracle)) {
+          vscode.window.showErrorMessage(`Teams: ชื่อทีม/oracle ไม่ถูกต้อง: '${name}' / '${oracle}'`);
+          panel.webview.postMessage({ type: "op_done" });
+          return;
+        }
+        const r = teamUpMember(name, oracle);
+        if (r.error) {
+          vscode.window.showErrorMessage(`Teams: wake '${oracle}' — ${r.error}`);
+        } else if (r.minted) {
+          vscode.window.showInformationMessage(
+            `Teams: '${name}' มี session อยู่แล้ว → ปลุก '${oracle}' เข้า instance ใหม่ '${r.session}' (attach ใน terminal)`,
+          );
+        } else {
+          vscode.window.showInformationMessage(
+            `Teams: ปลุก '${oracle}' → session '${r.session}' (attach ใน terminal)`,
+          );
+        }
+        panel.webview.postMessage({ type: "op_done" });
+        return;
+      }
       case "create_team": {
         const name = typeof msg.name === "string" ? msg.name.trim() : "";
         if (!isSafeTeamName(name)) {
@@ -278,6 +301,8 @@ export function renderShell(): string {
   .note { font-size: 11px; opacity: 0.6; margin-top: 8px; line-height: 1.5; }
   .barrow { display: flex; gap: 8px; margin-top: 14px; align-items: center; }
   .x { color: #f85149; cursor: pointer; font-weight: 700; border: none; background: none; font-size: 14px; }
+  .wake { color: #3fb950; cursor: pointer; font-weight: 700; border: none; background: none;
+    font-size: 12px; padding: 0; margin-right: 6px; }
   table.members tr.dup td { background: rgba(248,81,73,0.09); }
   table.members tr.dup .oracle-new { border-color: #f85149; box-shadow: 0 0 0 1px #f85149; }
   table.members tr.dup .oracle-name { color: #f85149; }
@@ -363,12 +388,13 @@ export function renderShell(): string {
     var nameCell = editableOracle
       ? '<input type="text" class="oracle-new" list="oracle-suggest" placeholder="ชื่อ oracle ใหม่" value="'+esc(m.oracle||'')+'">'
       : '<span class="oracle-name">'+esc(m.oracle)+'</span>';
+    var wakeBtn = editableOracle ? '' : '<button class="wake" title="ปลุก '+esc(m.oracle)+' คนเดียว">▶</button>';
     return '<tr>'
       + '<td>'+nameCell+'</td>'
       + '<td>'+roleSelect(m.role)+'</td>'
       + '<td>'+modelSelect(m.model||'')+'</td>'
       + '<td>'+swatch(m.color)+colorSelect(m.color)+'</td>'
-      + '<td><button class="x" title="ลบ">✕</button></td>'
+      + '<td>'+wakeBtn+'<button class="x" title="ลบ">✕</button></td>'
       + '</tr>';
   }
   function readMembers(tbody){
@@ -501,6 +527,13 @@ export function renderShell(): string {
       + '<div class="barrow"><button class="primary" id="saveTeam">Save</button></div>';
     var content = el("content");
     wireMemberTable(content, m.candidates);
+    content.querySelectorAll('.wake').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        if (busy(this)) return;
+        var span = this.closest('tr').querySelector('.oracle-name');
+        post('team_up_member', { name: t.name, oracle: span ? span.textContent : '' });
+      });
+    });
     el("delTeam").addEventListener('click', function(){ post('delete_team', { name: t.name }); });
     el("teamUp").addEventListener('click', function(){
       if (busy(this)) return;

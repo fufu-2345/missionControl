@@ -21,7 +21,7 @@ import {
 } from "../commands/startOrchestrator";
 import { parseTeamRoster, type OracleTeam } from "../commands/teams";
 import { trackClaudeTerminal } from "../commands/claudeTerminals";
-import { parseOrchesMeta, type ResumableProject } from "../commands/orchestratorResume";
+import { parseOrchesMeta, serializeOrchesMeta, type ResumableProject } from "../commands/orchestratorResume";
 import * as gitOps from "../commands/gitOps";
 import { parseGitButtonState, type GitButtonState } from "../commands/gitStatus";
 import { computeUsage, localMonthKey, sumByPrefix } from "../usage";
@@ -36,6 +36,7 @@ import {
   loneOracleName,
   teamOfOracle,
   computeSessionLabel,
+  teamFromOrchesLabel,
 } from "./sessions";
 import { listSkills } from "./skills";
 
@@ -640,6 +641,39 @@ function readProjectTeam(projectPath: string): string | undefined {
   }
 }
 
+/** Persist the driving team into `.orches-meta.json` from a LIVE session's
+ *  @orches_label, so "which team last drove this" survives after the session is
+ *  terminated (terminate only kills tmux — it never writes the marker). Closes
+ *  the gap where a fresh build never reached orches-drive's stamp-meta, or a
+ *  resume attached to an already-live session and returned before stamping.
+ *
+ *  Purely additive & idempotent: only fires when the marker has NO team yet, so
+ *  it never overwrites a known team and stops writing once recorded. An existing
+ *  lastRun is preserved (only the missing team is filled in). Best-effort. */
+function backfillProjectTeam(
+  projectPath: string,
+  projectName: string,
+  orchesLabel: string | undefined,
+  sessionName: string,
+): void {
+  if (readProjectTeam(projectPath)) return; // team already recorded — leave it
+  const team = teamFromOrchesLabel(orchesLabel, projectName);
+  if (!team) return; // the live label carries no team → nothing to recover
+  const file = path.join(projectPath, ".orches-meta.json");
+  let lastRun = Date.now();
+  try {
+    const prev = parseOrchesMeta(fs.readFileSync(file, "utf8"));
+    if (prev?.lastRun) lastRun = prev.lastRun; // keep the real drive time if present
+  } catch {
+    /* no prior marker — Date.now() ("last seen driving") is the best we have */
+  }
+  try {
+    fs.writeFileSync(file, serializeOrchesMeta(team, lastRun, sessionName));
+  } catch {
+    /* marker is best-effort */
+  }
+}
+
 async function pushSessions(panel: vscode.WebviewPanel): Promise<void> {
   const sessions = await listTmuxSessions();
   _lastSessionNames = new Set(sessions.map((s) => s.name));
@@ -649,6 +683,9 @@ async function pushSessions(panel: vscode.WebviewPanel): Promise<void> {
   for (const s of sessions) {
     const paths = panePaths[s.name] ?? (s.cwd ? [s.cwd] : []);
     const proj = projectFromPaths(paths);
+    // While the session is alive its @orches_label carries the team; persist it
+    // to the durable marker so it outlives a terminate (which never writes it).
+    if (proj) backfillProjectTeam(proj.path, proj.name, s.orchesLabel, s.name);
     const lone = proj ? null : loneOracleName(s, oracles);
     s.label = computeSessionLabel({
       orchesLabel: s.orchesLabel,

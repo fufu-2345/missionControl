@@ -10,23 +10,38 @@ export interface TmuxSession {
   cmd: string; // active pane's current command (claude / maw / bash …)
   cwd: string; // active pane's current path
   orchesLabel?: string; // tmux user-option @orches_label (authoritative display label)
+  windowName?: string; // the session's (only, when windows===1) window name — team-up sessions
+  // rename their single window to the bare oracle while the SESSION keeps the team's name.
   label?: string; // computed display label (filled in the extension host, see dashboard.ts)
+  canAttach?: boolean; // active pane runs claude → show the attach-file button (host-computed)
+}
+
+/** True when a session's ACTIVE pane runs claude — the only case where injecting
+ *  a file path lands in a Claude prompt (not a bare shell). Gates the attach-file
+ *  button in the dashboard Sessions panel. The path is sent to the session's
+ *  active pane, so the button only makes sense when that pane is claude. */
+export function sessionCanAttach(cmd: string): boolean {
+  return cmd.trim() === "claude";
 }
 
 // `tmux list-sessions -F` format string. Tab-separated because a tab is far
 // less likely than `|`/space to appear inside a session name or path. The
-// @orches_label column sits BEFORE cwd so cwd stays the tab-safe slice tail.
+// @orches_label + window_name columns sit BEFORE cwd so cwd stays the
+// tab-safe slice tail. #{window_name} is the session's CURRENT window — for a
+// single-window session that's unambiguous, which is exactly the case
+// loneOracleName needs it for (team-up sessions keep the team as session name
+// but rename their one window to the bare oracle).
 export const TMUX_FMT =
-  "#{session_name}\t#{session_windows}\t#{session_attached}\t#{pane_current_command}\t#{@orches_label}\t#{pane_current_path}";
+  "#{session_name}\t#{session_windows}\t#{session_attached}\t#{pane_current_command}\t#{@orches_label}\t#{window_name}\t#{pane_current_path}";
 
 /** Parse stdout of `tmux list-sessions -F TMUX_FMT`. Tolerant: blank input or a
- *  "no server running" message yields []; lines without 5 fields are skipped. */
+ *  "no server running" message yields []; lines without 6 fields are skipped. */
 export function parseTmuxSessions(raw: string): TmuxSession[] {
   const out: TmuxSession[] = [];
   for (const line of raw.split(/\r?\n/)) {
     if (!line) continue;
     const parts = line.split("\t");
-    if (parts.length < 5) continue;
+    if (parts.length < 6) continue;
     const name = parts[0];
     if (!name) continue;
     out.push({
@@ -37,7 +52,8 @@ export function parseTmuxSessions(raw: string): TmuxSession[] {
       attached: !!parts[2] && parts[2] !== "0",
       cmd: parts[3] ?? "",
       orchesLabel: parts[4] || undefined,
-      cwd: parts.slice(5).join("\t"),
+      windowName: parts[5] || undefined,
+      cwd: parts.slice(6).join("\t"),
     });
   }
   return out;
@@ -86,10 +102,13 @@ export function projectFromPaths(paths: string[]): { name: string; path: string 
 }
 
 /** A session that is a single woken oracle → that oracle's name. Only when it
- *  has exactly one window and its name (`NN-<oracle>` / `claude-<oracle>` /
- *  bare) resolves to a known oracle. */
+ *  has exactly one window. Tries the WINDOW name first (team-up sessions:
+ *  session = team name / team-N, the one window is renamed to the bare
+ *  oracle), then falls back to the session name (`NN-<oracle>` /
+ *  `claude-<oracle>` / bare — the orchestrator-launch convention). */
 export function loneOracleName(session: TmuxSession, knownOracles: string[]): string | null {
   if (session.windows !== 1) return null;
+  if (session.windowName && knownOracles.includes(session.windowName)) return session.windowName;
   const stem = session.name.replace(/^\d+-/, "").replace(/^claude-/, "");
   return knownOracles.includes(stem) ? stem : null;
 }
@@ -132,4 +151,20 @@ export function labelNamesProject(orchesLabel: string | undefined, basename: str
 /** First live session whose @orches_label names this project. Pure. */
 export function sessionForProjectLabel(basename: string, sessions: TmuxSession[]): TmuxSession | null {
   return sessions.find((s) => labelNamesProject(s.orchesLabel, basename)) ?? null;
+}
+
+/** The team encoded in an @orches_label of the form "<project> / <team>", or
+ *  undefined when the label is bare "<project>", names a different project, or
+ *  is absent. Inverse of teams.ts formatOrchesLabel; used to recover the driving
+ *  team from a LIVE session so it can be persisted to `.orches-meta.json` before
+ *  the session is terminated. Pure. */
+export function teamFromOrchesLabel(
+  orchesLabel: string | undefined,
+  basename: string,
+): string | undefined {
+  const lbl = orchesLabel?.trim();
+  if (!lbl || !basename) return undefined;
+  const prefix = basename + " / ";
+  if (!lbl.startsWith(prefix)) return undefined;
+  return lbl.slice(prefix.length).trim() || undefined;
 }

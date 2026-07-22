@@ -139,3 +139,16 @@ export function looksLikePng(bytes: Uint8Array): boolean {
 export function clipboardImagePath(dir: string, stamp: number): string {
   return `${dir.replace(/\/+$/, "")}/mc-clip-${stamp}.png`;
 }
+
+/** Temp path for a drag-dropped file: `<dir>/mc-drop-<stamp>-<safeName>`. A
+ *  drag-drop into a webview only yields the file's BYTES + a display name (no OS
+ *  path — browser security), so the host writes the bytes to this temp path and
+ *  injects that. Only the basename is kept (POSIX `/` and Windows `\\` segments
+ *  dropped) and reduced to [A-Za-z0-9._-] with the rest → "_", so an arbitrary
+ *  dropped name can never escape `dir` or inject path/shell metacharacters. Empty
+ *  → "file". `stamp` is passed in (millisecond timestamp) so this stays pure. */
+export function droppedFilePath(dir: string, stamp: number, name: string): string {
+  const base = (name.split("/").pop() || "").split("\\").pop() || "";
+  const safe = base.replace(/[^A-Za-z0-9._-]/g, "_") || "file";
+  return `${dir.replace(/\/+$/, "")}/mc-drop-${stamp}-${safe}`;
+}

@@ -5,27 +5,94 @@
 //   "statusLine": { "type": "command", "command": "<abs>/statusline-context.mjs" }
 //
 // Claude pipes session JSON on stdin. We use context_window.total_input_tokens
-// (current context size, includes cache) and divide by the EFFECTIVE window =
-// min(context_window_size, autoCompactWindow). Auto-compact fires near the top of
-// the autoCompactWindow cap (e.g. a [1m] session capped at 700k compacts ~686k),
-// so measuring against that cap — not the raw 1M — is what "% until auto-compact"
-// means. Output: `ctx [██████░░░░] NN%`, hue fading green→yellow→red with %.
+// (current context size, includes cache) and divide by the auto-compact TRIGGER so
+// that 100% == the exact moment Claude auto-compacts.
+//
+// Finding the REAL trigger — pulled live every refresh, NOT assumed:
+//   Claude does NOT auto-compact at min(context_window_size, autoCompactWindow).
+//   The `autoCompactWindow` setting is effectively ignored — measured across recent
+//   sessions, auto-compact fires at ~267k tokens even on a [1m]/1M window (and the
+//   exact point can shift as Claude changes). The one authoritative source is the
+//   transcript itself: on every auto-compaction Claude writes a system line with
+//   `compactMetadata.trigger:"auto"` + `preTokens` (the token count it compacted
+//   at). So each refresh we tail this session's transcript and read the last such
+//   `preTokens` — that IS the 100% point. We cache it globally so fresh panes (no
+//   compaction yet) inherit the latest known trigger, and only fall back to the old
+//   window−33k FORMULA (a ~20k output reserve + 13k compaction buffer, reverse-
+//   engineered from claude.exe) when nothing has been learned yet. Manual /compact
+//   lines are ignored — only trigger:"auto" defines the real auto point.
+//
+// Output: `ctx [██████░░░░] NN%`, hue fading green→yellow→red with %.
 //
 // Self-contained: no deps, no imports from the extension build, never throws to
 // the UI. Block chars █░ render fine in terminals (NOT emoji).
 
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync, writeFileSync, realpathSync, openSync, fstatSync, readSync, closeSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const DEFAULT_WINDOW = 200000; // Claude Code's non-1M model default
 const BAR_LEN = 10;
+// Tokens held back off the effective window before auto-compact fires: ~20k output
+// reserve (min(maxOutput, 20000)) + 13k buffer. Verified from claude.exe. Only used
+// by the FORMULA fallback now (see the header) — the real trigger is read live from
+// the transcript. Keep in sync with COMPACT_RESERVE_TOKENS in webview/contextMeter.ts.
+const COMPACT_RESERVE = 33000;
+// Bytes to tail-read off the end of the transcript when hunting the last auto-compact
+// marker. The marker line is ~1 KB and, right after a compaction, sits at the tail;
+// this is just the catch-window before the cache takes over, so 1 MiB is a wide
+// margin (matches the old pill's tail size) while staying memory-cheap: the buffer is
+// transient and GC'd each run, never a sustained allocation across panes.
+const TAIL_CAP = 1048576;
+// Global last-known auto trigger, so a fresh pane (no compaction of its own yet)
+// inherits the most recent real compact point instead of the wrong formula value.
+const TRIGGER_CACHE = join(homedir(), ".claude", ".mc-ctx-trigger");
 
-/** Context fill as 0–100% of the effective window (auto-compact fires ~98%). */
+/** The token count at which auto-compact fires for an effective window =
+ *  `window − reserve` (floored at 1). Feed THIS to contextPct so 100% == compact. */
+export function autoCompactTrigger(window) {
+  return Math.max(1, window - COMPACT_RESERVE);
+}
+
+/** Context fill as 0–100% of its denominator. Pass `autoCompactTrigger(window)` so
+ *  100% lines up with the point auto-compact fires. */
 export function contextPct(tokens, window) {
   if (!(window > 0)) return 0;
   return Math.max(0, Math.min(100, Math.round((tokens / window) * 100)));
+}
+
+/** The most recent AUTO auto-compact point from a transcript's JSONL text: the
+ *  `compactMetadata.preTokens` of the last line whose `compactMetadata.trigger` is
+ *  "auto" (the token count Claude actually compacted at). null when none. Manual
+ *  /compact lines are ignored — they fire at arbitrary points and would poison the
+ *  learned auto trigger. Scans from the end (cheap indexOf pre-filter, JSON.parse
+ *  only candidates) and tolerates a truncated first line from a tail-read slice. */
+export function parseLastAutoCompactPreTokens(jsonl) {
+  if (!jsonl) return null;
+  const lines = jsonl.split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line || line.indexOf("compactMetadata") === -1 || line.indexOf('"auto"') === -1) continue;
+    try {
+      const cm = JSON.parse(line).compactMetadata;
+      if (cm && cm.trigger === "auto" && typeof cm.preTokens === "number" && cm.preTokens > 0) {
+        return cm.preTokens;
+      }
+    } catch {
+      /* partial/garbled line (e.g. tail cut mid-line) — keep scanning */
+    }
+  }
+  return null;
+}
+
+/** The denominator that makes 100% == the real compact point, most-authoritative
+ *  first: the live trigger read from THIS session's transcript, else the globally
+ *  cached last-known trigger, else the reverse-engineered window−reserve formula. */
+export function pickTrigger(liveTrigger, cachedTrigger, effectiveWindow) {
+  if (typeof liveTrigger === "number" && liveTrigger > 0) return liveTrigger;
+  if (typeof cachedTrigger === "number" && cachedTrigger > 0) return cachedTrigger;
+  return autoCompactTrigger(effectiveWindow);
 }
 
 // Fade anchors: green → yellow-green(75) → orange(90) → red(100), matching the
@@ -102,6 +169,49 @@ export function resolveAutoCompactWindow(cwd) {
   return null;
 }
 
+/** Last auto-compact preTokens from a transcript file, reading only the last
+ *  TAIL_CAP bytes (bounded memory — safe to call every refresh across many panes).
+ *  null on any error / missing file / no auto marker in the tail. */
+function readAutoTriggerFromTranscript(file) {
+  if (!file) return null;
+  try {
+    const fd = openSync(file, "r");
+    try {
+      const size = fstatSync(fd).size;
+      const start = Math.max(0, size - TAIL_CAP);
+      const len = size - start;
+      if (len <= 0) return null;
+      const buf = Buffer.allocUnsafe(len);
+      readSync(fd, buf, 0, len, start);
+      return parseLastAutoCompactPreTokens(buf.toString("utf8"));
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
+/** Read the globally-cached last-known auto trigger (a bare integer). */
+function readTriggerCache() {
+  try {
+    const n = parseInt(readFileSync(TRIGGER_CACHE, "utf8").trim(), 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Persist the latest observed auto trigger for other/fresh panes (best-effort;
+ *  a bare integer so concurrent last-writer-wins can never corrupt it). */
+function writeTriggerCache(n) {
+  try {
+    writeFileSync(TRIGGER_CACHE, String(n));
+  } catch {
+    /* best-effort cache — never break the status line over it */
+  }
+}
+
 /** Build the status line from Claude's stdin JSON object. */
 export function computeLine(input) {
   const cw = (input && input.context_window) || {};
@@ -110,7 +220,14 @@ export function computeLine(input) {
   const cwd = (input && (input.cwd || (input.workspace && input.workspace.current_dir))) || process.cwd();
   const acw = resolveAutoCompactWindow(cwd);
   const effective = acw ? Math.min(modelWindow, acw) : modelWindow;
-  return renderBar(contextPct(tokens, effective));
+
+  // Pull the REAL compact point live: last trigger:"auto" preTokens from this
+  // session's transcript. Cache it for fresh panes; formula only as last resort.
+  const live = readAutoTriggerFromTranscript(input && input.transcript_path);
+  if (live) writeTriggerCache(live);
+  const trigger = pickTrigger(live, live ? null : readTriggerCache(), effective);
+
+  return renderBar(contextPct(tokens, trigger));
 }
 
 // Run only when executed directly (not when imported by tests).

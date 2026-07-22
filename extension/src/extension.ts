@@ -4,9 +4,9 @@ import { accountsCommand } from "./commands/accountsPanel";
 import { approveCommand } from "./commands/approve";
 import { budgetCommand } from "./commands/budget";
 import { attachToClaudeCommand, pasteImageToClaudeCommand } from "./commands/attachToClaude";
+import { attachToFocusedClaudeCommand, initAttachStatusBar } from "./commands/attachStatusBar";
 import { claudeCommand } from "./commands/claude";
 import { initClaudeTerminalRegistry } from "./commands/claudeTerminals";
-import { compactFocusedClaudeCommand, initClaudeContextStatusBar } from "./commands/claudeContextStatusBar";
 import { dashboardCommand } from "./commands/dashboard";
 import { installCommand } from "./commands/install";
 import { mawToggleCommand } from "./commands/mawServe";
@@ -65,8 +65,10 @@ export function activate(context: vscode.ExtensionContext) {
     // file, injects its path). VS Code clipboard is text-only, so this shells
     // out to xclip/wl-paste.
     vscode.commands.registerCommand("missioncontrol.pasteImageToClaude", () => pasteImageToClaudeCommand()),
-    // Clickable context pill (status bar) → /compact the focused Claude REPL.
-    vscode.commands.registerCommand("missioncontrol.compactFocusedClaude", () => compactFocusedClaudeCommand()),
+    // Paperclip button (status bar) → attach file(s) to the focused Claude REPL
+    // via the native dialog. (Context lives in each REPL's own in-pane statusLine
+    // bar; there is deliberately no VS Code context pill — see statusline-context.mjs.)
+    vscode.commands.registerCommand("missioncontrol.attachToFocusedClaude", () => attachToFocusedClaudeCommand()),
     vscode.commands.registerCommand("missioncontrol.mawToggle", () => mawToggleCommand(context)),
     vscode.commands.registerCommand("missioncontrol.terminal", () => terminalCommand(context)),
     vscode.commands.registerCommand("missioncontrol.startOrchestrator", () => startOrchestratorCommand(context)),
@@ -78,9 +80,10 @@ export function activate(context: vscode.ExtensionContext) {
 
   registerStatusBar(context);
   registerSidebar(context);
-  // Terminal→session registry + the clickable Claude context pill.
+  // Terminal→session registry + the paperclip attach button. (No context pill —
+  // context is shown in each REPL's own in-pane statusLine bar.)
   initClaudeTerminalRegistry(context);
-  initClaudeContextStatusBar(context);
+  initAttachStatusBar(context);
 
   // WS client — listens for ideas_ready and auto-opens swipe panel.
   // The ws_server already filters events by the client's set_project_ids, so

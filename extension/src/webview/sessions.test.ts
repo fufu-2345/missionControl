@@ -11,7 +11,17 @@ import {
   computeSessionLabel,
   labelNamesProject,
   sessionForProjectLabel,
+  sessionCanAttach,
+  teamFromOrchesLabel,
 } from "./sessions";
+
+test("sessionCanAttach: true only when active pane runs claude", () => {
+  expect(sessionCanAttach("claude")).toBe(true);
+  expect(sessionCanAttach(" claude ")).toBe(true); // tolerant of stray ws
+  expect(sessionCanAttach("bash")).toBe(false);
+  expect(sessionCanAttach("maw")).toBe(false);
+  expect(sessionCanAttach("")).toBe(false);
+});
 
 test("labelNamesProject: exact or '<basename> / …', never a prefix, false when undefined", () => {
   expect(labelNamesProject("rpn", "rpn")).toBe(true);
@@ -31,14 +41,22 @@ test("sessionForProjectLabel: matches exact basename or '<basename> / team', nev
   expect(sessionForProjectLabel("rpn", [S("a")])).toBeNull(); // no label
 });
 
-test("parseTmuxSessions parses tab-separated session lines (with orches label col)", () => {
+test("parseTmuxSessions parses tab-separated session lines (with orches label + window name cols)", () => {
   const raw =
-    "carbon\t2\t1\tclaude\t\t/home/u/bob\n" +
-    "soulbrew\t1\t0\tbash\tsci-calc / brew\t/home/u/sb\n" +
-    "twin\t1\t2\tclaude\t\t/home/u/tw"; // 2 clients attached (session_attached is a COUNT)
+    "carbon\t2\t1\tclaude\t\tmain\t/home/u/bob\n" +
+    "soulbrew\t1\t0\tbash\tsci-calc / brew\tfrontend\t/home/u/sb\n" +
+    "twin\t1\t2\tclaude\t\t\t/home/u/tw"; // 2 clients attached (session_attached is a COUNT), blank window name
   expect(parseTmuxSessions(raw)).toEqual([
-    { name: "carbon", windows: 2, attached: true, cmd: "claude", cwd: "/home/u/bob" },
-    { name: "soulbrew", windows: 1, attached: false, cmd: "bash", orchesLabel: "sci-calc / brew", cwd: "/home/u/sb" },
+    { name: "carbon", windows: 2, attached: true, cmd: "claude", windowName: "main", cwd: "/home/u/bob" },
+    {
+      name: "soulbrew",
+      windows: 1,
+      attached: false,
+      cmd: "bash",
+      orchesLabel: "sci-calc / brew",
+      windowName: "frontend",
+      cwd: "/home/u/sb",
+    },
     { name: "twin", windows: 1, attached: true, cmd: "claude", cwd: "/home/u/tw" },
   ]);
 });
@@ -78,7 +96,7 @@ test("projectFromPaths finds a projects/<name> dir from any pane cwd", () => {
   expect(projectFromPaths([])).toBeNull();
 });
 
-test("loneOracleName: single window whose name resolves to a known oracle", () => {
+test("loneOracleName: single window whose SESSION name resolves to a known oracle", () => {
   const oracles = ["bob", "foreman"];
   expect(loneOracleName({ name: "05-bob", windows: 1, attached: false, cmd: "claude", cwd: "" }, oracles)).toBe("bob");
   expect(loneOracleName({ name: "claude-bob", windows: 1, attached: false, cmd: "claude", cwd: "" }, oracles)).toBe("bob");
@@ -86,6 +104,32 @@ test("loneOracleName: single window whose name resolves to a known oracle", () =
   expect(loneOracleName({ name: "05-bob", windows: 3, attached: false, cmd: "claude", cwd: "" }, oracles)).toBeNull();
   // unknown stem → null
   expect(loneOracleName({ name: "claude-soulbrew", windows: 1, attached: false, cmd: "bash", cwd: "" }, oracles)).toBeNull();
+});
+
+test("loneOracleName: session name is the TEAM (team-up sessions) → resolves via WINDOW name instead", () => {
+  const oracles = ["bob", "mike"];
+  // `maw team up` sessions are named after the team ("brew", or minted "brew-2"),
+  // not the oracle — only the single window is renamed to the bare oracle.
+  expect(
+    loneOracleName({ name: "brew", windows: 1, attached: false, cmd: "claude", windowName: "mike", cwd: "" }, oracles),
+  ).toBe("mike");
+  expect(
+    loneOracleName({ name: "brew-2", windows: 1, attached: false, cmd: "claude", windowName: "bob", cwd: "" }, oracles),
+  ).toBe("bob");
+  // multi-window team session → still not a lone oracle, even with a window name
+  expect(
+    loneOracleName(
+      { name: "brew", windows: 2, attached: false, cmd: "claude", windowName: "mike", cwd: "" },
+      oracles,
+    ),
+  ).toBeNull();
+  // window name doesn't resolve to a known oracle → null (session-name stem "brew" isn't one either)
+  expect(
+    loneOracleName(
+      { name: "brew", windows: 1, attached: false, cmd: "claude", windowName: "_boot", cwd: "" },
+      oracles,
+    ),
+  ).toBeNull();
 });
 
 test("teamOfOracle picks first team by name containing the oracle", () => {
@@ -110,4 +154,14 @@ test("computeSessionLabel priority: orchesLabel > project > loneOracle > rawName
   expect(computeSessionLabel({ loneOracle: { oracle: "bob" }, rawName: "05-bob" })).toBe("bob"); // no team
   // rule 4
   expect(computeSessionLabel({ rawName: "claude-soulbrew" })).toBe("claude-soulbrew");
+});
+
+test("teamFromOrchesLabel: recovers team from '<project> / <team>', else undefined", () => {
+  expect(teamFromOrchesLabel("rpn / brew", "rpn")).toBe("brew");
+  expect(teamFromOrchesLabel("learningPlatform / carbon", "learningPlatform")).toBe("carbon");
+  expect(teamFromOrchesLabel("rpn", "rpn")).toBeUndefined(); // bare project, no team
+  expect(teamFromOrchesLabel("rpnx / brew", "rpn")).toBeUndefined(); // different project (no prefix match)
+  expect(teamFromOrchesLabel(undefined, "rpn")).toBeUndefined();
+  expect(teamFromOrchesLabel("rpn / ", "rpn")).toBeUndefined(); // blank team
+  expect(teamFromOrchesLabel("  rpn / brew  ", "rpn")).toBe("brew"); // tolerant of stray ws
 });

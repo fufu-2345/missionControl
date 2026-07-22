@@ -11,7 +11,15 @@ import {
   looksLikePng,
   projectSessionName,
   sessionFromTerminalName,
+  droppedFilePath,
 } from "./claudeSessions";
+
+test("droppedFilePath: sanitized temp path, keeps basename+ext, strips dirs", () => {
+  expect(droppedFilePath("/tmp", 42, "a.png")).toBe("/tmp/mc-drop-42-a.png");
+  expect(droppedFilePath("/tmp/", 42, "../../etc/passwd")).toBe("/tmp/mc-drop-42-passwd");
+  expect(droppedFilePath("/tmp", 42, "we ird!.txt")).toBe("/tmp/mc-drop-42-we_ird_.txt");
+  expect(droppedFilePath("/tmp", 42, "")).toBe("/tmp/mc-drop-42-file");
+});
 
 test("projectSessionName prefixes claude- and keeps clean names", () => {
   expect(projectSessionName("ttt")).toBe("claude-ttt");

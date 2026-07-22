@@ -93,16 +93,40 @@ export interface TeamUpResult {
   minted?: boolean;
 }
 
-/** `maw team up <team>` into a fresh editor terminal + attach. Mints a `-N`
- *  instance session when the team's base session is already live. */
-export function teamUp(team: string): TeamUpResult {
-  if (!isSafeTeamName(team)) return { error: `ชื่อทีมไม่ปลอดภัย: ${team}` };
+/** Shared tail of teamUp/teamUpMember: resolve the target session, build the
+ *  wake command for the given roster, and run it in a fresh editor terminal.
+ *  One editor tab per SESSION (a minted instance gets its own) — never touch
+ *  another instance's tab. */
+function launchTeamSession(
+  team: string,
+  members: string[],
+  models: Record<string, string>,
+  label: string,
+): TeamUpResult {
   const base = baseSessionForTeam(team);
   const { session, minted } = resolveInstanceSession(base, tmuxHasSession);
   // base = charter.session / team name (safe), + numeric -N suffix → always
   // matches SAFE_SESSION; guard anyway so a hand-edited charter can't inject.
   if (!SAFE_SESSION.test(session)) return { error: `ชื่อ session ไม่ปลอดภัย: ${session}` };
 
+  const command = buildTeamUpCommand(team, session, SOULBREW_DIR, members, models);
+  const prev = _teamTerminals.get(session);
+  if (prev && prev.exitStatus === undefined) prev.dispose();
+  const term = vscode.window.createTerminal({
+    name: `team: ${label}${minted ? ` · ${session}` : ""}`,
+    location: vscode.TerminalLocation.Editor,
+    cwd: SOULBREW_DIR,
+  });
+  _teamTerminals.set(session, term);
+  term.show(false);
+  runInTerminal(term, command);
+  return { session, minted };
+}
+
+/** `maw team up <team>` into a fresh editor terminal + attach. Mints a `-N`
+ *  instance session when the team's base session is already live. */
+export function teamUp(team: string): TeamUpResult {
+  if (!isSafeTeamName(team)) return { error: `ชื่อทีมไม่ปลอดภัย: ${team}` };
   // Roster → sequential per-member `--only` wakes (see buildTeamUpCommand).
   // Only shell-safe oracle names; unsafe ones are dropped rather than injected.
   const detail = readTeamDetailSync(team);
@@ -111,19 +135,18 @@ export function teamUp(team: string): TeamUpResult {
   // (maw team up can't carry it). Only safe names; buildTeamUpCommand re-guards the value.
   const models: Record<string, string> = {};
   for (const m of detail.members) if (m.oracle && m.model) models[m.oracle] = m.model;
-  const command = buildTeamUpCommand(team, session, SOULBREW_DIR, members, models);
+  return launchTeamSession(team, members, models, team);
+}
 
-  // One editor tab per SESSION (a minted instance gets its own) — never touch
-  // another instance's tab.
-  const prev = _teamTerminals.get(session);
-  if (prev && prev.exitStatus === undefined) prev.dispose();
-  const term = vscode.window.createTerminal({
-    name: `team: ${team}${minted ? ` · ${session}` : ""}`,
-    location: vscode.TerminalLocation.Editor,
-    cwd: SOULBREW_DIR,
-  });
-  _teamTerminals.set(session, term);
-  term.show(false);
-  runInTerminal(term, command);
-  return { session, minted };
+/** Wake a single member of the team, same session semantics as teamUp (base
+ *  free → use it, base live → mint a fresh `-N` instance) but the roster is
+ *  just this one oracle — the rest of the team is untouched. */
+export function teamUpMember(team: string, oracle: string): TeamUpResult {
+  if (!isSafeTeamName(team)) return { error: `ชื่อทีมไม่ปลอดภัย: ${team}` };
+  if (!isSafeTeamName(oracle)) return { error: `ชื่อ oracle ไม่ปลอดภัย: ${oracle}` };
+  const detail = readTeamDetailSync(team);
+  const member = detail.members.find((m) => m.oracle === oracle);
+  if (!member) return { error: `ไม่พบ '${oracle}' ในทีม '${team}'` };
+  const models = member.model ? { [oracle]: member.model } : {};
+  return launchTeamSession(team, [oracle], models, `${team} · ${oracle}`);
 }

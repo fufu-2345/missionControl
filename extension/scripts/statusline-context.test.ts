@@ -1,6 +1,21 @@
 import { test, expect } from "bun:test";
 
-import { contextPct, fillHue, hslToRgb, renderBar } from "./statusline-context.mjs";
+import {
+  autoCompactTrigger,
+  contextPct,
+  fillHue,
+  hslToRgb,
+  parseLastAutoCompactPreTokens,
+  pickTrigger,
+  renderBar,
+} from "./statusline-context.mjs";
+
+// Helpers to build fake transcript JSONL lines.
+const autoCompact = (pre: number) =>
+  JSON.stringify({ type: "system", subtype: "compact_boundary", compactMetadata: { trigger: "auto", preTokens: pre } });
+const manualCompact = (pre: number) =>
+  JSON.stringify({ type: "system", compactMetadata: { trigger: "manual", preTokens: pre } });
+const usageLine = (t: number) => JSON.stringify({ type: "assistant", message: { usage: { input_tokens: t } } });
 
 test("contextPct = tokens/window, clamped 0..100", () => {
   expect(contextPct(350000, 700000)).toBe(50);
@@ -8,6 +23,20 @@ test("contextPct = tokens/window, clamped 0..100", () => {
   expect(contextPct(900000, 700000)).toBe(100); // clamp
   expect(contextPct(0, 700000)).toBe(0);
   expect(contextPct(1000, 0)).toBe(0); // unknown window
+});
+
+test("autoCompactTrigger subtracts the 33k reserve, floored at 1", () => {
+  expect(autoCompactTrigger(700000)).toBe(667000); // [1m] capped at 700k
+  expect(autoCompactTrigger(1000000)).toBe(967000); // uncapped [1m]
+  expect(autoCompactTrigger(200000)).toBe(167000); // default window
+  expect(autoCompactTrigger(10000)).toBe(1); // tiny window never divides by ≤0
+});
+
+test("contextPct against the trigger reads 100% at the real compact point", () => {
+  // [1m] capped at 700k → trigger 667k; the bar now tops out exactly at compaction
+  // (against the raw 700k window this read 95%).
+  expect(contextPct(667000, autoCompactTrigger(700000))).toBe(100);
+  expect(contextPct(333500, autoCompactTrigger(700000))).toBe(50);
 });
 
 test("fillHue fades green→red, non-increasing, honoring the zones", () => {
@@ -48,4 +77,46 @@ test("renderBar draws a block bar, the %, and truecolor ANSI", () => {
 test("renderBar clamps the bar cells at the ends", () => {
   expect((renderBar(0).match(/█/g) || []).length).toBe(0);
   expect((renderBar(100).match(/█/g) || []).length).toBe(10);
+});
+
+test("parseLastAutoCompactPreTokens returns the most recent trigger:auto preTokens", () => {
+  const jsonl = [usageLine(1000), autoCompact(267186), usageLine(50000)].join("\n");
+  expect(parseLastAutoCompactPreTokens(jsonl)).toBe(267186);
+});
+
+test("parseLastAutoCompactPreTokens IGNORES manual compactions (they fire at arbitrary points)", () => {
+  // most recent line is a manual /compact at 600k — must NOT poison the auto trigger
+  const jsonl = [autoCompact(250000), usageLine(300000), manualCompact(600000)].join("\n");
+  expect(parseLastAutoCompactPreTokens(jsonl)).toBe(250000);
+});
+
+test("parseLastAutoCompactPreTokens picks the LATEST auto when several exist", () => {
+  const jsonl = [autoCompact(240000), usageLine(10000), autoCompact(268000)].join("\n");
+  expect(parseLastAutoCompactPreTokens(jsonl)).toBe(268000);
+});
+
+test("parseLastAutoCompactPreTokens returns null with no auto compaction / empty / garbage", () => {
+  expect(parseLastAutoCompactPreTokens([usageLine(100), manualCompact(500000)].join("\n"))).toBeNull();
+  expect(parseLastAutoCompactPreTokens("")).toBeNull();
+  expect(parseLastAutoCompactPreTokens("not json\n{also not}")).toBeNull();
+});
+
+test("parseLastAutoCompactPreTokens tolerates a truncated first line (tail-read cut mid-line)", () => {
+  // a bounded tail read can slice the first line in half — that half must be skipped, not crash
+  const jsonl = '{"partial":"cut-o' + "\n" + autoCompact(267000);
+  expect(parseLastAutoCompactPreTokens(jsonl)).toBe(267000);
+});
+
+test("pickTrigger prefers the live transcript trigger over cache and formula", () => {
+  // real auto preTokens seen this session -> that's ground truth, use it verbatim
+  expect(pickTrigger(267186, 260000, 700000)).toBe(267186);
+});
+
+test("pickTrigger falls back to the cached learned trigger when no live one this session", () => {
+  expect(pickTrigger(null, 267000, 700000)).toBe(267000);
+});
+
+test("pickTrigger falls back to the formula (window − reserve) only when nothing is learned", () => {
+  expect(pickTrigger(null, null, 700000)).toBe(667000);
+  expect(pickTrigger(null, null, 10000)).toBe(1); // floored, never divides by ≤0
 });
