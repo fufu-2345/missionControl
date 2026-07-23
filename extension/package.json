@@ -37,6 +37,10 @@
         "title": "Mission Control: Open Terminal"
       },
       {
+        "command": "missioncontrol.localhosts",
+        "title": "Mission Control: Localhosts"
+      },
+      {
         "command": "missioncontrol.startOrchestrator",
         "title": "Mission Control: Start Orchestrator"
       },

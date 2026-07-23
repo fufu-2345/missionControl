@@ -9,6 +9,7 @@ import { claudeCommand } from "./commands/claude";
 import { initClaudeTerminalRegistry } from "./commands/claudeTerminals";
 import { dashboardCommand } from "./commands/dashboard";
 import { installCommand } from "./commands/install";
+import { localhostsCommand } from "./commands/localhostsPanel";
 import { mawToggleCommand } from "./commands/mawServe";
 import { openObsidianCommand } from "./commands/openObsidian";
 import { settingsCommand } from "./commands/settingsPanel";
@@ -55,6 +56,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("missioncontrol.skills", () => skillsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.teams", () => teamsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.accounts", () => accountsCommand(context)),
+    vscode.commands.registerCommand("missioncontrol.localhosts", () => localhostsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.settings", () => settingsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.dashboard", () => dashboardCommand(context)),
     vscode.commands.registerCommand("missioncontrol.claude", () => claudeCommand(context)),
