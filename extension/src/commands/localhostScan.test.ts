@@ -6,6 +6,8 @@ import {
   projectFromCwd,
   guessRole,
   groupListeners,
+  scanLocalhosts,
+  getProjectsRoot,
   type RawListener,
 } from "./localhostScan";
 
@@ -58,4 +60,12 @@ test("groupListeners: groups by project, sorts, drops unattributable", () => {
   expect(groups.map((g) => g.project)).toEqual(["learningPlatform", "shopApp"]);
   expect(groups[0].entries.map((e) => e.port)).toEqual([3000, 8000]); // sorted by port
   expect(groups[0].entries[0]).toEqual({ port: 3000, pid: 1, pgid: 100, comm: "next-server", role: "web" });
+});
+
+test("scanLocalhosts: returns an array and never throws", () => {
+  const groups = scanLocalhosts();
+  expect(Array.isArray(groups)).toBe(true);
+  // getProjectsRoot is null OR an absolute path ending in /projects
+  const root = getProjectsRoot();
+  expect(root === null || root.endsWith("/projects")).toBe(true);
 });

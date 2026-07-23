@@ -1,3 +1,8 @@
+import * as cp from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
 export type Listener = {
   port: number;
   pid: number;
@@ -86,4 +91,78 @@ export function groupListeners(raws: RawListener[], projectsRoot: string): Proje
   }
   groups.sort((a, b) => a.project.localeCompare(b.project));
   return groups;
+}
+
+// ── Live collectors ────────────────────────────────────────────────────────
+
+/** `<owner>/projects` derived portably from ~/.maw/oracles.json (the same
+ *  `.../github.com/<owner>` derivation as startOrchestrator.resolveOwnerRoot,
+ *  inlined here so this module stays free of the `vscode` import — that keeps
+ *  the scan unit-testable under `bun test`). null if it can't be resolved. */
+export function getProjectsRoot(): string | null {
+  try {
+    const raw = fs.readFileSync(path.join(os.homedir(), ".maw", "oracles.json"), "utf8");
+    const data = JSON.parse(raw) as { oracles?: { local_path?: string }[] };
+    for (const o of data?.oracles ?? []) {
+      const p = o?.local_path;
+      if (typeof p !== "string" || !p) continue;
+      const m = p.replace(/\/+$/, "").match(/^(.*\/github\.com\/[^/]+)\/[^/]+$/);
+      if (m) return path.join(m[1], "projects");
+    }
+  } catch {
+    /* file missing / malformed → unresolved */
+  }
+  return null;
+}
+
+function ssRaw(): string {
+  try {
+    return cp.execSync("ss -ltnpH", { encoding: "utf8", timeout: 4000 });
+  } catch {
+    try {
+      return cp.execSync("ss -ltnp", { encoding: "utf8", timeout: 4000 });
+    } catch {
+      return "";
+    }
+  }
+}
+
+function psRaw(pids: number[]): string {
+  if (!pids.length) return "";
+  try {
+    return cp.execSync(`ps -o pid=,pgid=,comm= -p ${pids.join(",")}`, {
+      encoding: "utf8",
+      timeout: 4000,
+    });
+  } catch {
+    return "";
+  }
+}
+
+/** Enumerate listeners and enrich each with cwd/pgid/comm. Two subprocesses
+ *  total (one ss, one ps). Unreadable pids (root-owned) get cwd=null and are
+ *  dropped by groupListeners. */
+export function collectRaw(): RawListener[] {
+  const listeners = parseSsListeners(ssRaw());
+  const info = parsePsOutput(psRaw(listeners.map((l) => l.pid)));
+  const raws: RawListener[] = [];
+  for (const { port, pid } of listeners) {
+    let cwd: string | null = null;
+    try {
+      cwd = fs.readlinkSync(`/proc/${pid}/cwd`);
+    } catch {
+      cwd = null;
+    }
+    const ps = info.get(pid);
+    raws.push({ port, pid, cwd, pgid: ps?.pgid ?? 0, comm: ps?.comm ?? "" });
+  }
+  return raws;
+}
+
+/** Full scan: listeners grouped by project. Empty array if the projects root or
+ *  ss is unavailable — callers render "unavailable" and move on. */
+export function scanLocalhosts(): ProjectGroup[] {
+  const projectsRoot = getProjectsRoot();
+  if (!projectsRoot) return [];
+  return groupListeners(collectRaw(), projectsRoot);
 }
