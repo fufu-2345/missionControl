@@ -8,6 +8,8 @@ import {
   setCurrentProjectId,
 } from "../projectState";
 import { isMawUp } from "../commands/mawServe";
+import { scanLocalhosts, type ProjectGroup } from "../commands/localhostScan";
+import { stopProjectLocalhosts } from "../commands/localhostStop";
 import { openDashboardPanel } from "./dashboard";
 
 const POLL_MS = 10_000;
@@ -48,6 +50,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private timer?: NodeJS.Timeout;
   private mawTimer?: NodeJS.Timeout; // polls :3456 to keep the maw-ui toggle live
+  private lhTimer?: NodeJS.Timeout; // polls localhost servers for the Localhosts section
   private renderedSetup?: boolean; // last-rendered "needs setup" flag
   private lastOnline?: boolean; // for offline→online transition detection
   private projectsLoaded = false; // true once /projects fetched at least once
@@ -74,10 +77,20 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         await this.tick();
         await this.pushProjectList();
         await this.pushMaw();
+        await this.pushLocalhosts();
       } else if (msg?.type === "open_dashboard") {
         openDashboardPanel(this.context, getCurrentProjectId());
       } else if (msg?.type === "refreshProjects") {
         await this.pushProjectList();
+      } else if (msg?.type === "refreshLocalhosts") {
+        await this.pushLocalhosts();
+      } else if (msg?.type === "openLocalhost" && typeof msg.port === "number") {
+        void vscode.env.openExternal(
+          vscode.Uri.parse(`http://localhost:${msg.port}`),
+        );
+      } else if (msg?.type === "stopProject" && typeof msg.project === "string") {
+        await stopProjectLocalhosts(msg.project);
+        await this.pushLocalhosts();
       }
     });
 
@@ -97,11 +110,14 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     // a cheap local TCP check of :3456 so the maw-ui toggle stays in sync even
     // when maw serve is started/stopped outside the extension.
     this.mawTimer = setInterval(() => void this.pushMaw(), 5000);
+    this.lhTimer = setInterval(() => void this.pushLocalhosts(), POLL_MS);
     view.onDidDispose(() => {
       if (this.timer) clearInterval(this.timer);
       this.timer = undefined;
       if (this.mawTimer) clearInterval(this.mawTimer);
       this.mawTimer = undefined;
+      if (this.lhTimer) clearInterval(this.lhTimer);
+      this.lhTimer = undefined;
       this.unsubProjectChange?.();
       this.unsubProjectChange = undefined;
     });
@@ -157,6 +173,19 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     if (!this.view || this.renderedSetup !== false) return;
     const up = await isMawUp();
     this.view.webview.postMessage({ type: "maw", up });
+  }
+
+  /** Scan localhost servers grouped by project and push them to the webview.
+   *  Ready (panel) state only. Never throws — an empty list renders "none". */
+  private async pushLocalhosts(): Promise<void> {
+    if (!this.view || this.renderedSetup !== false) return;
+    let groups: ProjectGroup[] = [];
+    try {
+      groups = scanLocalhosts();
+    } catch {
+      groups = [];
+    }
+    this.view.webview.postMessage({ type: "localhosts", groups });
   }
 
   // ── Project picker plumbing ──────────────────────────────────────────────
@@ -245,6 +274,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   .hero h2 { margin: 0 0 10px; font-size: 18px; font-weight: 600; }
   .hero p { margin: 0 0 26px; font-size: 13px; opacity: 0.7; line-height: 1.6; max-width: 260px; }
   .hero .btn.primary { width: auto; min-width: 200px; padding: 9px 16px; font-size: 14px; }
+  .lh-head { display: flex; justify-content: space-between; align-items: center; }
+  .lh-refresh { cursor: pointer; opacity: 0.6; text-transform: none; letter-spacing: 0; }
+  .lh-refresh:hover { opacity: 1; }
+  .lh-empty { font-size: 12px; opacity: 0.55; padding: 4px 2px; }
+  .lh-group { margin-bottom: 8px; }
+  .lh-group-head { display: flex; justify-content: space-between; align-items: center; font-size: 12px; font-weight: 600; padding: 2px; }
+  .lh-stop { cursor: pointer; color: #f85149; font-size: 11px; opacity: 0.85; }
+  .lh-stop:hover { opacity: 1; }
+  .lh-row { display: flex; justify-content: space-between; align-items: center; font-size: 12px; padding: 2px 2px 2px 8px; opacity: 0.9; }
+  .lh-open { cursor: pointer; color: var(--vscode-textLink-foreground); }
+  .lh-open:hover { text-decoration: underline; }
 </style>`;
   }
 
@@ -282,6 +322,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   <button class="btn" data-cmd="missioncontrol.accounts">Accounts</button>
   <button class="btn" data-cmd="missioncontrol.settings">Settings</button>
 
+  <div class="nav-label lh-head">
+    <span>Localhosts</span>
+    <span id="lhRefresh" class="lh-refresh">refresh</span>
+  </div>
+  <div id="localhosts"><div class="lh-empty">scanning…</div></div>
+
 <script>
   const vscode = acquireVsCodeApi();
 
@@ -292,14 +338,53 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   document.getElementById('openDashboard').addEventListener('click', () => {
     vscode.postMessage({ type: 'open_dashboard' });
   });
-  // Live maw-ui on/off state → toggle button label/colour.
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, (c) =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  }
+  function renderLocalhosts(groups) {
+    const box = document.getElementById('localhosts');
+    if (!box) return;
+    if (!groups || !groups.length) {
+      box.innerHTML = '<div class="lh-empty">no servers running</div>';
+      return;
+    }
+    box.innerHTML = groups.map((g) => {
+      const rows = g.entries.map((e) =>
+        '<div class="lh-row"><span class="lh-open" data-port="' + e.port + '">:' +
+        e.port + '  ' + esc(e.role) + '</span></div>').join('');
+      return '<div class="lh-group"><div class="lh-group-head"><span>' +
+        esc(g.project) + '</span><span class="lh-stop" data-project="' +
+        esc(g.project) + '">Stop all</span></div>' + rows + '</div>';
+    }).join('');
+  }
+  document.getElementById('localhosts').addEventListener('click', (ev) => {
+    const open = ev.target.closest('.lh-open');
+    if (open) {
+      vscode.postMessage({ type: 'openLocalhost', port: Number(open.dataset.port) });
+      return;
+    }
+    const stop = ev.target.closest('.lh-stop');
+    if (stop) {
+      vscode.postMessage({ type: 'stopProject', project: stop.dataset.project });
+    }
+  });
+  document.getElementById('lhRefresh').addEventListener('click', () => {
+    vscode.postMessage({ type: 'refreshLocalhosts' });
+  });
+
+  // Live state pushes from the extension: maw-ui toggle + Localhosts list.
   window.addEventListener('message', (e) => {
     const m = e.data;
-    if (!m || m.type !== 'maw') return;
-    const b = document.getElementById('mawToggle');
-    if (!b) return;
-    b.textContent = m.up ? 'Stop maw ui' : 'Start maw ui';
-    b.classList.toggle('on', !!m.up);
+    if (!m) return;
+    if (m.type === 'maw') {
+      const b = document.getElementById('mawToggle');
+      if (!b) return;
+      b.textContent = m.up ? 'Stop maw ui' : 'Start maw ui';
+      b.classList.toggle('on', !!m.up);
+    } else if (m.type === 'localhosts') {
+      renderLocalhosts(m.groups);
+    }
   });
   vscode.postMessage({ type: 'ready' });
 </script>
