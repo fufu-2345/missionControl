@@ -93,9 +93,8 @@ function renderShell(): string {
   .card-head .name { font-size: 15px; font-weight: 600; word-break: break-all; }
   .row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-top: 1px solid var(--vscode-panel-border); }
   .row:first-of-type { border-top: none; }
-  .port { font-variant-numeric: tabular-nums; font-weight: 600; min-width: 58px; }
-  .role { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.6; min-width: 34px; }
-  .url { color: var(--vscode-textLink-foreground); cursor: pointer; font-size: 13px; }
+  .role { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.6; margin-left: auto; }
+  .url { color: var(--vscode-textLink-foreground); cursor: pointer; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .url:hover { text-decoration: underline; }
   .empty { opacity: 0.55; font-size: 14px; padding: 40px 0; text-align: center; }
 </style></head><body>
@@ -119,9 +118,9 @@ function renderShell(): string {
     box.className = 'grid';
     box.innerHTML = groups.map((g) => {
       const rows = g.entries.map((e) =>
-        '<div class="row"><span class="port">:' + e.port + '</span>' +
-        '<span class="role">' + esc(e.role) + '</span>' +
-        '<span class="url" data-port="' + e.port + '">localhost:' + e.port + '</span></div>').join('');
+        '<div class="row">' +
+        '<span class="url" data-port="' + e.port + '">localhost:' + e.port + '</span>' +
+        '<span class="role">' + esc(e.role) + '</span></div>').join('');
       return '<div class="card"><div class="card-head">' +
         '<span class="name">' + esc(g.project) + '</span>' +
         '<button class="btn stop" data-project="' + esc(g.project) + '">Stop all</button>' +
