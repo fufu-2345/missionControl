@@ -267,12 +267,30 @@
     });
   }
 
+  // attached file path(s) → APPEND into this pane's composer (visible feedback; multiple
+  // attaches accumulate; the user adds a prompt and sends it all together). Brief highlight
+  // so it's obvious the attach landed. No emoji (user can't read them).
+  function onAttachPaths(pane, paths) {
+    var rec = panels.get(pane);
+    if (!rec || !rec.ta || !paths || !paths.length) return;
+    var add = paths.join(" ") + " ";
+    var cur = rec.ta.value;
+    rec.ta.value = cur ? (cur.replace(/\s*$/, "") + " " + add) : add;
+    autoGrow(rec.ta);
+    rec.ta.focus();
+    try { rec.ta.setSelectionRange(rec.ta.value.length, rec.ta.value.length); } catch (e) {}
+    var ta = rec.ta, prev = ta.style.boxShadow;
+    ta.style.boxShadow = "0 0 0 2px var(--vscode-focusBorder)";
+    setTimeout(function () { ta.style.boxShadow = prev; }, 600);
+  }
+
   window.addEventListener("message", function (e) {
     var m = e.data; if (!m || typeof m.type !== "string") return;
     if (m.type === "panes") onPanes(m.panes);
     else if (m.type === "messages") onMessages(m);
     else if (m.type === "ctx") onCtx(m.ctx);
     else if (m.type === "team") onTeam(m);
+    else if (m.type === "attachPaths") onAttachPaths(m.pane, m.paths);
     else if (m.type === "status") { if (emptyEl) emptyEl.textContent = String(m.text || ""); }
   });
 

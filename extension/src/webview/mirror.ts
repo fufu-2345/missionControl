@@ -6,7 +6,7 @@ import * as vscode from "vscode";
 
 import { listOrchestratorTeams } from "../commands/startOrchestrator";
 import { isSafeOracleName, type OracleTeam } from "../commands/teams";
-import { buildAttachText, droppedFilePath } from "../commands/claudeSessions";
+import { droppedFilePath } from "../commands/claudeSessions";
 import {
   isSafeSessionName,
   paneRoleAndLabel,
@@ -307,11 +307,11 @@ function createChat(context: vscode.ExtensionContext, session: string): void {
         if (isPaneId(msg.pane) && typeof msg.d === "string") composerSend(msg.pane, msg.d);
         return;
       case "attach":
-        if (isPaneId(msg.pane)) await attachViaDialog(msg.pane);
+        if (isPaneId(msg.pane)) await attachViaDialog(msg.pane, post);
         return;
       case "drop":
         if (isPaneId(msg.pane) && typeof msg.name === "string" && typeof msg.data === "string")
-          attachDroppedFile(msg.pane, msg.name, msg.data);
+          attachDroppedFile(msg.pane, msg.name, msg.data, post);
         return;
       case "compact":
         if (isPaneId(msg.pane)) await forceCompact(msg.pane);
@@ -602,31 +602,28 @@ function closeWorker(chat: Chat, worker: string): void {
   });
 }
 
-function injectPaths(pane: string, paths: string[]): string | null {
-  if (!isPaneId(pane)) return "pane id ไม่ถูกต้อง";
-  const text = buildAttachText(paths);
-  if (!text) return "ไม่มีไฟล์ที่ใช้ได้";
-  try {
-    cp.execFileSync("tmux", ["send-keys", "-t", pane, "-l", "--", text]);
-  } catch (err) {
-    return err instanceof Error ? err.message : String(err);
-  }
-  return null;
-}
-
-async function attachViaDialog(pane: string): Promise<void> {
+// Attach = insert the picked path(s) into THIS pane's CHAT COMPOSER (webview textarea), not
+// straight into the tmux pane input. Chat-first: the user must SEE what got attached, be able
+// to attach several (they accumulate in the composer), edit, add a prompt, and send it all in
+// one go via the normal composer submit. The old path (send-keys -l directly to the pane) put
+// the path in the invisible tmux input line → no feedback, and a 2nd attach was easy to lose.
+async function attachViaDialog(pane: string, post: (m: unknown) => void): Promise<void> {
+  if (!isPaneId(pane)) return;
   const picked = await vscode.window.showOpenDialog({
     canSelectMany: true,
-    openLabel: "แนบเข้า pane นี้",
-    title: "เลือกไฟล์/รูปเพื่อแนบเข้า Claude pane",
-    filters: { รูปภาพ: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"], ทุกไฟล์: ["*"] },
+    openLabel: "แนบเข้าช่องพิมพ์",
+    title: "เลือกไฟล์ใดๆ เพื่อแนบเข้า Claude pane",
+    // "ทุกไฟล์" FIRST → it is the dialog's DEFAULT filter, so the picker shows every file
+    // type (not just images). Claude Code's Read tool ingests any file (text/code/pdf/image)
+    // from the bare path. "รูปภาพ" stays as a convenience narrowing option.
+    filters: { ทุกไฟล์: ["*"], รูปภาพ: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"] },
   });
   if (!picked || picked.length === 0) return;
-  const err = injectPaths(pane, picked.map((u) => u.fsPath));
-  if (err) vscode.window.showErrorMessage(`แนบเข้า pane ล้มเหลว: ${err}`);
+  post({ type: "attachPaths", pane, paths: picked.map((u) => u.fsPath) });
 }
 
-function attachDroppedFile(pane: string, name: string, base64: string): void {
+function attachDroppedFile(pane: string, name: string, base64: string, post: (m: unknown) => void): void {
+  if (!isPaneId(pane)) return;
   let bytes: Buffer;
   try {
     bytes = Buffer.from(base64, "base64");
@@ -642,8 +639,7 @@ function attachDroppedFile(pane: string, name: string, base64: string): void {
     vscode.window.showErrorMessage(`บันทึกไฟล์ที่ลากมาล้มเหลว: ${m}`);
     return;
   }
-  const err = injectPaths(pane, [dest]);
-  if (err) vscode.window.showErrorMessage(`แนบไฟล์ที่ลากมาล้มเหลว: ${err}`);
+  post({ type: "attachPaths", pane, paths: [dest] });
 }
 
 function nonce(): string {

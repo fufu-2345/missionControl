@@ -289,30 +289,60 @@ export function openTeamsPanel(_projectId: string | null = null): vscode.Webview
 export function renderShell(): string {
   return `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><style>
+  /* Bento tokens — Team Config follows the VS Code theme kind (data-theme). */
+  :root, :root[data-theme="dark"] {
+    --bg:#0d1117; --panel:#11171d; --editor:#0f151b; --card:#161f28;
+    --border:rgba(255,255,255,.07); --border2:rgba(255,255,255,.13);
+    --txt:#e7eef5; --muted:#8a97a4; --faint:#5c6773;
+    --accent:#2f9dc4; --accent2:#40c8ea; --accentSoft:rgba(47,157,196,.15); --accentGlow:rgba(64,200,234,.28);
+    --dot:rgba(255,255,255,.028); --primaryGrad:linear-gradient(180deg,#33a6cf,#1f7ea3);
+  }
+  :root[data-theme="light"] {
+    --bg:#e9edf1; --panel:#f9fbfc; --editor:#ffffff; --card:#ffffff;
+    --border:rgba(15,30,45,.10); --border2:rgba(15,30,45,.17);
+    --txt:#132029; --muted:#5a6b78; --faint:#94a1ad;
+    --accent:#0e88ad; --accent2:#0e7fa3; --accentSoft:rgba(14,136,173,.10); --accentGlow:rgba(14,136,173,.18);
+    --dot:rgba(15,30,45,.035); --primaryGrad:linear-gradient(180deg,#13a0c9,#0e88ad);
+  }
+  :root { --pad:20px; --cardpad:15px; --radius:14px; --fs:13.5px;
+    --uifont:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
+    --mono:'JetBrains Mono',var(--vscode-editor-font-family),ui-monospace,monospace; }
   html, body { height: 100%; margin: 0; padding: 0; }
-  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground);
-    background: var(--vscode-editor-background); display: flex; flex-direction: column; overflow: hidden; }
-  .topbar { display: flex; align-items: center; justify-content: space-between;
-    padding: 10px 16px; border-bottom: 1px solid var(--vscode-panel-border); }
-  .topbar h1 { font-size: 14px; margin: 0; font-weight: 600; }
-  .topbar h1 .count { font-size: 11px; opacity: 0.6; margin-left: 8px; font-weight: 400; }
-  .topbar .actions { display: flex; gap: 6px; }
-  button { background: transparent; color: var(--vscode-foreground);
-    border: 1px solid var(--vscode-panel-border); padding: 4px 10px; border-radius: 3px;
-    font-size: 11px; cursor: pointer; }
-  button:hover { background: var(--vscode-list-hoverBackground); }
-  button.primary { background: #238636; color: #fff; border-color: #238636; }
+  body { font-family: var(--uifont); font-size: var(--fs); color: var(--txt);
+    background: var(--editor);
+    background-image: radial-gradient(var(--dot) 1px, transparent 1px); background-size: 24px 24px;
+    display: flex; flex-direction: column; overflow: hidden; }
+  * { box-sizing: border-box; }
+  .topbar { padding: 14px var(--pad) 12px; border-bottom: 1px solid var(--border); }
+  .topbar-inner { display: flex; align-items: center; gap: 11px; max-width: 820px; margin: 0 auto; width: 100%; }
+  .topbar h1 { font-size: 19px; margin: 0; font-weight: 700; letter-spacing: -.3px;
+    display: flex; align-items: center; gap: 9px; }
+  .topbar h1 .count { font-family: var(--mono); font-size: 12px; font-weight: 400; color: var(--faint);
+    background: var(--card); border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px; margin: 0; }
+  .topbar .actions { display: flex; gap: 8px; margin-left: auto; }
+  button { display: inline-flex; align-items: center; gap: 6px; background: var(--card); color: var(--txt);
+    border: 1px solid var(--border2); padding: 5px 12px; border-radius: 7px; font-size: 12px; font-weight: 500;
+    cursor: pointer; font-family: var(--uifont); }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--primaryGrad); color: #fff; border: none; font-weight: 600;
+    box-shadow: 0 2px 8px var(--accentGlow); }
+  button.primary:hover { filter: brightness(1.06); }
   button.danger { background: #da3633; color: #fff; border-color: #da3633; }
-  .content { flex: 1; overflow-y: auto; padding: 14px 18px 28px; box-sizing: border-box; }
-  .empty { opacity: 0.6; font-size: 13px; padding: 24px 0; }
+  button.danger:hover { filter: brightness(1.06); border-color: #da3633; }
+  .topbar .actions button { height: 32px; padding: 0 14px; border-radius: 8px; font-size: 12.5px; font-weight: 600; }
+  .topbar .actions button svg { width: 13px; height: 13px; }
+  .content { flex: 1; overflow-y: auto; padding: var(--pad); max-width: 820px; margin: 0 auto;
+    width: 100%; box-sizing: border-box; }
+  .empty { color: var(--faint); font-size: 13px; padding: 24px 0; }
 
-  .team-card { display: flex; align-items: center; justify-content: space-between;
-    padding: 12px 14px; margin-bottom: 8px; border-radius: 8px; cursor: pointer;
-    background: var(--vscode-editor-inactiveSelectionBackground);
-    border: 1px solid var(--vscode-panel-border); }
-  .team-card:hover { background: var(--vscode-list-hoverBackground); }
-  .team-card .tc-name { font-size: 13px; font-weight: 600; }
-  .team-card .tc-meta { font-size: 11px; opacity: 0.65; margin-top: 2px; }
+  .team-card { display: flex; align-items: center; gap: 13px;
+    padding: var(--cardpad); margin-bottom: 9px; border-radius: var(--radius); cursor: pointer;
+    background: var(--card); border: 1px solid var(--border); transition: border-color .12s; }
+  .team-card:hover { border-color: var(--accent); }
+  .team-card .tc-name { font-size: calc(var(--fs) + 1px); font-weight: 700; }
+  .team-card .tc-meta { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .team-card .tc-chev { margin-left: auto; color: var(--faint); display: flex; flex-shrink: 0; }
+  .team-card .tc-chev svg { width: 15px; height: 15px; }
 
   label { font-size: 11px; opacity: 0.8; display: block; margin: 10px 0 3px; }
   input[type=text], textarea, select {
@@ -364,13 +394,15 @@ export function renderShell(): string {
   button:disabled { opacity: 0.45; cursor: not-allowed; }
 </style></head>
 <body>
-  <div class="topbar">
+  <div class="topbar"><div class="topbar-inner">
     <h1 id="title">Teams <span class="count" id="count"></span></h1>
     <div class="actions" id="topActions"></div>
-  </div>
+  </div></div>
   <div class="content" id="content"><div class="empty">Loading…</div></div>
 <script>
   const vscode = acquireVsCodeApi();
+  (function(){ var b = document.body.classList;
+    document.documentElement.dataset.theme = (b.contains('vscode-light') || b.contains('vscode-high-contrast-light')) ? 'light' : 'dark'; })();
   let VIEW = "list";
   // Team of the detail view — set while editing an existing team, "" otherwise.
   // The "awaken" button (create+ritual) only makes sense for a team that exists,
@@ -426,17 +458,16 @@ export function renderShell(): string {
     VIEW = "list"; DETAIL_TEAM = "";
     el("title").innerHTML = 'Teams <span class="count">'+teams.length+'</span>';
     el("topActions").innerHTML =
-      '<button class="primary" onclick="post(\\'new_team\\')">＋ New Team</button>'
-      + '<button onclick="post(\\'reload\\')">Reload</button>'
-      + '<button onclick="post(\\'close\\')">Close</button>';
+      '<button class="primary" onclick="post(\\'new_team\\')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>New Team</button>'
+      + '<button onclick="post(\\'reload\\')">Reload</button>';
     el("content").innerHTML = teams.length
       ? teams.map(t =>
           '<div class="team-card" data-name="'+esc(t.name)+'">'
           + '<div><div class="tc-name">'+esc(t.name)+'</div>'
           + '<div class="tc-meta">'+t.memberCount+' สมาชิก · '+esc((t.roles||[]).join(', ')||'—')+'</div></div>'
-          + '<div style="opacity:.4">›</div></div>'
+          + '<div class="tc-chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 6 6 6-6 6"/></svg></div></div>'
         ).join('')
-      : '<div class="empty">ยังไม่มีทีม — กด ＋ New Team</div>';
+      : '<div class="empty">ยังไม่มีทีม — กด + New Team</div>';
     el("content").querySelectorAll('.team-card').forEach(c =>
       c.addEventListener('click', () => post('open_team', { name: c.dataset.name })));
   }
