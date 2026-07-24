@@ -41,6 +41,9 @@ Thumbs.db
 # for the transcript-chat webview (media/mirror/chat.js). Kept locally, never committed.
 /extension/scripts/mirror-bridge/
 /extension/media/xterm/
+# Orphan JS from the same dead prototype (live path loads only media/mirror/chat.js)
+/extension/media/mirror/mirror-grid.js
+/extension/media/mirror/mirror.js
 
 todo.md
 
