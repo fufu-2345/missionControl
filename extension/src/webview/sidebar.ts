@@ -224,43 +224,81 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 <meta http-equiv="Content-Security-Policy"
   content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
 <style>
+  /* Bento design tokens — sidebar auto-follows the VS Code theme kind. */
+  :root, :root[data-theme="dark"] {
+    --panel:#11171d; --card:#161f28; --border:rgba(255,255,255,.07); --border2:rgba(255,255,255,.13);
+    --txt:#e7eef5; --muted:#8a97a4; --faint:#5c6773;
+    --accent:#2f9dc4; --accent2:#40c8ea; --accentSoft:rgba(47,157,196,.15); --accentGlow:rgba(64,200,234,.28);
+    --good:#3fd39a; --primaryGrad:linear-gradient(180deg,#33a6cf,#1f7ea3);
+  }
+  :root[data-theme="light"] {
+    --panel:#f9fbfc; --card:#ffffff; --border:rgba(15,30,45,.10); --border2:rgba(15,30,45,.17);
+    --txt:#132029; --muted:#5a6b78; --faint:#94a1ad;
+    --accent:#0e88ad; --accent2:#0e7fa3; --accentSoft:rgba(14,136,173,.10); --accentGlow:rgba(14,136,173,.18);
+    --good:#0fa574; --primaryGrad:linear-gradient(180deg,#13a0c9,#0e88ad);
+  }
   html, body { height: 100%; }
-  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 10px; box-sizing: border-box; }
-  .status { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 2px 4px; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--vscode-descriptionForeground); }
-  .dot.on { background: #3fb950; }
-  .dot.off { background: #f85149; }
-  .project-label { font-size: 12px; padding: 4px 4px 10px; opacity: 0.85; border-bottom: 1px solid var(--vscode-panel-border); margin-bottom: 10px; word-break: break-all; }
-  .project-label .name { font-weight: 600; }
-  .nav-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.6; margin: 14px 0 4px 2px; }
-  .btn { display: block; width: 100%; text-align: left; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; padding: 6px 10px; border-radius: 3px; cursor: pointer; margin-bottom: 4px; font-size: 13px; }
-  .btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
-  .btn.on { background: rgba(63,185,80,0.16); color: #3fb950; }
-  .btn.on:hover { background: rgba(63,185,80,0.24); }
-  .btn.primary { text-align: center; background: var(--vscode-button-background); color: var(--vscode-button-foreground); font-weight: 600; padding: 9px 14px; font-size: 13px; margin: 6px 0 4px; }
-  .btn.primary:hover { background: var(--vscode-button-hoverBackground); }
-  /* First-run hero — fills the panel, centered like the Claude Code welcome. */
-  .hero { box-sizing: border-box; min-height: calc(100vh - 20px); display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 24px 18px; }
-  .hero .logo { font-size: 44px; line-height: 1; margin-bottom: 20px; }
-  .hero h2 { margin: 0 0 10px; font-size: 18px; font-weight: 600; }
-  .hero p { margin: 0 0 26px; font-size: 13px; opacity: 0.7; line-height: 1.6; max-width: 260px; }
-  .hero .btn.primary { width: auto; min-width: 200px; padding: 9px 16px; font-size: 14px; }
+  body { font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif; font-size: 13px;
+    color: var(--txt); background: var(--panel); margin: 0; padding: 0;
+    display: flex; flex-direction: column; min-height: 100vh; }
+  * { box-sizing: border-box; }
+  .eyebrow { font-size: 10.5px; letter-spacing: 1.5px; text-transform: uppercase; font-weight: 600;
+    color: var(--faint); padding: 13px 16px 10px; }
+  .search { margin: 0 12px 10px; height: 30px; display: flex; align-items: center; gap: 7px; padding: 0 9px;
+    border: 1px solid var(--border); border-radius: 7px; background: var(--card); }
+  .search svg { width: 15px; height: 15px; flex-shrink: 0; color: var(--faint); }
+  .search input { flex: 1; border: none; background: transparent; color: var(--txt); font-size: 11.5px;
+    outline: none; font-family: inherit; }
+  .search input::placeholder { color: var(--faint); }
+  .primaries { display: flex; flex-direction: column; gap: 7px; padding: 0 12px; }
+  .pbtn { display: flex; align-items: center; justify-content: center; gap: 8px; height: 36px; width: 100%;
+    border: none; border-radius: 9px; background: var(--primaryGrad); color: #fff; font-weight: 600; font-size: 13px;
+    cursor: pointer; font-family: inherit;
+    box-shadow: 0 2px 10px var(--accentGlow), inset 0 1px 0 rgba(255,255,255,.18); }
+  .pbtn svg { width: 16px; height: 16px; }
+  .pbtn:hover { filter: brightness(1.06); }
+  .divider { height: 1px; background: var(--border); margin: 12px 14px; }
+  .nav { display: flex; flex-direction: column; gap: 2px; padding: 0 8px; }
+  .nav-item { display: flex; align-items: center; gap: 9px; width: 100%; text-align: left; background: transparent;
+    border: none; color: var(--muted); font-size: 12.5px; padding: 8px 10px; border-radius: 8px; cursor: pointer;
+    font-family: inherit; }
+  .nav-item svg { width: 15px; height: 15px; flex-shrink: 0; }
+  .nav-item:hover { background: var(--accentSoft); color: var(--txt); }
+  .nav-item.active { background: var(--accentSoft); color: var(--txt); font-weight: 600; box-shadow: inset 2px 0 0 var(--accent); }
+  .nav-item.on { color: var(--good); }
+  /* Settings — prominent, pinned to the very bottom. */
+  .nav-bottom { margin-top: auto; padding: 10px 12px 12px; }
+  .settings-btn { display: flex; align-items: center; gap: 9px; width: 100%; text-align: left;
+    background: var(--card); border: 1px solid var(--border2); color: var(--txt); font-weight: 600;
+    font-size: 12.5px; padding: 10px 12px; border-radius: 9px; cursor: pointer; font-family: inherit; }
+  .settings-btn svg { width: 16px; height: 16px; color: var(--accent2); flex-shrink: 0; }
+  .settings-btn:hover { border-color: var(--accent); background: var(--accentSoft); }
+  /* First-run hero — fills the panel, centered. */
+  .hero { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 24px 18px; }
+  .hero .logo { color: var(--accent2); margin-bottom: 18px; }
+  .hero .logo svg { width: 40px; height: 40px; }
+  .hero h2 { margin: 0 0 10px; font-size: 18px; font-weight: 600; color: var(--txt); }
+  .hero p { margin: 0 0 24px; font-size: 12.5px; color: var(--muted); line-height: 1.6; max-width: 260px; }
+  .hero .pbtn { min-width: 200px; margin-bottom: 8px; }
 </style>`;
   }
 
-  /** First-run: a single Setup button, nothing else. */
+  /** First-run: Open Claude + Setup, in the Bento palette. */
   private setupHtml(): string {
     return `<!DOCTYPE html><html><head>${this.head()}</head><body>
   <div class="hero">
-    <div class="logo">⚡</div>
+    <div class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg></div>
     <h2>Mission Control</h2>
     <p>Frontend-only build<br>เปิด Claude Code chat ในจอหลัก</p>
-    <button class="btn primary" data-cmd="missioncontrol.claude">Open Claude</button>
-    <button class="btn primary" data-cmd="missioncontrol.setup">Setup</button>
+    <button class="pbtn" data-cmd="missioncontrol.claude">Open Claude</button>
+    <button class="pbtn" data-cmd="missioncontrol.setup">Setup</button>
   </div>
 <script>
   const vscode = acquireVsCodeApi();
-  document.querySelectorAll('.btn[data-cmd]').forEach((b) =>
+  (function(){ var b = document.body.classList;
+    document.documentElement.dataset.theme = (b.contains('vscode-light') || b.contains('vscode-high-contrast-light')) ? 'light' : 'dark'; })();
+  document.querySelectorAll('.pbtn[data-cmd]').forEach((b) =>
     b.addEventListener('click', () =>
       vscode.postMessage({ type: 'run', command: b.dataset.cmd })));
   vscode.postMessage({ type: 'ready' });
@@ -268,40 +306,65 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 </body></html>`;
   }
 
-  /** Ready: slim nav — status dot + project name label + Open Dashboard
-   *  + 4 nav links. All heavy actions (Start/Status/Budget/Approve/Pause)
-   *  live on the dashboard now; sidebar is just navigation + state badge. */
+  /** Ready: Bento sidebar — eyebrow + search + Home/Projects primaries + a
+   *  5-item nav with active state. All heavy actions live on the dashboard;
+   *  this is navigation + the live maw-ui toggle. */
   private panelHtml(): string {
+    const ICON_SEARCH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4-4"/></svg>';
+    const ICON_HOME = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V21h14V9.5"/></svg>';
+    const ICON_FOLDER = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+    const ICON_SPARK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3v18M3 12h18M6 6l12 12M18 6 6 18"/></svg>';
+    const ICON_HALF = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></svg>';
+    const ICON_SERVER = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="1.5"/><rect x="3" y="13" width="18" height="7" rx="1.5"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>';
+    const ICON_GEAR = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>';
     return `<!DOCTYPE html><html><head>${this.head()}</head><body>
-  <button class="btn primary" id="openDashboard">Open Dashboard</button>
-  <button class="btn primary" data-cmd="missioncontrol.claude">Open Claude</button>
-  <button class="btn primary" data-cmd="missioncontrol.terminal">Open Terminal</button>
-  <button class="btn primary" data-cmd="missioncontrol.orchestratorContinue">📁 Projects</button>
-  <button class="btn" id="mawToggle" data-cmd="missioncontrol.mawToggle">maw ui…</button>
-  <button class="btn" data-cmd="missioncontrol.skills">Skills</button>
-  <button class="btn" data-cmd="missioncontrol.accounts">Accounts</button>
-  <button class="btn" data-cmd="missioncontrol.localhosts">Localhosts</button>
-  <button class="btn" data-cmd="missioncontrol.settings">Settings</button>
+  <div class="eyebrow">Mission Control</div>
+  <div class="search">${ICON_SEARCH}<input id="navSearch" type="text" placeholder="Search…" /></div>
+  <div class="primaries">
+    <button class="pbtn" id="openDashboard">${ICON_HOME} Home</button>
+    <button class="pbtn" data-cmd="missioncontrol.orchestratorContinue">${ICON_FOLDER} Projects</button>
+  </div>
+  <div class="divider"></div>
+  <div class="nav">
+    <button class="nav-item" data-cmd="missioncontrol.skills" data-label="Skills">${ICON_SPARK}<span class="nav-label">Skills</span></button>
+    <button class="nav-item" data-cmd="missioncontrol.accounts" data-label="Accounts">${ICON_HALF}<span class="nav-label">Accounts</span></button>
+    <button class="nav-item" data-cmd="missioncontrol.localhosts" data-label="Localhosts">${ICON_SERVER}<span class="nav-label">Localhosts</span></button>
+  </div>
+  <div class="nav-bottom">
+    <button class="settings-btn" id="settingsBtn">${ICON_GEAR}<span>Settings</span></button>
+  </div>
 
 <script>
   const vscode = acquireVsCodeApi();
+  (function(){ var b = document.body.classList;
+    document.documentElement.dataset.theme = (b.contains('vscode-light') || b.contains('vscode-high-contrast-light')) ? 'light' : 'dark'; })();
 
-  document.querySelectorAll('.btn[data-cmd]').forEach((b) => {
-    b.addEventListener('click', () =>
-      vscode.postMessage({ type: 'run', command: b.dataset.cmd }));
+  function setActive(el) {
+    document.querySelectorAll('.nav-item').forEach((n) => n.classList.remove('active'));
+    if (el) el.classList.add('active');
+  }
+  document.querySelectorAll('.nav-item[data-cmd]').forEach((b) => {
+    b.addEventListener('click', () => { setActive(b); vscode.postMessage({ type: 'run', command: b.dataset.cmd }); });
   });
   document.getElementById('openDashboard').addEventListener('click', () => {
     vscode.postMessage({ type: 'open_dashboard' });
   });
-  // Live maw-ui on/off state → toggle button label/colour.
-  window.addEventListener('message', (e) => {
-    const m = e.data;
-    if (!m || m.type !== 'maw') return;
-    const b = document.getElementById('mawToggle');
-    if (!b) return;
-    b.textContent = m.up ? 'Stop maw ui' : 'Start maw ui';
-    b.classList.toggle('on', !!m.up);
+  document.querySelectorAll('.pbtn[data-cmd]').forEach((b) => {
+    b.addEventListener('click', () => vscode.postMessage({ type: 'run', command: b.dataset.cmd }));
   });
+
+  // Search filters the nav items by label.
+  const search = document.getElementById('navSearch');
+  search.addEventListener('input', () => {
+    const q = search.value.trim().toLowerCase();
+    document.querySelectorAll('.nav-item').forEach((n) => {
+      const lbl = (n.dataset.label || '').toLowerCase();
+      n.style.display = (!q || lbl.indexOf(q) >= 0) ? '' : 'none';
+    });
+  });
+
+  document.getElementById('settingsBtn').addEventListener('click', () =>
+    vscode.postMessage({ type: 'run', command: 'missioncontrol.settings' }));
   vscode.postMessage({ type: 'ready' });
 </script>
 </body></html>`;

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { addBreakdown, emptyBreakdown, priceLine } from "./usage";
+import { addBreakdown, emptyBreakdown, priceLine, topProjectsByRange } from "./usage";
 
 describe("priceLine", () => {
   test("opus split + cost (no 5m/1h)", () => {
@@ -34,6 +34,47 @@ describe("priceLine", () => {
 
   test("synthetic model -> null", () => {
     expect(priceLine("<synthetic>", { input_tokens: 5 })).toBeNull();
+  });
+});
+
+describe("topProjectsByRange", () => {
+  const cutoff = new Date("2026-07-20T00:00:00").getTime(); // local midnight
+
+  test("ranks projects by in-range cost, returns top N, drops out-of-range hours", () => {
+    const bph = {
+      "/home/u/projects/alpha": {
+        "2026-07-22 10:00": { cost: 5, tokens: 100 },
+        "2026-07-19 09:00": { cost: 99, tokens: 9 }, // before cutoff -> excluded
+      },
+      "/home/u/projects/beta": { "2026-07-21 08:00": { cost: 3, tokens: 50 } },
+      "/home/u/projects/gamma": { "2026-07-20 00:00": { cost: 1, tokens: 10 } },
+    };
+    const top = topProjectsByRange(bph, cutoff, 2);
+    expect(top).toEqual([
+      { name: "alpha", cost: 5 },
+      { name: "beta", cost: 3 },
+    ]);
+  });
+
+  test("folds sub-dir cwds onto the same project root", () => {
+    const bph = {
+      "/home/u/projects/alpha": { "2026-07-22 10:00": { cost: 2, tokens: 1 } },
+      "/home/u/projects/alpha/sub": { "2026-07-22 11:00": { cost: 4, tokens: 1 } },
+      "/home/u/projects/beta": { "2026-07-22 10:00": { cost: 5, tokens: 1 } },
+    };
+    const top = topProjectsByRange(bph, cutoff, 2);
+    expect(top).toEqual([
+      { name: "alpha", cost: 6 },
+      { name: "beta", cost: 5 },
+    ]);
+  });
+
+  test("skips cwds with no resolvable project", () => {
+    const bph = {
+      "/home/u/random/dir": { "2026-07-22 10:00": { cost: 100, tokens: 1 } },
+      "/home/u/projects/alpha": { "2026-07-22 10:00": { cost: 1, tokens: 1 } },
+    };
+    expect(topProjectsByRange(bph, cutoff, 5)).toEqual([{ name: "alpha", cost: 1 }]);
   });
 });
 

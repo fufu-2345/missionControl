@@ -96,4 +96,29 @@ export function buildTeamUpCommand(
   );
 }
 
+/** Wake ONE freshly-created member into the team session — same session
+ *  bootstrap / window-rename / attach as buildTeamUpCommand, but the roster is
+ *  just this oracle (`--only`, the rest of the team untouched) — then fire
+ *  `/awaken` into that member's window so the birth ritual runs in the pane the
+ *  user is attached to. The `/awaken` send is BEST-EFFORT: one settle wait for
+ *  claude to reach its prompt (the ritual then prompts for language/mode in-pane);
+ *  a cold start slower than the wait means /awaken lands in the shell and the user
+ *  re-sends it manually. team/session/oracle are validated by the caller. */
+export function buildAwakenMemberCommand(
+  team: string,
+  session: string,
+  cwd: string,
+  oracle: string,
+): string {
+  return (
+    `tmux new-session -A -d -s '${session}' -n _boot -c '${cwd}' && { ` +
+    `maw team up '${team}' --session '${session}' --force --only '${oracle}' ; ` +
+    `for w in $(tmux list-windows -t '=${session}' -F '#{window_name}'); do ` +
+    `tmux rename-window -t "=${session}:$w" "\${w#*-}" 2>/dev/null ; done ; ` +
+    `tmux kill-window -t '=${session}:_boot' 2>/dev/null ; ` +
+    `sleep 10 ; tmux send-keys -t '=${session}:${oracle}' '/awaken' Enter ; ` +
+    `tmux attach -t '=${session}' ; }`
+  );
+}
+
 export const SAFE_SESSION = /^[\w.-]+$/;

@@ -13,7 +13,36 @@ import {
   sessionForProjectLabel,
   sessionCanAttach,
   teamFromOrchesLabel,
+  parseTmuxWindows,
+  sessionIsIdle,
 } from "./sessions";
+
+test("parseTmuxWindows: parses index/name/cmd, preserves spaces in cmd", () => {
+  const raw = "0\tforeman\tclaude\n1\tbuild\tpnpm dev\n2\tlogs\ttail -f app.log";
+  expect(parseTmuxWindows(raw)).toEqual([
+    { index: 0, name: "foreman", cmd: "claude" },
+    { index: 1, name: "build", cmd: "pnpm dev" },
+    { index: 2, name: "logs", cmd: "tail -f app.log" },
+  ]);
+});
+
+test("parseTmuxWindows: tolerant — blank/short/non-numeric lines dropped, empty cmd ok", () => {
+  expect(parseTmuxWindows("")).toEqual([]);
+  expect(parseTmuxWindows("garbage")).toEqual([]); // <2 fields
+  expect(parseTmuxWindows("x\ty\tz")).toEqual([]); // index not a number
+  expect(parseTmuxWindows("3\tshell")).toEqual([{ index: 3, name: "shell", cmd: "" }]);
+});
+
+test("sessionIsIdle: bare single-window shell is idle; claude/maw or multi-window is not", () => {
+  const S = (cmd: string, windows = 1) =>
+    ({ name: "s", windows, attached: false, cmd, cwd: "" });
+  expect(sessionIsIdle(S("bash"))).toBe(true);
+  expect(sessionIsIdle(S("zsh"))).toBe(true);
+  expect(sessionIsIdle(S("-bash"))).toBe(true); // login shell
+  expect(sessionIsIdle(S("claude"))).toBe(false);
+  expect(sessionIsIdle(S("maw"))).toBe(false);
+  expect(sessionIsIdle(S("bash", 3))).toBe(false); // multi-window = real work
+});
 
 test("sessionCanAttach: true only when active pane runs claude", () => {
   expect(sessionCanAttach("claude")).toBe(true);

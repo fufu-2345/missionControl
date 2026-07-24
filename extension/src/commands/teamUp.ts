@@ -8,6 +8,7 @@ import * as vscode from "vscode";
 import { isSafeTeamName } from "./teamsModel";
 import { readTeamDetailSync } from "./teamsOps";
 import {
+  buildAwakenMemberCommand,
   buildTeamUpCommand,
   parseCharterSession,
   resolveInstanceSession,
@@ -149,4 +150,29 @@ export function teamUpMember(team: string, oracle: string): TeamUpResult {
   if (!member) return { error: `ไม่พบ '${oracle}' ในทีม '${team}'` };
   const models = member.model ? { [oracle]: member.model } : {};
   return launchTeamSession(team, [oracle], models, `${team} · ${oracle}`);
+}
+
+/** Wake a freshly-created oracle into the team session (same session semantics as
+ *  teamUpMember — only THIS oracle, rest of the team untouched) and fire /awaken
+ *  into its pane. The caller (webview handler) has already confirmed with the user
+ *  and run prepareAwakenMember (scaffold + invite + charter). One editor terminal
+ *  per session, like teamUp. */
+export function awakenMember(team: string, oracle: string): TeamUpResult {
+  if (!isSafeTeamName(team)) return { error: `ชื่อทีมไม่ปลอดภัย: ${team}` };
+  if (!isSafeTeamName(oracle)) return { error: `ชื่อ oracle ไม่ปลอดภัย: ${oracle}` };
+  const base = baseSessionForTeam(team);
+  const { session, minted } = resolveInstanceSession(base, tmuxHasSession);
+  if (!SAFE_SESSION.test(session)) return { error: `ชื่อ session ไม่ปลอดภัย: ${session}` };
+  const command = buildAwakenMemberCommand(team, session, SOULBREW_DIR, oracle);
+  const prev = _teamTerminals.get(session);
+  if (prev && prev.exitStatus === undefined) prev.dispose();
+  const term = vscode.window.createTerminal({
+    name: `awaken: ${oracle}`,
+    location: vscode.TerminalLocation.Editor,
+    cwd: SOULBREW_DIR,
+  });
+  _teamTerminals.set(session, term);
+  term.show(false);
+  runInTerminal(term, command);
+  return { session, minted };
 }

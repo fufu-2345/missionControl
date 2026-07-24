@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 
 import {
+  awakenStatusFromClaudeMd,
   createArgs,
   deleteArgs,
   diffMembers,
@@ -236,4 +237,20 @@ test("mergeTeamStores: skips maw live-worker entries (team up pollution)", () =>
     { oracle: "foreman", role: "orchestrator", model: undefined, color: undefined },
     { oracle: "bob", role: "member", model: "claude-opus-4-8", color: "cyan" }, // decorated, not from the live %1 entry
   ]);
+});
+
+test("awakenStatusFromClaudeMd: bud placeholder → stub", () => {
+  const stub = "# bob-oracle\n\n## Identity\n- **Purpose**: (to be defined by /awaken)\n";
+  expect(awakenStatusFromClaudeMd(stub)).toBe("stub");
+});
+
+test("awakenStatusFromClaudeMd: placeholder gone → identity (ritual OR hand edit)", () => {
+  const set = "# foreman-oracle\n\n## Identity\n- **Purpose**: orchestrate builds\n";
+  expect(awakenStatusFromClaudeMd(set)).toBe("identity");
+});
+
+test("awakenStatusFromClaudeMd: no/empty content → unknown", () => {
+  expect(awakenStatusFromClaudeMd(null)).toBe("unknown");
+  expect(awakenStatusFromClaudeMd(undefined)).toBe("unknown");
+  expect(awakenStatusFromClaudeMd("   ")).toBe("unknown");
 });

@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test";
 
-import { buildTeamUpCommand, parseCharterSession, resolveInstanceSession } from "./teamUpModel";
+import {
+  buildAwakenMemberCommand,
+  buildTeamUpCommand,
+  parseCharterSession,
+  resolveInstanceSession,
+} from "./teamUpModel";
 
 test("parseCharterSession: reads the session field from a charter yaml", () => {
   const yaml = [
@@ -93,4 +98,14 @@ test("buildTeamUpCommand: empty roster → single plain up (charter decides)", (
       "tmux kill-window -t '=brew:_boot' 2>/dev/null ; " +
       "tmux attach -t '=brew' ; }",
   );
+});
+
+test("buildAwakenMemberCommand: wakes only the one oracle, then fires /awaken before attach", () => {
+  const cmd = buildAwakenMemberCommand("brew", "brew", "/home/u/soulbrew", "newbie");
+  // only this oracle woken — the rest of the team is untouched
+  expect(cmd).toContain("maw team up 'brew' --session 'brew' --force --only 'newbie'");
+  expect((cmd.match(/maw team up/g) || []).length).toBe(1);
+  // /awaken fires into the woken window, and BEFORE the (blocking) attach
+  expect(cmd).toContain("tmux send-keys -t '=brew:newbie' '/awaken' Enter");
+  expect(cmd.indexOf("/awaken")).toBeLessThan(cmd.indexOf("tmux attach"));
 });

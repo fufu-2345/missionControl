@@ -24,6 +24,17 @@ export function sessionCanAttach(cmd: string): boolean {
   return cmd.trim() === "claude";
 }
 
+// A session counts as IDLE (and is hidden from the dashboard Bento Sessions
+// card) when it's a single bare-shell window with no live process. A multi-
+// window session, or one whose active pane runs anything other than a shell
+// (claude, maw, a dev server, a tail…), is real work and always shown.
+const IDLE_SHELLS = new Set(["bash", "zsh", "sh", "fish", ""]);
+export function sessionIsIdle(s: Pick<TmuxSession, "cmd" | "windows">): boolean {
+  if (s.windows > 1) return false;
+  const cmd = s.cmd.trim().replace(/^-/, ""); // strip login-shell leading dash
+  return IDLE_SHELLS.has(cmd);
+}
+
 // `tmux list-sessions -F` format string. Tab-separated because a tab is far
 // less likely than `|`/space to appear inside a session name or path. The
 // @orches_label + window_name columns sit BEFORE cwd so cwd stays the
@@ -55,6 +66,33 @@ export function parseTmuxSessions(raw: string): TmuxSession[] {
       windowName: parts[5] || undefined,
       cwd: parts.slice(6).join("\t"),
     });
+  }
+  return out;
+}
+
+export interface TmuxWindow {
+  index: number;
+  name: string;
+  cmd: string; // active pane's current command in that window
+}
+
+// `tmux list-windows -t <session> -F` format. Tab-separated (same reasoning as
+// TMUX_FMT). Powers the dashboard Bento session-row expand.
+export const TMUX_WINDOWS_FMT =
+  "#{window_index}\t#{window_name}\t#{pane_current_command}";
+
+/** Parse stdout of `tmux list-windows -F TMUX_WINDOWS_FMT`. Tolerant: blank
+ *  input yields []; lines missing the index/name pair or with a non-numeric
+ *  index are skipped. A window with an empty command keeps cmd="". */
+export function parseTmuxWindows(raw: string): TmuxWindow[] {
+  const out: TmuxWindow[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line) continue;
+    const parts = line.split("\t");
+    if (parts.length < 2) continue;
+    const index = Number.parseInt(parts[0], 10);
+    if (Number.isNaN(index)) continue;
+    out.push({ index, name: parts[1], cmd: parts.slice(2).join("\t") });
   }
   return out;
 }
@@ -122,6 +160,36 @@ export function teamOfOracle(oracle: string, teams: OracleTeam[]): string | null
   return hit ? hit.name : null;
 }
 
+/** The dispatchable WORKER oracles for a session (non-orchestrator team members).
+ *  Resolves the team from the live `@orches_label` ("<project> / <team>") when
+ *  present, else from the orchestrator name encoded in the session name
+ *  ("09-foreman"/"claude-foreman" → "foreman") → its team. Empty when no team
+ *  resolves. Pure — the caller applies isSafeOracleName. */
+export function workersForSession(
+  orchesLabel: string | undefined,
+  session: string,
+  teams: OracleTeam[],
+): string[] {
+  let team: OracleTeam | undefined;
+  const lbl = (orchesLabel || "").trim();
+  const sep = lbl.lastIndexOf(" / ");
+  if (sep >= 0) {
+    const teamName = lbl.slice(sep + 3).trim();
+    team = teams.find((t) => t.name === teamName);
+  }
+  if (!team) {
+    // orchestrator name from the session ("09-foreman"→"foreman", twin "…-2"→also try "foreman").
+    const stem = session.replace(/^\d+-/, "").replace(/^claude-/, "");
+    for (const orch of [stem, stem.replace(/-\d+$/, "")]) {
+      const matches = teams.filter((t) => t.orchestrators.includes(orch));
+      if (matches.length === 1) { team = matches[0]; break; }
+      if (matches.length > 1) return []; // shared orchestrator across teams → don't guess a roster
+    }
+  }
+  if (!team) return [];
+  return team.members.filter((m) => m.role !== "orchestrator").map((m) => m.oracle);
+}
+
 /** Priority-based display label: orches-label (authoritative) → project →
  *  lone-oracle → raw session name. Separator is " / ". */
 export function computeSessionLabel(args: {
@@ -167,4 +235,40 @@ export function teamFromOrchesLabel(
   const prefix = basename + " / ";
   if (!lbl.startsWith(prefix)) return undefined;
   return lbl.slice(prefix.length).trim() || undefined;
+}
+
+/** A pane in the Mirror grid, as the control-mode bridge reports it (the fields
+ *  needed to name + role it — a subset of the bridge's full Pane). */
+export interface MirrorPaneInfo {
+  orchRole?: string; // tmux user-option @orch_role (set by /orches on the orchestrator pane)
+  orchMember?: string; // @orch_member (the worker oracle's name)
+  winName?: string; // window name (maw wake launches -n <oracle>)
+  cmd?: string; // pane_current_command (last-resort label)
+}
+
+/** Role + display label for a grid pane, from the pane user-options /orches
+ *  stamps (authoritative — the claude process rewrites pane_title via OSC 2 but
+ *  cannot clobber `set-option -p` user-options). Pure/testable.
+ *
+ *  role:  @orch_role=="orchestrator" → orchestrator; @orch_member set → worker;
+ *         otherwise null (a non-orches / not-yet-dispatched pane).
+ *  label: worker → the oracle name (@orch_member, else window name); orchestrator
+ *         → the oracle from the session name (`NN-<oracle>` / `claude-<oracle>`);
+ *         else the window name / current command. */
+export function paneRoleAndLabel(
+  pane: MirrorPaneInfo,
+  session: string,
+): { role: "orchestrator" | "worker" | null; label: string } {
+  const member = (pane.orchMember || "").trim();
+  const role: "orchestrator" | "worker" | null =
+    pane.orchRole === "orchestrator" ? "orchestrator" : member ? "worker" : null;
+  let label: string;
+  if (role === "worker") {
+    label = member || (pane.winName || "").trim() || "worker";
+  } else if (role === "orchestrator") {
+    label = session.replace(/^\d+-/, "").replace(/^claude-/, "").trim() || session;
+  } else {
+    label = (pane.winName || "").trim() || (pane.cmd || "").trim() || "pane";
+  }
+  return { role, label };
 }

@@ -6,6 +6,7 @@ import {
   deleteTeam,
   listTeamSummaries,
   oracleCandidates,
+  prepareAwakenMember,
   readTeamDetailSync,
   saveTeam,
   teamExists,
@@ -19,7 +20,7 @@ import {
   type TeamMember,
 } from "../commands/teamsModel";
 import { getDefaultMemberModel } from "../commands/settingsOps";
-import { teamUp, teamUpMember } from "../commands/teamUp";
+import { awakenMember, teamUp, teamUpMember } from "../commands/teamUp";
 
 // Editor-area panel for browsing + editing maw oracle-teams. Mirrors skills.ts:
 // singleton _panel, renderShell HTML, postMessage list/detail, a message switch.
@@ -183,6 +184,44 @@ export function openTeamsPanel(_projectId: string | null = null): vscode.Webview
         panel.webview.postMessage({ type: "op_done" });
         return;
       }
+      case "awaken_member": {
+        const name = typeof msg.name === "string" ? msg.name : "";
+        const oracle = typeof msg.oracle === "string" ? msg.oracle : "";
+        const role = typeof msg.role === "string" && msg.role.trim() ? msg.role.trim() : "member";
+        if (!isSafeTeamName(name) || !isSafeTeamName(oracle)) {
+          vscode.window.showErrorMessage(`Teams: ชื่อทีม/oracle ไม่ถูกต้อง: '${name}' / '${oracle}'`);
+          panel.webview.postMessage({ type: "op_done" });
+          return;
+        }
+        // Confirm — awaken creates a NEW oracle repo and starts the ~5-20min birth
+        // ritual, so guard the (mis)click behind a modal (like delete_team).
+        const pick = await vscode.window.showWarningMessage(
+          `awaken '${oracle}'? — สร้าง oracle ใหม่ (repo ในเครื่อง) แล้วเปิด Claude pane ยิง /awaken (พิธี 5–20 นาที). ตัวที่มีอยู่แล้วทำไม่ได้ (กันทับ identity)`,
+          { modal: true },
+          "Awaken",
+        );
+        if (pick !== "Awaken") {
+          panel.webview.postMessage({ type: "op_done" });
+          return;
+        }
+        // Birth-only guard + scaffold + invite + charter sync (refuses existing names).
+        const prep = await prepareAwakenMember(name, oracle, role);
+        if (!prep.ok) {
+          vscode.window.showErrorMessage(`Teams: awaken '${oracle}' — ${prep.errors.join(" · ")}`);
+          panel.webview.postMessage({ type: "op_done" });
+          return;
+        }
+        const r = awakenMember(name, oracle);
+        if (r.error) {
+          vscode.window.showErrorMessage(`Teams: awaken '${oracle}' — ${r.error}`);
+        } else {
+          vscode.window.showInformationMessage(
+            `Teams: สร้าง+awaken '${oracle}' → session '${r.session}' (พิธีเปิดใน terminal · ถ้า /awaken ไม่ขึ้นใน pane พิมพ์เอง)`,
+          );
+        }
+        await pushDetail(panel, name); // refresh — the new member now shows (as stub until the ritual runs)
+        return;
+      }
       case "create_team": {
         const name = typeof msg.name === "string" ? msg.name.trim() : "";
         if (!isSafeTeamName(name)) {
@@ -292,6 +331,10 @@ export function renderShell(): string {
     letter-spacing: .06em; opacity: .55; padding: 4px 6px; font-weight: 600; }
   table.members td { padding: 4px 6px; border-top: 1px solid var(--vscode-panel-border); }
   table.members .oracle-name { font-size: 12px; font-weight: 600; }
+  /* Identity highlight — faint colour on oracles that have a real identity,
+     gradient-fading to the normal row background (subtle, left→right). */
+  table.members td.oracle-cell.awoken {
+    background: linear-gradient(90deg, rgba(63,185,80,0.22), transparent 72%); }
   table.members input.oracle-new { width: 100%; min-width: 130px; }
   table.members select.role { min-width: 120px; }
   table.members select.model { min-width: 120px; }
@@ -303,6 +346,17 @@ export function renderShell(): string {
   .x { color: #f85149; cursor: pointer; font-weight: 700; border: none; background: none; font-size: 14px; }
   .wake { color: #3fb950; cursor: pointer; font-weight: 700; border: none; background: none;
     font-size: 12px; padding: 0; margin-right: 6px; }
+  .awaken-btn { color: #e3b341; background: none; border: 1px solid #e3b341; border-radius: 4px;
+    font-size: 11px; padding: 1px 8px; margin-right: 8px; cursor: pointer; }
+  .awaken-btn:hover { background: rgba(227,179,65,0.14); }
+  /* Delete (✕) is gated behind the "จัดการ" toggle so it can't be hit by accident;
+     ▶ wake stays visible. Default = manage-off = ✕ hidden. */
+  .members-wrap.manage-off .x:not(.x-keep) { display: none; }
+  .manage-toggle { color: var(--vscode-descriptionForeground); background: none;
+    border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 1px 8px;
+    font-size: 11px; cursor: pointer; }
+  .manage-toggle:hover { color: var(--vscode-foreground); border-color: var(--vscode-focusBorder); }
+  table.members th.th-manage { text-align: right; text-transform: none; letter-spacing: 0; opacity: 1; }
   table.members tr.dup td { background: rgba(248,81,73,0.09); }
   table.members tr.dup .oracle-new { border-color: #f85149; box-shadow: 0 0 0 1px #f85149; }
   table.members tr.dup .oracle-name { color: #f85149; }
@@ -318,6 +372,10 @@ export function renderShell(): string {
 <script>
   const vscode = acquireVsCodeApi();
   let VIEW = "list";
+  // Team of the detail view — set while editing an existing team, "" otherwise.
+  // The "awaken" button (create+ritual) only makes sense for a team that exists,
+  // so it's shown/wired only when this is set.
+  let DETAIL_TEAM = "";
   let OPT = { roleOptions: [], colorOptions: [], modelOptions: [], defaultRole: "member", defaultModel: "claude-sonnet-5" };
   const COLOR_HEX = { blue:'#4ea1ff', green:'#3fb950', red:'#f85149', yellow:'#e3b341',
     magenta:'#d2a8ff', cyan:'#39c5cf', white:'#e6edf3', orange:'#f0883e' };
@@ -365,7 +423,7 @@ export function renderShell(): string {
 
   // ── List view ──────────────────────────────────────────────────────────────
   function renderList(teams){
-    VIEW = "list";
+    VIEW = "list"; DETAIL_TEAM = "";
     el("title").innerHTML = 'Teams <span class="count">'+teams.length+'</span>';
     el("topActions").innerHTML =
       '<button class="primary" onclick="post(\\'new_team\\')">＋ New Team</button>'
@@ -389,12 +447,28 @@ export function renderShell(): string {
       ? '<input type="text" class="oracle-new" list="oracle-suggest" placeholder="ชื่อ oracle ใหม่" value="'+esc(m.oracle||'')+'">'
       : '<span class="oracle-name">'+esc(m.oracle)+'</span>';
     var wakeBtn = editableOracle ? '' : '<button class="wake" title="ปลุก '+esc(m.oracle)+' คนเดียว">▶</button>';
+    // On a NEW-name row (detail view), offer "awaken": create the oracle + run the
+    // /awaken ritual now. Plain Save on the same row = bud (bare scaffold, no ritual).
+    var awakenBtn = (editableOracle && DETAIL_TEAM)
+      ? '<button class="awaken-btn" title="สร้าง oracle ใหม่ + ทำพิธี /awaken ทันที (กด Save เฉยๆ = bud โครงเปล่า)">awaken</button>'
+      : '';
+    // Identity highlight: oracles whose CLAUDE.md has a real identity get a faint
+    // colour wash on the name cell, fading to normal. title = non-colour cue.
+    var nameAttrs = ' class="oracle-cell'+(m.awaken === 'identity' ? ' awoken' : '')+'"'
+      + (m.awaken === 'identity' ? ' title="ตั้งตัวตนแล้ว"'
+         : m.awaken === 'stub' ? ' title="ยังไม่ตั้งตัวตน"' : '');
+    // A NEW (editable) row's ✕ = "cancel this row" and must stay visible even when
+    // manage mode is off (x-keep exempts it from the .manage-off gate). An existing
+    // member's ✕ = "remove", which stays gated behind manage.
+    var rmBtn = editableOracle
+      ? '<button class="x x-keep" title="ยกเลิกแถวนี้">✕</button>'
+      : '<button class="x" title="ลบ">✕</button>';
     return '<tr>'
-      + '<td>'+nameCell+'</td>'
+      + '<td'+nameAttrs+'>'+nameCell+'</td>'
       + '<td>'+roleSelect(m.role)+'</td>'
       + '<td>'+modelSelect(m.model||'')+'</td>'
       + '<td>'+swatch(m.color)+colorSelect(m.color)+'</td>'
-      + '<td>'+wakeBtn+'<button class="x" title="ลบ">✕</button></td>'
+      + '<td>'+wakeBtn+awakenBtn+rmBtn+'</td>'
       + '</tr>';
   }
   function readMembers(tbody){
@@ -472,8 +546,24 @@ export function renderShell(): string {
       if (x) x.addEventListener('click', function(){ tr.remove(); validateMembers(root); });
       var inp = tr.querySelector('.oracle-new');
       if (inp) inp.addEventListener('input', function(){ validateMembers(root); });
+      var awk = tr.querySelector('.awaken-btn');
+      if (awk) awk.addEventListener('click', function(){
+        if (busy(this)) return;
+        var ni = tr.querySelector('.oracle-new');
+        var oracle = ni ? ni.value.trim() : '';
+        if (!oracle) { clearBusy(); return; } // nothing typed — release + no-op
+        var roleSel = tr.querySelector('.role');
+        post('awaken_member', { name: DETAIL_TEAM, oracle: oracle, role: roleSel ? roleSel.value : 'member' });
+      });
     }
     Array.prototype.forEach.call(tbody.querySelectorAll('tr'), bindRow);
+    // "จัดการ" toggle: reveal/hide the ✕ delete buttons for the whole roster.
+    var mgt = root.querySelector('.manage-toggle');
+    if (mgt) mgt.addEventListener('click', function(){
+      var wrap = this.closest('.members-wrap');
+      var off = wrap.classList.toggle('manage-off'); // true => now hidden
+      this.textContent = off ? 'manage' : 'done';
+    });
     var addBtn = root.querySelector('.add-member');
     if (addBtn) addBtn.addEventListener('click', function(){
       // Always addable — a blank row where you TYPE a new (or existing) oracle
@@ -494,11 +584,19 @@ export function renderShell(): string {
     var dl = '<datalist id="oracle-suggest">'
       + (candidates||[]).map(function(c){ return '<option value="'+esc(c)+'">'; }).join('')
       + '</datalist>';
-    return '<table class="members"><thead><tr>'
-      + '<th>oracle</th><th>role</th><th>model</th><th>color</th><th></th>'
+    // Gate the ✕ delete on an established roster (detail view = !editableOracle).
+    // While building a NEW team (editableOracle) keep ✕ handy for instant undo.
+    var gate = !editableOracle;
+    var toggle = gate
+      ? '<button type="button" class="manage-toggle" title="แสดง/ซ่อนปุ่มลบสมาชิก">manage</button>'
+      : '';
+    return '<div class="members-wrap'+(gate?' manage-off':'')+'">'
+      + '<table class="members"><thead><tr>'
+      + '<th>oracle</th><th>role</th><th>model</th><th>color</th>'
+      + '<th class="th-manage">'+toggle+'</th>'
       + '</tr></thead><tbody>'
       + members.map(function(m){ return memberRowHtml(m, editableOracle, candidates); }).join('')
-      + '</tbody></table>' + dl
+      + '</tbody></table></div>' + dl
       + '<div class="barrow"><button class="add-member">＋ Add member</button></div>';
   }
 
@@ -508,6 +606,7 @@ export function renderShell(): string {
     OPT = { roleOptions: m.roleOptions, colorOptions: m.colorOptions,
       modelOptions: m.modelOptions || [], defaultRole: m.defaultRole, defaultModel: m.defaultModel };
     var t = m.team;
+    DETAIL_TEAM = t.name; // enables the per-row "awaken" button (detail view only)
     el("title").innerHTML = 'Team · '+esc(t.name);
     el("topActions").innerHTML =
       '<button onclick="post(\\'reload\\')">← Teams</button>'
@@ -518,8 +617,6 @@ export function renderShell(): string {
       + '<div style="display:flex;gap:6px">'
       + '<button class="primary" id="teamUp" title="maw team up — ปลุกทีมนี้เข้า tmux session แล้ว attach (ถ้ามี session อยู่แล้วเปิด instance ใหม่ -N)">▶ Team up</button>'
       + '<button class="danger" id="delTeam">🗑 Delete team</button></div></div>'
-      + '<label>คำอธิบายทีม</label>'
-      + '<textarea id="teamDesc" rows="2">'+esc(t.description||'')+'</textarea>'
       + '</div>'
       + '<label>สมาชิก ('+t.members.length+')</label>'
       + memberTableHtml(t.members, false, m.candidates)
@@ -543,7 +640,6 @@ export function renderShell(): string {
       if (busy(this)) return;
       post('save_team', {
         name: t.name,
-        description: el("teamDesc").value,
         members: readMembers(content.querySelector('tbody')),
       });
     });
@@ -551,7 +647,7 @@ export function renderShell(): string {
 
   // ── New team view ────────────────────────────────────────────────────────────
   function renderNew(m){
-    VIEW = "new";
+    VIEW = "new"; DETAIL_TEAM = "";
     OPT = { roleOptions: m.roleOptions, colorOptions: m.colorOptions,
       modelOptions: m.modelOptions || [], defaultRole: m.defaultRole, defaultModel: m.defaultModel };
     el("title").innerHTML = 'New Team';
@@ -562,8 +658,6 @@ export function renderShell(): string {
       '<div class="hdr-config">'
       + '<label>ชื่อทีม (A-Z a-z 0-9 . _ -)</label>'
       + '<input type="text" id="newName" placeholder="เช่น alpha">'
-      + '<label>คำอธิบาย</label>'
-      + '<textarea id="newDesc" rows="2"></textarea>'
       + '</div>'
       + '<label>สมาชิก</label>'
       + memberTableHtml([], true, m.candidates)
@@ -575,7 +669,6 @@ export function renderShell(): string {
       if (busy(this)) return;
       post('create_team', {
         name: el("newName").value,
-        description: el("newDesc").value,
         members: readMembers(content.querySelector('tbody')),
       });
     });

@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import * as vscode from "vscode";
 
 import { ApiError, BACKEND_DISABLED, SERVER_URL, api } from "../api";
-import { isPortUp } from "../commands/mawServe";
+import { isPortUp, isMawUp } from "../commands/mawServe";
 import {
   PROJECT_STATE_KEY,
   getCurrentProjectId,
@@ -24,13 +24,20 @@ import { trackClaudeTerminal } from "../commands/claudeTerminals";
 import { parseOrchesMeta, serializeOrchesMeta, type ResumableProject } from "../commands/orchestratorResume";
 import * as gitOps from "../commands/gitOps";
 import { parseGitButtonState, type GitButtonState } from "../commands/gitStatus";
-import { computeUsage, localMonthKey, sumByPrefix } from "../usage";
+import { computeUsage, topProjectsByRange } from "../usage";
+import { buildBudgetView } from "./budget";
+import { liveClaudeToken } from "../commands/accountsOps";
+import { fetchClaudeUsage } from "../commands/usage";
 import {
   TMUX_FMT,
+  TMUX_WINDOWS_FMT,
   type TmuxSession,
+  type TmuxWindow,
   buildAttachCommand,
   isSafeSessionName,
   parseTmuxSessions,
+  parseTmuxWindows,
+  sessionIsIdle,
   parseOraclesJson,
   projectFromPaths,
   loneOracleName,
@@ -139,6 +146,7 @@ export function openDashboardPanel(
 
   const pollTick = async () => {
     await pushSessions(panel); // tmux is local + fast — refresh first, independent of backend
+    await pushMaw(panel); // local TCP probe — keeps the "Start/Stop maw ui" row live
     const online = await pushStatus(panel);
     if (online) {
       if (!lastOnline || !projectsLoaded) {
@@ -193,6 +201,7 @@ export function openDashboardPanel(
         // data-card fetches. That ordering was the "(loading…) hangs" the user hit
         // whenever the maw/oracle backend was down.
         await pushSessions(panel);
+        await pushMaw(panel);
         lastOnline = await pushStatus(panel);
         await refreshDataCards();
         // Start the poller (one per panel lifetime). pollTick self-heals the
@@ -311,9 +320,22 @@ export function openDashboardPanel(
         await pushSessions(panel); // refresh the list (session is gone now)
         return;
       }
+      case "expand_session": {
+        const name = typeof msg.name === "string" ? msg.name : "";
+        // Only list windows for a session we actually showed + whitelisted.
+        if (!_lastSessionNames.has(name) || !isSafeSessionName(name)) return;
+        const windows = await listTmuxWindows(name);
+        panel.webview.postMessage({ type: "session_windows", name, windows });
+        return;
+      }
       case "run": {
         if (typeof msg.command === "string") {
           void vscode.commands.executeCommand(msg.command);
+          if (msg.command === "missioncontrol.mawToggle") {
+            // Reflect the new maw state without waiting a whole poll cycle
+            // (the server takes a moment to bind/unbind :3456).
+            setTimeout(() => void pushMaw(panel), 1500);
+          }
         }
         return;
       }
@@ -577,6 +599,21 @@ function listTmuxSessions(): Promise<TmuxSession[]> {
   });
 }
 
+/** List one session's windows (index/name/active-command) for the Bento
+ *  session-row expand. `name` is whitelisted by isSafeSessionName before we get
+ *  here; passed as an execFile arg (no shell), so it's injection-safe. Any tmux
+ *  error → [] (the row just shows no windows). */
+function listTmuxWindows(name: string): Promise<TmuxWindow[]> {
+  return new Promise((resolve) => {
+    cp.execFile(
+      "tmux",
+      ["list-windows", "-t", `=${name}`, "-F", TMUX_WINDOWS_FMT],
+      { timeout: 700 },
+      (err, stdout) => resolve(err ? [] : parseTmuxWindows(stdout.toString())),
+    );
+  });
+}
+
 /** Group every pane's cwd by tmux session (one tmux call) — used by the
  *  session-label cwd-scan fallback so an orchestrator+workers session can be
  *  labelled by the project a worker pane is building. */
@@ -675,7 +712,10 @@ function backfillProjectTeam(
 }
 
 async function pushSessions(panel: vscode.WebviewPanel): Promise<void> {
-  const sessions = await listTmuxSessions();
+  // Idle sessions (a single bare-shell window, no live process) are hidden from
+  // the Bento Sessions card — the "N active" chip counts only what's shown, and
+  // attach/kill/expand guard on _lastSessionNames = the displayed set.
+  const sessions = (await listTmuxSessions()).filter((s) => !sessionIsIdle(s));
   _lastSessionNames = new Set(sessions.map((s) => s.name));
   const panePaths = await listPanePathsBySession();
   const oracles = readKnownOracles();
@@ -706,6 +746,12 @@ async function pushStatus(panel: vscode.WebviewPanel): Promise<boolean> {
   const online = maw || oracle;
   panel.webview.postMessage({ type: "status", online });
   return online;
+}
+
+/** Push maw-ui up/down so the "Start maw ui" row (Data card) can flip its label
+ *  Start↔Stop live. Cheap local TCP probe, independent of the backend. */
+async function pushMaw(panel: vscode.WebviewPanel): Promise<void> {
+  panel.webview.postMessage({ type: "maw", up: await isMawUp() });
 }
 
 /** Returns true when the project list loaded successfully (used by the
@@ -755,15 +801,49 @@ async function pushProjects(panel: vscode.WebviewPanel): Promise<boolean> {
   }
 }
 
+/** Weekly quota (real) from the Claude usage endpoint, using the LIVE account's
+ *  token. Returns null on logged-out / offline / rate-limited so the Budget card
+ *  degrades to "$ + top-3, no quota bar". The token never leaves the host. */
+async function fetchWeeklyQuota(): Promise<{ usedPct: number; resetsAt: string } | null> {
+  try {
+    const tok = liveClaudeToken();
+    if (!tok) return null;
+    const w = (await fetchClaudeUsage(tok.accessToken)).sevenDay;
+    if (!w) return null;
+    return { usedPct: Math.max(0, Math.min(100, 100 - w.remaining)), resetsAt: w.resetsAt };
+  } catch {
+    return null;
+  }
+}
+
 async function pushBudget(panel: vscode.WebviewPanel): Promise<void> {
   try {
-    // Real Claude Code spend this calendar month, computed from local
-    // transcripts (no backend).
+    // Everything on the Bento budget card is WEEKLY and real:
+    //   • big $ = Claude spend over the last 7 local days (buildBudgetView.last7)
+    //   • top 3 projects by last-7-days $ (topProjectsByRange over byProjectHour)
+    //   • progress/% = the seven_day usage quota from the Claude usage endpoint
     const u = await computeUsage();
-    const month = sumByPrefix(u, localMonthKey());
-    panel.webview.postMessage({ type: "budget", spent_usd: month });
+    const view = await buildBudgetView(u);
+    const cutoff = new Date();
+    cutoff.setHours(0, 0, 0, 0);
+    cutoff.setDate(cutoff.getDate() - 6); // rolling last 7 days incl. today
+    const rows = topProjectsByRange(u.byProjectHour, cutoff.getTime(), 3);
+    const top1 = rows[0]?.cost ?? 0;
+    const top = rows.map((r) => ({
+      name: r.name,
+      costFmt: "$" + r.cost.toFixed(2),
+      frac: top1 > 0 ? r.cost / top1 : 0,
+    }));
+    const quota = await fetchWeeklyQuota();
+    panel.webview.postMessage({
+      type: "budget",
+      last7Fmt: view.last7Fmt,
+      top,
+      quota,
+      providerNote: view.providerNote,
+    });
   } catch {
-    panel.webview.postMessage({ type: "budget", spent_usd: 0 });
+    panel.webview.postMessage({ type: "budget", last7Fmt: "$0.00", top: [], quota: null, providerNote: "" });
   }
 }
 
@@ -815,187 +895,140 @@ function renderHtml(): string {
 <head>
 <meta charset="utf-8">
 <style>
+  /* ── Bento design tokens (from the design handoff). dark = default. ── */
+  :root, :root[data-theme="dark"] {
+    --bg:#0d1117; --titlebar:#0a0e13; --panel:#11171d; --editor:#0f151b; --card:#161f28;
+    --border:rgba(255,255,255,.07); --border2:rgba(255,255,255,.13);
+    --txt:#e7eef5; --muted:#8a97a4; --faint:#5c6773;
+    --accent:#2f9dc4; --accent2:#40c8ea; --accentSoft:rgba(47,157,196,.15); --accentGlow:rgba(64,200,234,.28);
+    --good:#3fd39a; --dot:rgba(255,255,255,.028);
+    --primaryGrad:linear-gradient(180deg,#33a6cf,#1f7ea3);
+  }
+  :root[data-theme="light"] {
+    --bg:#e9edf1; --titlebar:#f6f8fa; --panel:#f9fbfc; --editor:#ffffff; --card:#ffffff;
+    --border:rgba(15,30,45,.10); --border2:rgba(15,30,45,.17);
+    --txt:#132029; --muted:#5a6b78; --faint:#94a1ad;
+    --accent:#0e88ad; --accent2:#0e7fa3; --accentSoft:rgba(14,136,173,.10); --accentGlow:rgba(14,136,173,.18);
+    --good:#0fa574; --dot:rgba(15,30,45,.035);
+    --primaryGrad:linear-gradient(180deg,#13a0c9,#0e88ad);
+  }
+  :root {
+    --pad:20px; --gap:14px; --cardpad:15px; --radius:14px; --secgap:20px;
+    --uifont:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
+    --mono:'JetBrains Mono',var(--vscode-editor-font-family),ui-monospace,monospace;
+  }
   html, body { height: 100%; margin: 0; padding: 0; }
   body {
-    font-family: var(--vscode-font-family);
-    color: var(--vscode-foreground);
-    background: var(--vscode-editor-background);
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
+    font-family: var(--uifont); font-size: 13.5px; color: var(--txt);
+    background: var(--editor);
+    background-image: radial-gradient(var(--dot) 1px, transparent 1px);
+    background-size: 24px 24px;
+    display: flex; flex-direction: column; overflow: hidden;
   }
-  .topbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 24px;
-    border-bottom: 1px solid var(--vscode-panel-border);
+  * { box-sizing: border-box; }
+
+  .topbar { display: flex; justify-content: flex-end; align-items: center; padding: 8px 16px 0; }
+  .theme-toggle { position: relative; width: 44px; height: 22px; border-radius: 999px;
+    background: var(--card); border: 1px solid var(--border2); cursor: pointer; padding: 0; flex-shrink: 0; }
+  .theme-toggle .thumb { position: absolute; top: 1px; width: 18px; height: 18px; border-radius: 50%;
+    background: var(--primaryGrad); transition: left .16s; }
+  :root[data-theme="light"] .theme-toggle .thumb { left: 2px; }
+  :root[data-theme="dark"] .theme-toggle .thumb { left: 23px; }
+  .theme-toggle .tt-ico { position: absolute; top: 50%; transform: translateY(-50%); color: var(--faint); display: flex; }
+  .theme-toggle .tt-ico svg { width: 11px; height: 11px; }
+  .theme-toggle .tt-sun { left: 4px; } .theme-toggle .tt-moon { right: 4px; }
+
+  .stage { flex: 1; display: flex; flex-direction: column; padding: 14px var(--pad) var(--pad); min-height: 0; }
+
+  .mc-header { display: flex; align-items: center; gap: 11px; margin-bottom: var(--secgap); }
+  .badge { width: 32px; height: 32px; border-radius: 9px; background: var(--accentSoft);
+    border: 1px solid var(--border2); display: flex; align-items: center; justify-content: center;
+    color: var(--accent2); flex-shrink: 0; }
+  .badge svg { width: 17px; height: 17px; }
+  .mc-title { font-size: 19px; font-weight: 700; letter-spacing: -.3px; }
+  .spacer { flex: 1; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 5px 11px;
+    background: var(--card); border: 1px solid var(--border); font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .gdot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); box-shadow: 0 0 7px var(--good); }
+
+  .bento { flex: 1; display: grid; grid-template-columns: 1.3fr 1fr 1fr;
+    grid-template-rows: auto 1fr; gap: var(--gap); min-height: 0; }
+  .cell { min-width: 0; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--cardpad); }
+  .cellA { grid-column: 1; grid-row: 1 / 3; display: flex; flex-direction: column; min-height: 0; }
+  .cellA #sessionsList { overflow-y: auto; min-height: 0; flex: 1; }
+  .cellB { grid-column: 2 / 4; grid-row: 1; }
+  .cellC { grid-column: 2; grid-row: 2; }
+  .cellD { grid-column: 3; grid-row: 2; }
+  @media (max-width: 820px) {
+    .bento { grid-template-columns: 1fr; grid-template-rows: none; }
+    .cellA, .cellB, .cellC, .cellD { grid-column: 1; grid-row: auto; }
+    .cellA #sessionsList { max-height: 300px; }
   }
-  .brand { display: flex; align-items: center; gap: 10px; }
-  .brand .zap { font-size: 18px; }
-  .brand h1 { font-size: 16px; margin: 0; font-weight: 600; }
-  .topbar .actions { display: flex; align-items: center; gap: 10px; }
-  .pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 3px 10px;
-    border-radius: 11px;
-    font-size: 11px;
-    background: var(--vscode-editor-inactiveSelectionBackground);
-  }
-  .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: #888; }
-  .pill .dot.on { background: #3fb950; }
-  .pill .dot.off { background: #f85149; }
-  .icon-btn {
-    background: transparent;
-    color: var(--vscode-foreground);
-    border: 1px solid var(--vscode-panel-border);
-    padding: 4px 10px;
-    border-radius: 3px;
-    cursor: pointer;
-    font-size: 11px;
-  }
-  .icon-btn:hover { background: var(--vscode-list-hoverBackground); }
-  .container {
-    flex: 1;
-    overflow-y: auto;
-    padding: 20px 28px 32px;
-    max-width: 1100px;
-    margin: 0 auto;
-    width: 100%;
-    box-sizing: border-box;
-  }
-  .group-label {
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    opacity: 0.6;
-    margin: 22px 0 10px;
-  }
-  .group-label.first { margin-top: 4px; }
-  .card {
-    background: var(--vscode-editor-inactiveSelectionBackground);
-    border-radius: 6px;
-    padding: 16px 18px;
-  }
-  .project-card { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .project-card select {
-    flex: 1;
-    min-width: 220px;
-    padding: 8px 10px;
-    background: var(--vscode-input-background);
-    color: var(--vscode-input-foreground);
-    border: 1px solid var(--vscode-input-border, var(--vscode-panel-border));
-    border-radius: 3px;
-    font-size: 13px;
-  }
-  .project-card .pid {
-    font-family: var(--vscode-editor-font-family);
-    font-size: 11px;
-    opacity: 0.6;
-    width: 100%;
-    margin-top: 4px;
-  }
-  /* memory_share row inside the project card */
-  .memshare {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-top: 10px;
-    padding-top: 10px;
-    border-top: 1px solid var(--vscode-panel-border);
-    font-size: 12px;
-  }
-  .memshare .label { font-weight: 600; }
-  .memshare .hint { opacity: 0.7; }
-  .memshare.disabled { opacity: 0.5; }
-  .toggle {
-    position: relative; display: inline-block; width: 34px; height: 19px;
-    flex-shrink: 0; cursor: pointer;
-  }
-  .toggle input { opacity: 0; width: 0; height: 0; }
-  .toggle .slider {
-    position: absolute; inset: 0; border-radius: 10px;
-    background: var(--vscode-input-background);
-    border: 1px solid var(--vscode-panel-border); transition: background 0.15s;
-  }
-  .toggle .slider::before {
-    content: ""; position: absolute; top: 1px; left: 1px;
-    width: 15px; height: 15px; border-radius: 50%;
-    background: var(--vscode-foreground); opacity: 0.5;
-    transition: transform 0.15s, opacity 0.15s;
-  }
-  .toggle input:checked + .slider {
-    background: var(--vscode-button-background);
-    border-color: var(--vscode-button-background);
-  }
-  .toggle input:checked + .slider::before {
-    transform: translateX(15px); background: var(--vscode-button-foreground); opacity: 1;
-  }
-  .toggle input:disabled + .slider { cursor: not-allowed; }
-  .grid { display: grid; gap: 12px; }
-  .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-  @media (max-width: 760px) {
-    .grid.cols-3, .grid.cols-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  }
-  .tile {
-    background: var(--vscode-editor-inactiveSelectionBackground);
-    border: 1px solid transparent;
-    border-radius: 6px;
-    padding: 14px 16px;
-    cursor: pointer;
-    text-align: left;
-    color: var(--vscode-foreground);
-    font: inherit;
-    transition: background 0.12s, border-color 0.12s;
-  }
-  .tile:hover {
-    background: var(--vscode-list-hoverBackground);
-    border-color: var(--vscode-focusBorder);
-  }
-  .tile.primary {
-    background: var(--vscode-button-background);
-    color: var(--vscode-button-foreground);
-  }
-  .tile.primary:hover { background: var(--vscode-button-hoverBackground); }
-  .tile .title { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
-  .tile .sub { font-size: 11px; opacity: 0.75; line-height: 1.4; }
-  .tile.primary .sub { opacity: 0.9; }
-  /* Non-functional in the frontend-only build (the backend was removed).
-     Marked red + badged so it's obvious at a glance these controls do nothing
-     here. They stay clickable only to surface the "disabled" explanation toast. */
-  .dead {
-    border-left: 3px solid var(--vscode-errorForeground, #f85149) !important;
-    opacity: 0.6;
-  }
-  .tile.dead:hover {
-    background: var(--vscode-editor-inactiveSelectionBackground);
-    border-color: transparent;
-    border-left-color: var(--vscode-errorForeground, #f85149);
-    cursor: not-allowed;
-  }
-  .dead .title { color: var(--vscode-errorForeground, #f85149); }
-  .btn-row { display: flex; gap: 6px; }
-  .error-chip {
-    color: var(--vscode-errorForeground, #f85149);
-    font-size: 11px;
-    margin-left: 8px;
-  }
-  .session-row { display: flex; align-items: center; gap: 10px; padding: 8px 6px; border-radius: 4px; cursor: pointer; }
-  .session-row:hover { background: var(--vscode-list-hoverBackground); }
-  .session-row .sdot { width: 8px; height: 8px; border-radius: 50%; background: #888; flex-shrink: 0; }
-  .session-row .sdot.on { background: #3fb950; }
-  .session-row .smeta { display: flex; flex-direction: column; min-width: 0; }
-  .session-row .sname { font-size: 13px; font-weight: 600; }
-  .session-row .ssub { font-size: 11px; opacity: 0.7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .session-row .session-kill { margin-left: auto; flex-shrink: 0; background: transparent; border: none; color: var(--vscode-foreground); opacity: 0.35; cursor: pointer; font-size: 13px; line-height: 1; padding: 3px 7px; border-radius: 3px; }
-  .session-row .session-kill:hover { opacity: 1; background: var(--vscode-inputValidation-errorBackground, #5a1d1d); color: #fff; }
-  .sessions-empty { opacity: 0.6; font-size: 12px; padding: 6px; }
+
+  .eyebrow { font-family: var(--mono); font-size: 10.5px; letter-spacing: 2px; text-transform: uppercase;
+    color: var(--faint); font-weight: 600; }
+  .eyebrow-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 11px; }
+  .mini-btn { background: var(--accentSoft); color: var(--accent2); border: 1px solid var(--border);
+    border-radius: 7px; padding: 3px 9px; font-size: 11px; cursor: pointer; font-family: var(--uifont); }
+  .mini-btn:hover { border-color: var(--accent); }
+
+  /* Sessions (Cell A) */
+  .srow { border: 1px solid var(--border); border-radius: 10px; margin-bottom: 10px; overflow: hidden; transition: border-color .12s; }
+  .srow.open { border-color: var(--accent); }
+  .srow-head { display: flex; align-items: center; gap: 10px; padding: 9px 11px; cursor: pointer; }
+  .srow-head:hover { background: var(--accentSoft); }
+  .sdot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent2); box-shadow: 0 0 8px var(--accent2); flex-shrink: 0; }
+  .sdot.on { background: var(--good); box-shadow: 0 0 8px var(--good); }
+  .smeta { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+  .sname { font-size: 12.5px; font-weight: 600; color: var(--txt); }
+  .ssub { font-family: var(--mono); font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .skill { flex-shrink: 0; background: transparent; border: none; color: var(--muted); opacity: .4;
+    cursor: pointer; font-size: 12px; line-height: 1; padding: 3px 6px; border-radius: 5px; }
+  .skill:hover { opacity: 1; background: rgba(248,81,73,.16); color: #f85149; }
+  .schev { flex-shrink: 0; display: flex; color: var(--faint); transition: transform .15s; }
+  .schev svg { width: 15px; height: 15px; }
+  .srow.open .schev { transform: rotate(180deg); }
+  .spreview { font-family: var(--mono); font-size: 10.5px; color: var(--faint);
+    padding: 0 11px 9px 29px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+  .spreview:hover { color: var(--muted); }
+  .spreview .dol { color: var(--accent2); }
+  .swins { display: none; border-top: 1px solid var(--border); padding: 6px 11px 8px 29px; }
+  .srow.open .swins { display: block; }
+  .swin { font-family: var(--mono); font-size: 10.5px; color: var(--muted); padding: 2px 0; }
+  .swin .wchev { color: var(--accent2); margin-right: 6px; }
+  .swin.empty { color: var(--faint); }
+  .sessions-empty { color: var(--faint); font-size: 12px; padding: 6px 2px; }
+
+  /* Budget (Cell B) — weekly */
+  .budget { cursor: pointer; }
+  .bhead { display: flex; align-items: baseline; gap: 8px; }
+  .btitle { font-weight: 700; font-size: 14px; }
+  .bcap { font-family: var(--mono); font-size: 11px; color: var(--faint); margin-left: auto; }
+  .bamount { font-family: var(--mono); font-size: 26px; font-weight: 600; letter-spacing: -.5px; margin: 10px 0 12px; }
+  .bprog { height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+  .bprog-fill { height: 100%; width: 0; background: var(--primaryGrad); border-radius: 3px; transition: width .3s; }
+  .bcaption { font-family: var(--mono); font-size: 10.5px; color: var(--faint); margin-top: 7px; }
+  .bbreak { margin-top: 14px; display: flex; flex-direction: column; gap: 9px; }
+  .prow-line { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--muted); }
+  .prow .pcost { font-family: var(--mono); }
+  .pbar { height: 4px; border-radius: 2px; background: var(--border); margin-top: 5px; overflow: hidden; }
+  .pbar-fill { height: 100%; background: var(--accent2); border-radius: 2px; }
+  .bempty { font-size: 10.5px; color: var(--faint); }
+  .bnote { font-size: 10.5px; color: var(--faint); margin-top: 10px; line-height: 1.5; }
+
+  /* Resources / Data (Cell C / D) */
+  .rrow { display: flex; gap: 10px; align-items: flex-start; width: 100%; text-align: left;
+    background: transparent; border: none; border-top: 1px solid var(--border); padding: 9px 0;
+    cursor: pointer; color: var(--txt); font: inherit; font-family: var(--uifont); }
+  .rrow:first-of-type { border-top: none; }
+  .rrow:hover .rtitle { color: var(--accent2); }
+  .ricon { flex-shrink: 0; color: var(--accent2); display: flex; padding-top: 1px; }
+  .ricon svg { width: 15px; height: 15px; }
+  .rtext { display: flex; flex-direction: column; min-width: 0; }
+  .rtitle { font-size: 12.5px; font-weight: 600; }
+  .rdesc { font-size: 10.5px; color: var(--muted); line-height: 1.5; margin-top: 2px; }
+  .maw-row.running .ricon, .maw-row.running .rtitle { color: var(--good); }
 
   /* In-screen Start/Continue Orchestrator wizard (SPA overlay) */
   .orch-screen { display: none; position: fixed; inset: 0; z-index: 50;
@@ -1022,52 +1055,67 @@ function renderHtml(): string {
 </head>
 <body>
   <div class="topbar">
-    <div class="brand">
-      <span class="zap">⚡</span>
-      <h1>Mission Control</h1>
-    </div>
+    <button class="theme-toggle" id="themeToggle" title="สลับ light / dark" aria-label="Toggle theme">
+      <span class="tt-ico tt-sun"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.4 1.4m11.2 11.2L19 19M19 5l-1.4 1.4M6.4 17.6 5 19"/></svg></span>
+      <span class="tt-ico tt-moon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></svg></span>
+      <span class="thumb"></span>
+    </button>
   </div>
 
-  <div class="container">
-    <div class="group-label first">Sessions</div>
-    <div class="card">
-      <div id="sessionsList" class="sessions-empty">(loading…)</div>
+  <div class="stage">
+    <div class="mc-header">
+      <span class="badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M13 2 4 14h6l-1 8 9-12h-6z"/></svg></span>
+      <span class="mc-title">Mission Control</span>
+      <span class="spacer"></span>
+      <span class="chip"><span class="gdot"></span><span id="activeCount">0 active</span></span>
+      <span class="chip" id="chipBudget" style="display:none"></span>
     </div>
 
-    <div class="group-label">Workflow</div>
-    <div class="grid cols-3">
-      <button class="tile primary" type="button" onclick="run('missioncontrol.claude')">
-        <div class="title">Open Claude</div>
-        <div class="sub">เลือก project → เปิด Claude ใน tmux (ปิด tab ไม่ตาย)</div>
-      </button>
-      <button class="tile" type="button" onclick="run('missioncontrol.budgetPanel')">
-        <div class="title">Budget</div>
-        <div class="sub" id="budgetSub">$0.00 spent</div>
-      </button>
-    </div>
+    <div class="bento">
+      <div class="cell cellA card">
+        <div class="eyebrow-row">
+          <span class="eyebrow">Sessions</span>
+          <button class="mini-btn" type="button" onclick="run('missioncontrol.orchestratorContinue')">Projects</button>
+        </div>
+        <div id="sessionsList" class="sessions-empty">(loading…)</div>
+      </div>
 
-    <div class="group-label">Resources</div>
-    <div class="grid cols-2">
-      <button class="tile" type="button" onclick="run('missioncontrol.teams')">
-        <div class="title">Team Config</div>
-        <div class="sub">list/แก้ทีม · เพิ่มทีม · role/model/สี ต่อ oracle</div>
-      </button>
-      <button class="tile" type="button" onclick="run('missioncontrol.accounts')">
-        <div class="title">Accounts</div>
-        <div class="sub">สลับ subscription login หลาย provider · usage หมดสลับได้</div>
-      </button>
-    </div>
+      <div class="cell cellB card budget" id="budgetCard" title="เปิดหน้า Budget เต็ม">
+        <div class="bhead"><span class="btitle">Budget</span><span class="bcap">· last 7 days</span></div>
+        <div class="bamount" id="budgetAmount">—</div>
+        <div class="bprog" id="budgetProgWrap"><div class="bprog-fill" id="budgetProgFill"></div></div>
+        <div class="bcaption" id="budgetCaption"></div>
+        <div class="bbreak" id="budgetTop"></div>
+        <div class="bnote" id="budgetNote"></div>
+      </div>
 
-    <div class="group-label">Data</div>
-    <div class="grid cols-2">
-      <button class="tile" type="button" onclick="run('missioncontrol.dataView')">
-        <div class="title">Data View</div>
-        <div class="sub">สถานะทุกโปรเจกต์จากไฟล์ .md · table / kanban / timeline</div>
-      </button>
-      <button class="tile" type="button" onclick="run('missioncontrol.openObsidian')">
-        <div class="title">Open in Obsidian</div>
-        <div class="sub">เปิดแอป Obsidian (vault ล่าสุด)</div>
-      </button>
+      <div class="cell cellC card">
+        <div class="eyebrow">Resources</div>
+        <button class="rrow" type="button" onclick="run('missioncontrol.teams')">
+          <span class="ricon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13A4 4 0 0 1 16 11"/></svg></span>
+          <span class="rtext"><span class="rtitle">Team Config</span><span class="rdesc">list/แก้ทีม · เพิ่มทีม · role/model/สี ต่อ oracle</span></span>
+        </button>
+        <button class="rrow" type="button" onclick="run('missioncontrol.accounts')">
+          <span class="ricon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span>
+          <span class="rtext"><span class="rtitle">Accounts</span><span class="rdesc">สลับ subscription login หลาย provider · usage หมดสลับได้</span></span>
+        </button>
+      </div>
+
+      <div class="cell cellD card">
+        <div class="eyebrow">Data</div>
+        <button class="rrow" type="button" onclick="run('missioncontrol.dataView')">
+          <span class="ricon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></svg></span>
+          <span class="rtext"><span class="rtitle">Data View</span><span class="rdesc">สถานะทุกโปรเจกต์จากไฟล์ .md · table / kanban / timeline</span></span>
+        </button>
+        <button class="rrow maw-row" id="mawRow" type="button" onclick="run('missioncontrol.mawToggle')">
+          <span class="ricon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M6 4l14 8-14 8z"/></svg></span>
+          <span class="rtext"><span class="rtitle" id="mawTitle">Start maw ui</span><span class="rdesc">เปิด/ปิด maw ui server (:3456)</span></span>
+        </button>
+        <button class="rrow" type="button" onclick="run('missioncontrol.openObsidian')">
+          <span class="ricon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 2 20 9l-8 13L4 9z"/></svg></span>
+          <span class="rtext"><span class="rtitle">Open in Obsidian</span><span class="rdesc">เปิดแอป Obsidian (vault ล่าสุด)</span></span>
+        </button>
+      </div>
     </div>
   </div>
 
@@ -1085,6 +1133,28 @@ function renderHtml(): string {
 <script>
   const vscode = acquireVsCodeApi();
 
+  var CHEVRON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
+
+  // Theme: manual dark/light override persisted in webview state; when unset,
+  // follow the VS Code theme kind (body carries a vscode-light/-dark class).
+  function initTheme() {
+    var saved = (vscode.getState && vscode.getState()) || {};
+    var t = saved.theme;
+    if (t !== "light" && t !== "dark") {
+      var b = document.body.classList;
+      t = (b.contains("vscode-light") || b.contains("vscode-high-contrast-light")) ? "light" : "dark";
+    }
+    document.documentElement.dataset.theme = t;
+  }
+  function toggleTheme() {
+    var next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+    document.documentElement.dataset.theme = next;
+    var s = (vscode.getState && vscode.getState()) || {};
+    s.theme = next;
+    if (vscode.setState) vscode.setState(s);
+  }
+  initTheme();
+
   function escapeHtml(s) {
     return String(s ?? "")
       .replace(/&/g, "&amp;")
@@ -1092,35 +1162,88 @@ function renderHtml(): string {
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;");
   }
+  // Which session rows are expanded + their last-known windows. Persisted across
+  // the 10s poll re-render so an open row STAYS open (a real toggle) instead of
+  // snapping shut every tick — the "closes on a timeout" the list rebuild caused.
+  var expandedSessions = new Set();
+  var winCache = {};
+  function toggleSess(row) {
+    var name = row.dataset.name;
+    if (row.classList.toggle("open")) {
+      expandedSessions.add(name);
+      if (winCache[name]) renderWindows(name, winCache[name]); // instant from cache
+      vscode.postMessage({ type: "expand_session", name: name }); // + refresh live
+    } else {
+      expandedSessions.delete(name);
+    }
+  }
   function renderSessions(sessions) {
     const root = document.getElementById("sessionsList");
     if (!sessions || !sessions.length) {
       root.className = "sessions-empty";
-      root.textContent = "(no tmux sessions running)";
+      root.textContent = "(no active sessions)";
       return;
     }
     root.className = "";
-    root.innerHTML = sessions.map((s) =>
-      '<div class="session-row" data-name="' + escapeHtml(s.name) + '" data-label="' + escapeHtml(s.label || '') + '">'
-      + '<span class="sdot ' + (s.attached ? 'on' : '') + '"></span>'
-      + '<span class="smeta">'
-      + '<span class="sname">' + escapeHtml(s.label || s.name) + '</span>'
-      + '<span class="ssub">' + escapeHtml((s.label && s.label !== s.name ? s.name + ' · ' : '') + s.windows + ' win · ' + s.cmd + '  ' + s.cwd) + '</span>'
-      + '</span>'
-      + '<button class="session-kill" title="Kill session" data-kill="' + escapeHtml(s.name) + '">✕</button>'
-      + '</div>'
+    root.innerHTML = sessions.map((s) => {
+      var meta = (s.label && s.label !== s.name ? s.name + ' · ' : '') + s.windows + ' win · ' + s.cmd;
+      var pathPart = s.cwd ? '  ·  ' + escapeHtml(s.cwd) : '';
+      return '<div class="srow" data-name="' + escapeHtml(s.name) + '" data-label="' + escapeHtml(s.label || '') + '">'
+        + '<div class="srow-head">'
+        +   '<span class="sdot' + (s.attached ? ' on' : '') + '"></span>'
+        +   '<span class="smeta"><span class="sname">' + escapeHtml(s.label || s.name) + '</span>'
+        +     '<span class="ssub">' + escapeHtml(meta) + '</span></span>'
+        +   '<button class="skill" title="Kill session" data-kill="' + escapeHtml(s.name) + '">✕</button>'
+        +   '<span class="schev">' + CHEVRON + '</span>'
+        + '</div>'
+        + '<div class="spreview" title="Attach"><span class="dol">$</span> tmux attach -t ' + escapeHtml(s.name) + pathPart + '</div>'
+        + '<div class="swins"></div>'
+        + '</div>';
+    }).join('');
+    root.querySelectorAll('.srow').forEach((row) => {
+      row.querySelector('.srow-head').addEventListener('click', (e) => {
+        if (e.target.closest('.skill')) return; // kill handled separately
+        toggleSess(row);
+      });
+      var prev = row.querySelector('.spreview');
+      if (prev) prev.addEventListener('click', () => {
+        vscode.postMessage({ type: 'attach_session', name: row.dataset.name, label: row.dataset.label });
+      });
+      var kill = row.querySelector('.skill');
+      if (kill) kill.addEventListener('click', (e) => {
+        e.stopPropagation();
+        vscode.postMessage({ type: 'kill_session', name: kill.dataset.kill });
+      });
+    });
+    // Re-apply expansion after the poll rebuilds this list, so open rows stay
+    // open. Drop names that are no longer live to keep the set from growing.
+    var liveNames = new Set(sessions.map((s) => s.name));
+    expandedSessions.forEach((name) => { if (!liveNames.has(name)) expandedSessions.delete(name); });
+    root.querySelectorAll('.srow').forEach((row) => {
+      var name = row.dataset.name;
+      if (!expandedSessions.has(name)) return;
+      row.classList.add('open');
+      if (winCache[name]) renderWindows(name, winCache[name]);
+      vscode.postMessage({ type: 'expand_session', name: name }); // keep windows fresh
+    });
+  }
+  // Fill an expanded row with its real tmux windows (from expand_session).
+  function renderWindows(name, windows) {
+    winCache[name] = windows || [];
+    const root = document.getElementById("sessionsList");
+    var sel = (window.CSS && CSS.escape) ? CSS.escape(name) : name;
+    var row = root && root.querySelector('.srow[data-name="' + sel + '"]');
+    if (!row) return;
+    var wins = row.querySelector('.swins');
+    if (!wins) return;
+    wins.dataset.loaded = "1";
+    if (!windows || !windows.length) {
+      wins.innerHTML = '<div class="swin empty">(no windows)</div>';
+      return;
+    }
+    wins.innerHTML = windows.map((w) =>
+      '<div class="swin"><span class="wchev">▸</span>' + escapeHtml(w.index + ':' + w.name + ' ' + w.cmd) + '</div>'
     ).join('');
-    root.querySelectorAll('.session-row').forEach((el) => {
-      el.addEventListener('click', () => {
-        vscode.postMessage({ type: 'attach_session', name: el.dataset.name, label: el.dataset.label });
-      });
-    });
-    root.querySelectorAll('.session-kill').forEach((btn) => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation(); // don't trigger the row's attach click
-        vscode.postMessage({ type: 'kill_session', name: btn.dataset.kill });
-      });
-    });
   }
 
   function run(command) { vscode.postMessage({ type: "run", command }); }
@@ -1274,6 +1397,56 @@ function renderHtml(): string {
     document.getElementById("orchScreen").style.display = "none";
   }
 
+  // "resets in Nd / Nh" from the quota window's reset ISO timestamp.
+  function humanReset(iso) {
+    if (!iso) return "";
+    var t = new Date(iso).getTime();
+    if (isNaN(t)) return "";
+    var diff = t - Date.now();
+    if (diff <= 0) return "soon";
+    var days = Math.floor(diff / 86400000);
+    if (days >= 1) return "in " + days + "d";
+    var hrs = Math.floor(diff / 3600000);
+    if (hrs >= 1) return "in " + hrs + "h";
+    return "in <1h";
+  }
+  var BAR_COLORS = ["var(--accent2)", "var(--accent)", "var(--faint)"];
+  function setBudget(m) {
+    var amt = document.getElementById("budgetAmount");
+    if (amt) amt.textContent = m.last7Fmt || "$0.00";
+    var wrap = document.getElementById("budgetProgWrap");
+    var fill = document.getElementById("budgetProgFill");
+    var cap = document.getElementById("budgetCaption");
+    var chip = document.getElementById("chipBudget");
+    if (m.quota) {
+      var pct = Math.max(0, Math.min(100, Math.round(m.quota.usedPct)));
+      if (wrap) wrap.style.display = "block";
+      if (fill) fill.style.width = pct + "%";
+      var reset = humanReset(m.quota.resetsAt);
+      if (cap) cap.textContent = pct + "% of weekly limit used" + (reset ? " · resets " + reset : "");
+      if (chip) { chip.style.display = ""; chip.textContent = pct + "% of weekly limit used"; }
+    } else {
+      // Logged out / offline / rate-limited — degrade to just the $ + breakdown.
+      if (wrap) wrap.style.display = "none";
+      if (cap) cap.textContent = "";
+      if (chip) chip.style.display = "none";
+    }
+    var top = document.getElementById("budgetTop");
+    if (top) {
+      var rows = m.top || [];
+      top.innerHTML = rows.length
+        ? rows.map((t, i) =>
+            '<div class="prow"><div class="prow-line"><span class="pname">' + escapeHtml(t.name) + '</span>'
+            + '<span class="pcost">' + escapeHtml(t.costFmt) + '</span></div>'
+            + '<div class="pbar"><div class="pbar-fill" style="width:' + Math.round((t.frac || 0) * 100)
+            + '%;background:' + BAR_COLORS[i % 3] + '"></div></div></div>'
+          ).join('')
+        : '<div class="bempty">(no spend in the last 7 days)</div>';
+    }
+    var note = document.getElementById("budgetNote");
+    if (note) note.textContent = m.providerNote || "";
+  }
+
   window.addEventListener("message", (event) => {
     const m = event.data;
     if (!m || typeof m.type !== "string") return;
@@ -1285,13 +1458,22 @@ function renderHtml(): string {
       const st = document.getElementById("statusText");
       if (st) st.textContent = m.online ? "Running" : "Stopped";
     } else if (m.type === "budget") {
-      const sub = document.getElementById("budgetSub");
-      sub.textContent = "$" + (m.spent_usd ?? 0).toFixed(2) + " spent";
+      setBudget(m);
     } else if (m.type === "skill_count") {
       const sub = document.getElementById("skillsSub");
       if (sub) sub.textContent = (m.enabled ?? 0) + " active / " + (m.total ?? 0) + " total";
     } else if (m.type === "sessions") {
-      renderSessions(m.sessions || []);
+      const list = m.sessions || [];
+      renderSessions(list);
+      const ac = document.getElementById("activeCount");
+      if (ac) ac.textContent = list.length + " active";
+    } else if (m.type === "session_windows") {
+      renderWindows(m.name, m.windows || []);
+    } else if (m.type === "maw") {
+      var mt = document.getElementById("mawTitle");
+      if (mt) mt.textContent = m.up ? "Stop maw ui" : "Start maw ui";
+      var mr = document.getElementById("mawRow");
+      if (mr) mr.classList.toggle("running", !!m.up);
     } else if (m.type === "orch_screen") {
       renderOrchScreen(m);
     } else if (m.type === "orch_close") {
@@ -1300,6 +1482,9 @@ function renderHtml(): string {
       fillGitAuto(m.path, m.message);
     }
   });
+
+  document.getElementById("themeToggle").addEventListener("click", toggleTheme);
+  document.getElementById("budgetCard").addEventListener("click", () => run("missioncontrol.budgetPanel"));
 
   // Tell host we're ready for initial data.
   vscode.postMessage({ type: "ready" });

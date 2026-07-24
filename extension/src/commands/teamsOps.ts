@@ -6,6 +6,7 @@ import { run, type RunResult } from "./gitOps";
 import { parseOraclePath } from "./teams";
 import { readTeamModels, writeTeamModels } from "./teamModels";
 import {
+  awakenStatusFromClaudeMd,
   createArgs,
   deleteArgs,
   diffMembers,
@@ -16,6 +17,7 @@ import {
   reconcileToolMembers,
   removeArgs,
   syncCharterMembers,
+  type AwakenStatus,
   type TeamDetail,
   type TeamMember,
   type ToolMember,
@@ -76,6 +78,30 @@ function resolvePsi(base: string): string {
  *  (its manifest.json is what makes maw say "already exists"). */
 function teamVaultDir(name: string): string {
   return path.join(resolvePsi(SOULBREW_DIR), "memory", "mailbox", "teams", name);
+}
+
+/** An oracle's repo dir from the fleet registry (oracles.json local_path).
+ *  Expands a leading ~; returns null if the oracle isn't registered / has no path. */
+function oracleLocalPath(name: string): string | null {
+  const data = readJson<{ oracles?: { name?: string; local_path?: string }[] }>(ORACLES_JSON);
+  const p = (data?.oracles ?? []).find((o) => o?.name === name)?.local_path;
+  if (!p) return null;
+  return p.startsWith("~") ? path.join(os.homedir(), p.slice(1)) : p;
+}
+
+/** Whether an oracle has a real identity or is still a bare bud scaffold, read
+ *  from its CLAUDE.md (best-effort — missing repo/file → "unknown"). Display-only:
+ *  drives the panel's "identity set up" highlight. */
+function readAwakenStatus(name: string): AwakenStatus {
+  const dir = oracleLocalPath(name);
+  if (!dir) return "unknown";
+  let text: string | null = null;
+  try {
+    text = fs.readFileSync(path.join(dir, "CLAUDE.md"), "utf8");
+  } catch {
+    return "unknown";
+  }
+  return awakenStatusFromClaudeMd(text);
 }
 
 /** Existing oracle names from the fleet registry (used to decide whether an
@@ -200,7 +226,10 @@ export function readTeamDetailSync(name: string): TeamDetail {
   // sidecar is the source of truth for a member's picked model. This makes the panel
   // AND every launch reader (teamUp, orchestrator) see the model that survives a Team up.
   const models = readTeamModels(name);
-  const members = merged.map((m) => (models[m.oracle] ? { ...m, model: models[m.oracle] } : m));
+  const members = merged.map((m) => {
+    const withModel = models[m.oracle] ? { ...m, model: models[m.oracle] } : m;
+    return { ...withModel, awaken: readAwakenStatus(m.oracle) };
+  });
   return { name, description: tool?.description ?? "", members };
 }
 
@@ -308,6 +337,32 @@ export async function saveTeam(
   } catch (e) {
     errors.push(`models sidecar: ${String(e)}`);
   }
+  return { ok: errors.length === 0, errors };
+}
+
+/** Prepare a BRAND-NEW oracle for the awaken ritual: scaffold its repo, invite it
+ *  to the team with the given role, and sync the charter so `maw team up --only
+ *  <oracle>` can wake it. Does NOT wake or fire /awaken — the vscode launcher runs
+ *  that in a terminal. REFUSES an oracle that already exists: awaken (birth) would
+ *  clobber an existing identity, so this path is birth-only. */
+export async function prepareAwakenMember(
+  team: string,
+  oracle: string,
+  role: string,
+): Promise<SaveResult> {
+  if (!isSafeTeamName(oracle)) return { ok: false, errors: [`ชื่อ oracle ไม่ถูกต้อง: '${oracle}'`] };
+  if (existingOracleNames().has(oracle)) {
+    return {
+      ok: false,
+      errors: [`'${oracle}' มีอยู่แล้ว — awaken เปล่าจะทับ identity เดิม (ทำได้เฉพาะ oracle เกิดใหม่)`],
+    };
+  }
+  const errors: string[] = [];
+  // scaffold (maw bud --scaffold-only) + oracle-invite with the role — same path Save uses.
+  await ensureAndInvite(team, [{ oracle, role: role || "member" }], errors);
+  // Charter must list the new member or `maw team up --only <oracle>` finds nothing.
+  const roster = readTeamDetailSync(team).members.map((m) => ({ oracle: m.oracle, role: m.role }));
+  syncCharter(team, roster, errors);
   return { ok: errors.length === 0, errors };
 }
 

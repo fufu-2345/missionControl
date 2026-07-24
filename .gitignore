@@ -37,6 +37,11 @@ Thumbs.db
 # Mission Control extension build artifacts (source is tracked; out/ is generated)
 /extension/out/
 
+# Dead prototype: node-pty bridge (63MB native tree) + vendored xterm — abandoned
+# for the transcript-chat webview (media/mirror/chat.js). Kept locally, never committed.
+/extension/scripts/mirror-bridge/
+/extension/media/xterm/
+
 todo.md
 
 # Oracle / maw runtime artifacts (inbox, team mailbox/manifest, spawn prompts) — machine-local + transient; oracle จริงอยู่ ~/.oracle

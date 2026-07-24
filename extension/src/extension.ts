@@ -24,6 +24,7 @@ import { PROJECT_STATE_KEY, setCurrentProjectId } from "./projectState";
 import { registerStatusBar } from "./statusBar";
 import { openBudgetPanel } from "./webview/budget";
 import { openDataViewPanel } from "./webview/dataView";
+import { openMirrorPanel } from "./webview/mirror";
 import { openOrchestratorPanel } from "./webview/orchestrator";
 import { registerSidebar } from "./webview/sidebar";
 import { openIdeasPanel, type Idea } from "./webview/ideas";
@@ -60,6 +61,9 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("missioncontrol.settings", () => settingsCommand(context)),
     vscode.commands.registerCommand("missioncontrol.dashboard", () => dashboardCommand(context)),
     vscode.commands.registerCommand("missioncontrol.claude", () => claudeCommand(context)),
+    // Open a live Claude REPL inside a webview (xterm mirror + in-chat context
+    // meter + Thai-safe HTML composer + file attach). Sibling to "Open Claude".
+    vscode.commands.registerCommand("missioncontrol.mirror", () => openMirrorPanel(context)),
     // Attach a file/image to a live Claude REPL: pick it in VS Code, type its
     // absolute path into the tmux pane; Claude Code reads it from disk.
     vscode.commands.registerCommand("missioncontrol.attachToClaude", () => attachToClaudeCommand()),

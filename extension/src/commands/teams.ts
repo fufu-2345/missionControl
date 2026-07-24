@@ -284,5 +284,10 @@ export function buildTmuxLaunchCommand(
   if (label) parts.push(`tmux set-option -t ${shSingleQuote(session)} @orches_label ${shSingleQuote(label)} ;`);
   if (layout) parts.push(`${layout} ;`);
   if (attach) parts.push(`tmux attach -t ${shSingleQuote(`=${session}`)} ;`);
-  return parts.length ? `${head} && { ${parts.join(" ")} }` : head;
+  // Trailing `true;` so the brace group's exit status is ALWAYS 0 once `new-session`
+  // succeeded: the label/layout steps are best-effort and their non-zero exit must NOT make
+  // the headless launcher (cp.execSync, which throws on non-zero) report a false "launch
+  // failed" while leaving the session orphaned. new-session failure still propagates (it is
+  // before the &&, so the group never runs).
+  return parts.length ? `${head} && { ${parts.join(" ")} true; }` : head;
 }

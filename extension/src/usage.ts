@@ -762,3 +762,30 @@ export function collapseProjectDayDetail(u: UsageSummary, absRoot: string): Reco
   }
   return out;
 }
+
+/** Top-N projects by summed cost over the hours on/after `cutoffMs` (a local-day
+ *  boundary — same rolling-window convention as buildBudgetView's `last7`). Folds
+ *  every cwd onto its project root via resolveProject; cwds with no resolvable
+ *  project are skipped. Powers the dashboard Bento budget card's weekly breakdown. */
+export function topProjectsByRange(
+  byProjectHour: Record<string, Record<string, Bucket>>,
+  cutoffMs: number,
+  n: number,
+): { name: string; cost: number }[] {
+  const byRoot: Record<string, { name: string; cost: number }> = {};
+  for (const cwd of Object.keys(byProjectHour)) {
+    const proj = resolveProject(cwd);
+    if (!proj) continue;
+    const hours = byProjectHour[cwd];
+    for (const hourKey of Object.keys(hours)) {
+      // hourKey is "YYYY-MM-DD HH:00" LOCAL; compare the day at local midnight.
+      const t = new Date(hourKey.slice(0, 10) + "T00:00:00").getTime();
+      if (Number.isNaN(t) || t < cutoffMs) continue;
+      const cur = byRoot[proj.root] ?? (byRoot[proj.root] = { name: proj.name, cost: 0 });
+      cur.cost += hours[hourKey].cost;
+    }
+  }
+  return Object.values(byRoot)
+    .sort((a, b) => b.cost - a.cost)
+    .slice(0, n);
+}

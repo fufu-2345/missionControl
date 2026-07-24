@@ -105,6 +105,10 @@
         "title": "Mission Control: Open Claude"
       },
       {
+        "command": "missioncontrol.mirror",
+        "title": "Mission Control: Open Claude (Chat)"
+      },
+      {
         "command": "missioncontrol.attachToClaude",
         "title": "Mission Control: Attach File/Image to Claude"
       },

@@ -42,11 +42,29 @@ export const DEFAULT_ROLE = "member";
 // dropdown pre-selects a concrete version and maw launches `claude --model claude-sonnet-5`.
 export const DEFAULT_MODEL = "claude-sonnet-5";
 
+/** Whether an oracle has had its identity set up.
+ *  - "identity" — CLAUDE.md has a real identity (via /awaken OR a hand edit)
+ *  - "stub"     — still the bare bud scaffold (identity not defined yet)
+ *  - "unknown"  — no repo / CLAUDE.md found for this oracle */
+export type AwakenStatus = "identity" | "stub" | "unknown";
+
+/** Classify an oracle's awaken state from its CLAUDE.md text. `maw bud` writes
+ *  the literal placeholder `(to be defined by /awaken)` into the Purpose stub;
+ *  /awaken (or a manual edit) replaces it. So the placeholder's PRESENCE is the
+ *  reliable "still bare" signal — it survives regardless of whether identity was
+ *  set up by the ritual or by hand (the brew oracles were hand-edited, so a
+ *  ritual-only marker like `## Demographics` would false-negative on them). */
+export function awakenStatusFromClaudeMd(text: string | null | undefined): AwakenStatus {
+  if (text == null || text.trim() === "") return "unknown";
+  return text.includes("(to be defined by /awaken)") ? "stub" : "identity";
+}
+
 export interface TeamMember {
   oracle: string;
   role: string;
   model?: string; // run-config (tool store); undefined if the team never ran
   color?: string; // run-config (tool store)
+  awaken?: AwakenStatus; // identity state, read from the oracle's CLAUDE.md (display-only)
 }
 
 /** A tool-store member record — the shape of an entry in

@@ -307,8 +307,10 @@ function runInTerminal(term: vscode.Terminal, command: string): void {
  *  ATTACH ONLY, no new kickoff, no re-dispatch — and return true. Returns false
  *  when nothing live is found → caller runs the normal team → orchestrator →
  *  launch flow. This is what makes clicking a "doing" project re-enter its
- *  running session instead of spawning a conflicting one on top. */
-export function attachToProject(project: ResumableProject, preferSession?: string): boolean {
+ *  running session instead of spawning a conflicting one on top. Returns the
+ *  attached session name (truthy) so the caller can open the chat for it; null
+ *  when nothing live was found. */
+export function attachToProject(project: ResumableProject, preferSession?: string): string | null {
   const meta = readMeta(project.path);
   const team = meta?.team ? readTeams().find((t) => t.name === meta.team) : undefined;
   const orch = team?.orchestrators[0];
@@ -322,11 +324,11 @@ export function attachToProject(project: ResumableProject, preferSession?: strin
     ...(orch && isSafeOracleName(orch) ? [readSessionPin(orch)?.trim() || `claude-${orch}`] : []),
   ];
   const session = candidates.find((s) => /^[\w.-]+$/.test(s) && tmuxHasSession(s));
-  if (!session) return false; // nothing awake → let the caller launch fresh
+  if (!session) return null; // nothing awake → let the caller launch fresh
   const prev = _orchTerminals.get(session);
   if (prev && prev.exitStatus === undefined) {
     prev.show(false); // already have its tab open → just reveal it
-    return true;
+    return session;
   }
   const term = vscode.window.createTerminal({
     name: orch ? `orchestrator: ${orch}` : `orchestrator: ${session}`,
@@ -336,7 +338,7 @@ export function attachToProject(project: ResumableProject, preferSession?: strin
   trackClaudeTerminal(term, session); // context pill follows this orchestrator REPL
   term.show(false);
   runInTerminal(term, `tmux attach -t '=${session}'`);
-  return true;
+  return session;
 }
 
 export function tmuxHasSession(session: string): boolean {
@@ -456,11 +458,15 @@ function nextTwinSession(base: string): string {
 // inputs (resolveContinueTarget, marker fns, decideCancelOutcome) are covered by
 // continueRun.test.ts; verification here is `npm run compile` + manual E2E.
 
-/** tmux #{session_created} (epoch seconds) for a session, or undefined. */
+/** tmux #{session_created} (epoch seconds) for a session, or undefined.
+ *  Target is `=<session>:` (exact session + active window) — a bare `=<session>` makes
+ *  display-message resolve built-in session vars to EMPTY for a DETACHED session (tmux
+ *  3.4 quirk), which would return undefined here and poison the zombie-guard now that
+ *  orchestrator sessions are created detached. The `:` restores session context. */
 export function sessionCreatedAt(session: string): number | undefined {
   try {
     const out = cp
-      .execFileSync("tmux", ["display-message", "-p", "-t", `=${session}`, "#{session_created}"], {
+      .execFileSync("tmux", ["display-message", "-p", "-t", `=${session}:`, "#{session_created}"], {
         encoding: "utf8",
       })
       .trim();
@@ -622,7 +628,7 @@ export async function launchOrchestrator(opts: {
   project?: ResumableProject;
   askMode?: boolean;
   projectName?: string;
-}): Promise<{ error?: string; cancelled?: boolean }> {
+}): Promise<{ error?: string; cancelled?: boolean; session?: string; terminal?: vscode.Terminal }> {
   const { orch, team, mode, project, askMode = false, projectName } = opts;
   if (!isSafeOracleName(orch)) return { error: `ชื่อ orchestrator ไม่ปลอดภัย: ${orch}` };
   if (mode === "resume" && !project) return { error: "resume แต่ไม่มี project" };
@@ -649,7 +655,8 @@ export async function launchOrchestrator(opts: {
     annotateLiveState([project]);
     const driven = projectDrivenState(project);
     if (driven.state !== "none") {
-      if (attachToProject(project, driven.session)) return {};
+      const attached = attachToProject(project, driven.session);
+      if (attached) return { session: attached }; // real attached session (driven.session is undefined for the 'worker' state)
       return {
         error: `'${project.name}' กำลังถูกขับโดย session '${driven.session ?? "?"}' อยู่แล้ว — เข้า session นั้นแทน (ไม่สร้างซ้ำ)`,
       };
@@ -712,22 +719,31 @@ export async function launchOrchestrator(opts: {
   const command = inject
     ? `tmux attach -t '=${session}'`
     : buildTmuxLaunchCommand(
-        orch, repoPath, kickoff, session, workers, true, orchesLabel,
+        // attach=FALSE → create the session DETACHED. The chat webview is the sole
+        // interface; an ATTACHED terminal reacts to every send-keys keystroke + pane
+        // toggle and yanks editor focus back to the (garbled-Thai) terminal. Detached
+        // → the terminal only bootstraps, then doLaunch disposes it once the session is up.
+        orch, repoPath, kickoff, session, workers, false, orchesLabel,
         orchestratorModel(team.name, orch),
       );
 
-  // One editor tab per SESSION (twin gets its own) — never touch other tabs.
+  // CHAT-FIRST: the launch command creates the tmux session DETACHED (attach=false),
+  // so it is fire-and-forget — tmux daemonizes the session and the command returns at
+  // once. There is nothing interactive to host, so we run it HEADLESS (no editor
+  // terminal). A terminal here was vestigial once attach became false AND could not be
+  // disposed reliably — it lingered as a stray tab and, being the only other editor tab,
+  // kept yanking focus back to the garbled-Thai REPL whenever the user typed in the
+  // chat. The Claude Chat webview is the sole interface. Drop any stale bootstrap
+  // terminal for this session left by an older build.
   const prevTerm = _orchTerminals.get(session);
   if (prevTerm && prevTerm.exitStatus === undefined) prevTerm.dispose();
-  const term = vscode.window.createTerminal({
-    name: `orchestrator: ${orch}${session === baseSession ? "" : ` · ${session}`}`,
-    location: vscode.TerminalLocation.Editor,
-  });
-  _orchTerminals.set(session, term);
-  trackClaudeTerminal(term, session); // context pill follows this orchestrator REPL
-  term.show(false);
-  runInTerminal(term, command);
-  return {};
+  _orchTerminals.delete(session);
+  try {
+    cp.execSync(command, { stdio: "ignore", env: process.env, timeout: 15000 });
+  } catch (e) {
+    return { error: `เปิด session ไม่สำเร็จ: ${(e as Error).message}` };
+  }
+  return { session };
 }
 
 export async function startOrchestratorCommand(_context: vscode.ExtensionContext) {

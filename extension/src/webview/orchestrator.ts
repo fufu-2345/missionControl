@@ -22,6 +22,7 @@ import { removeProjectDir } from "../commands/deleteProject";
 import { listDetailDocs, resolveProjectFile, renderMarkdown } from "../commands/projectDocs";
 import { listBackedUpProjects, type BackupEntry } from "../commands/docsBackup";
 import { openDataViewPanel } from "./dataView";
+import { openMirrorPanel } from "./mirror";
 import {
   isPreviewAvailable,
   isPreviewRunning,
@@ -393,6 +394,15 @@ function pickTeam(panel: vscode.WebviewPanel, name: string, askMode = false) {
   }
 }
 
+/** Open the Claude Chat for `sess` AUTOMATICALLY, deferred a short beat so the just-
+ *  created (detached) tmux session has a moment to come up before the chat's first poll.
+ *  No terminal is involved anymore — the launch runs HEADLESS (see launchOrchestrator) —
+ *  so there is no blank-terminal collision and nothing to dispose; the chat is the sole
+ *  interface. No poll, no user click. */
+function openChatDeferred(ctx: vscode.ExtensionContext, sess: string): void {
+  setTimeout(() => void openMirrorPanel(ctx, sess), 800);
+}
+
 async function doLaunch(panel: vscode.WebviewPanel, orch: string, askMode = false) {
   if (!_st?.team) return;
   const r = await launchOrchestrator({
@@ -409,10 +419,13 @@ async function doLaunch(panel: vscode.WebviewPanel, orch: string, askMode = fals
     vscode.window.showErrorMessage(`Orchestrator: ${r.error}`);
     return;
   }
+  // Auto-open the Claude Chat (deferred a short beat so the detached session comes up
+  // first). The launch is headless — no terminal — so the chat is the only tab.
+  if (_ctx && r.session) openChatDeferred(_ctx, r.session);
   vscode.window.showInformationMessage(
     `Orchestrator: ปลุก '${orch}' (team ${_st.team.name})` +
       (_st.project ? ` · resume ${_st.project.name}` : "") +
-      " — เปิด terminal คุย requirement ได้เลย",
+      " — Claude Chat กำลังเปิด…",
   );
   panel.dispose();
 }
@@ -497,9 +510,12 @@ export function openOrchestratorPanel(context: vscode.ExtensionContext): vscode.
         annotateLiveState([p]);
         const driven = projectDrivenState(p);
         if (driven.state !== "none") {
-          if (attachToProject(p, driven.session)) {
+          const attached = attachToProject(p, driven.session);
+          if (attached) {
+            // deferred auto-open (session already live).
+            if (_ctx) openChatDeferred(_ctx, attached);
             vscode.window.showInformationMessage(
-              `Orchestrator: attach เข้า session '${driven.session ?? ""}' ที่ขับ '${p.name}' อยู่ (ไม่สร้างใหม่)`,
+              `Orchestrator: attach เข้า session '${attached}' ที่ขับ '${p.name}' อยู่ (ไม่สร้างใหม่)`,
             );
             panel.dispose();
             return;
